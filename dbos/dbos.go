@@ -46,24 +46,25 @@ type Config struct {
 	// sqlite::memory:). Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
 	// SQLite URLs additionally require importing the driver package:
 	// import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
-	DatabaseURL                  string
-	SystemDBPool                 *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
-	SQLiteSystemDB               *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
-	DatabaseSchema               string          // Database schema name (defaults to "dbos")
-	Logger                       *slog.Logger    // Custom logger instance (defaults to a new slog logger)
-	ConductorURL                 string          // DBOS conductor service URL (optional)
-	ConductorAPIKey              string          // DBOS conductor API key (optional)
-	ConductorExecutorMetadata    map[string]any  // Metadata associated with this executor that may be used to identify it on the Conductor dashboard. Must be JSON-serializable.
-	ApplicationVersion           string          // Application version (optional, overridden by DBOS__APPVERSION env var)
-	ExecutorID                   string          // Executor ID (optional, overridden by DBOS__VMID env var)
-	EnablePatching               bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
-	Serializer                   Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
-	SchedulerPollingInterval     time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
-	SystemDBStartupTimeout       time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
-	NotificationCoalesceInterval time.Duration   // Controls how often stream-write and set-event notifications are batched
-	SkipMigrations               bool            // Verify the system database schema on launch instead of creating and migrating it
-	namelessOwner                bool            // Act for no specific application: write unclaimed rows, matches all. Used by clients without an AppName.
-	isClient                     bool            // Client handle: runs no workflows, so enqueues leave the version unset by default.
+	DatabaseURL                    string
+	SystemDBPool                   *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
+	SQLiteSystemDB                 *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
+	DatabaseSchema                 string          // Database schema name (defaults to "dbos")
+	Logger                         *slog.Logger    // Custom logger instance (defaults to a new slog logger)
+	ConductorURL                   string          // DBOS conductor service URL (optional)
+	ConductorAPIKey                string          // DBOS conductor API key (optional)
+	ConductorExecutorMetadata      map[string]any  // Metadata associated with this executor that may be used to identify it on the Conductor dashboard. Must be JSON-serializable.
+	ApplicationVersion             string          // Application version (optional, overridden by DBOS__APPVERSION env var)
+	ExecutorID                     string          // Executor ID (optional, overridden by DBOS__VMID env var)
+	EnablePatching                 bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
+	Serializer                     Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
+	SchedulerPollingInterval       time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
+	SystemDBStartupTimeout         time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
+	SystemDBIdleTransactionTimeout time.Duration   // Postgres idle_in_transaction_session_timeout for the connections DBOS creates (defaults to 1 minute; negative leaves the server setting)
+	NotificationCoalesceInterval   time.Duration   // Controls how often stream-write and set-event notifications are batched
+	SkipMigrations                 bool            // Verify the system database schema on launch instead of creating and migrating it
+	namelessOwner                  bool            // Act for no specific application: write unclaimed rows, matches all. Used by clients without an AppName.
+	isClient                       bool            // Client handle: runs no workflows, so enqueues leave the version unset by default.
 }
 
 var applicationNamePattern = regexp.MustCompile(`^[a-z0-9-_]{3,256}$`)
@@ -87,30 +88,34 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	if inputConfig.SystemDBStartupTimeout < 0 {
 		return nil, fmt.Errorf("systemDBStartupTimeout cannot be negative")
 	}
+	if inputConfig.SystemDBIdleTransactionTimeout > sysdb.MaxIdleTransactionTimeout {
+		return nil, fmt.Errorf("systemDBIdleTransactionTimeout cannot exceed %s", sysdb.MaxIdleTransactionTimeout)
+	}
 	if inputConfig.NotificationCoalesceInterval < 0 || (inputConfig.NotificationCoalesceInterval > 0 && inputConfig.NotificationCoalesceInterval < sysdb.MinNotificationCoalesceInterval) {
 		return nil, fmt.Errorf("notificationCoalesceInterval must be at least %s, got %s", sysdb.MinNotificationCoalesceInterval, inputConfig.NotificationCoalesceInterval)
 	}
 
 	dbosConfig := &Config{
-		DatabaseURL:                  inputConfig.DatabaseURL,
-		AppName:                      inputConfig.AppName,
-		DatabaseSchema:               inputConfig.DatabaseSchema,
-		SkipMigrations:               inputConfig.SkipMigrations,
-		Logger:                       inputConfig.Logger,
-		ConductorURL:                 inputConfig.ConductorURL,
-		ConductorAPIKey:              inputConfig.ConductorAPIKey,
-		ConductorExecutorMetadata:    inputConfig.ConductorExecutorMetadata,
-		ApplicationVersion:           inputConfig.ApplicationVersion,
-		ExecutorID:                   inputConfig.ExecutorID,
-		SystemDBPool:                 inputConfig.SystemDBPool,
-		SQLiteSystemDB:               inputConfig.SQLiteSystemDB,
-		EnablePatching:               inputConfig.EnablePatching,
-		Serializer:                   inputConfig.Serializer,
-		SchedulerPollingInterval:     inputConfig.SchedulerPollingInterval,
-		SystemDBStartupTimeout:       inputConfig.SystemDBStartupTimeout,
-		NotificationCoalesceInterval: inputConfig.NotificationCoalesceInterval,
-		namelessOwner:                inputConfig.namelessOwner,
-		isClient:                     inputConfig.isClient,
+		DatabaseURL:                    inputConfig.DatabaseURL,
+		AppName:                        inputConfig.AppName,
+		DatabaseSchema:                 inputConfig.DatabaseSchema,
+		SkipMigrations:                 inputConfig.SkipMigrations,
+		Logger:                         inputConfig.Logger,
+		ConductorURL:                   inputConfig.ConductorURL,
+		ConductorAPIKey:                inputConfig.ConductorAPIKey,
+		ConductorExecutorMetadata:      inputConfig.ConductorExecutorMetadata,
+		ApplicationVersion:             inputConfig.ApplicationVersion,
+		ExecutorID:                     inputConfig.ExecutorID,
+		SystemDBPool:                   inputConfig.SystemDBPool,
+		SQLiteSystemDB:                 inputConfig.SQLiteSystemDB,
+		EnablePatching:                 inputConfig.EnablePatching,
+		Serializer:                     inputConfig.Serializer,
+		SchedulerPollingInterval:       inputConfig.SchedulerPollingInterval,
+		SystemDBStartupTimeout:         inputConfig.SystemDBStartupTimeout,
+		SystemDBIdleTransactionTimeout: inputConfig.SystemDBIdleTransactionTimeout,
+		NotificationCoalesceInterval:   inputConfig.NotificationCoalesceInterval,
+		namelessOwner:                  inputConfig.namelessOwner,
+		isClient:                       inputConfig.isClient,
 	}
 
 	if dbosConfig.ConductorExecutorMetadata != nil {
@@ -138,6 +143,9 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 	if dbosConfig.SystemDBStartupTimeout == 0 {
 		dbosConfig.SystemDBStartupTimeout = _DEFAULT_SYSTEM_DB_STARTUP_TIMEOUT
+	}
+	if dbosConfig.SystemDBIdleTransactionTimeout == 0 {
+		dbosConfig.SystemDBIdleTransactionTimeout = sysdb.DefaultIdleTransactionTimeout
 	}
 	if dbosConfig.NotificationCoalesceInterval == 0 {
 		dbosConfig.NotificationCoalesceInterval = sysdb.DefaultNotificationCoalesceInterval
@@ -670,6 +678,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		Logger:                       initExecutor.logger,
 		AppName:                      ownerAppName,
 		ConnectionAppName:            config.AppName,
+		IdleTransactionTimeout:       config.SystemDBIdleTransactionTimeout,
 		NotificationCoalesceInterval: config.NotificationCoalesceInterval,
 		EncodeScheduledInput: func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error) {
 			ser := resolveEncoder(ctx)
@@ -750,14 +759,15 @@ type ClientConfig struct {
 	// Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
 	// SQLite URLs additionally require importing the driver package:
 	// import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
-	DatabaseURL            string
-	AppName                string          // The application this client acts on behalf of. Leave empty to list all workflows, but beware that writing will serve all applications.
-	SystemDBPool           *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
-	SQLiteSystemDB         *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
-	DatabaseSchema         string          // Database schema name (defaults to "dbos")
-	Logger                 *slog.Logger    // Optional custom logger
-	Serializer             Serializer[any] // Optional custom serializer (defaults to JSON)
-	SystemDBStartupTimeout time.Duration   // Maximum time for system-database connection and schema verification (defaults to 2 minutes)
+	DatabaseURL                    string
+	AppName                        string          // The application this client acts on behalf of. Leave empty to list all workflows, but beware that writing will serve all applications.
+	SystemDBPool                   *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
+	SQLiteSystemDB                 *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
+	DatabaseSchema                 string          // Database schema name (defaults to "dbos")
+	Logger                         *slog.Logger    // Optional custom logger
+	Serializer                     Serializer[any] // Optional custom serializer (defaults to JSON)
+	SystemDBStartupTimeout         time.Duration   // Maximum time for system-database connection and schema verification (defaults to 2 minutes)
+	SystemDBIdleTransactionTimeout time.Duration   // Postgres idle_in_transaction_session_timeout for the connections the client creates (defaults to 1 minute; negative leaves the server setting)
 }
 
 // NewClient creates a new DBOS client with the provided configuration.
@@ -782,17 +792,18 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 		appName = "dbos-client" // Connection label only
 	}
 	dbosCtx, err := NewContext(ctx, Config{
-		DatabaseURL:            config.DatabaseURL,
-		DatabaseSchema:         config.DatabaseSchema,
-		AppName:                appName,
-		Logger:                 config.Logger,
-		SystemDBPool:           config.SystemDBPool,
-		SQLiteSystemDB:         config.SQLiteSystemDB,
-		Serializer:             config.Serializer,
-		SystemDBStartupTimeout: config.SystemDBStartupTimeout,
-		SkipMigrations:         true, // Clients never own the schema
-		namelessOwner:          config.AppName == "",
-		isClient:               true,
+		DatabaseURL:                    config.DatabaseURL,
+		DatabaseSchema:                 config.DatabaseSchema,
+		AppName:                        appName,
+		Logger:                         config.Logger,
+		SystemDBPool:                   config.SystemDBPool,
+		SQLiteSystemDB:                 config.SQLiteSystemDB,
+		Serializer:                     config.Serializer,
+		SystemDBStartupTimeout:         config.SystemDBStartupTimeout,
+		SystemDBIdleTransactionTimeout: config.SystemDBIdleTransactionTimeout,
+		SkipMigrations:                 true, // Clients never own the schema
+		namelessOwner:                  config.AppName == "",
+		isClient:                       true,
 	})
 	if err != nil {
 		return nil, err

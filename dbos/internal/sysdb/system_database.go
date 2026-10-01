@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -971,6 +973,7 @@ type NewSystemDatabaseInput struct {
 	AppName                      string
 	ConnectionAppName            string
 	StartupTimeout               time.Duration
+	IdleTransactionTimeout       time.Duration // idle_in_transaction_session_timeout for a pool we create; zero or less leaves the server's setting
 	NotificationCoalesceInterval time.Duration
 	SkipMigrations               bool
 	// EncodeScheduledInput serializes the input of a schedule-created workflow
@@ -999,6 +1002,17 @@ func startupError(ctx context.Context, timeout time.Duration, phase string, pool
 // sqlite while leaving pg unchanged.
 func (s *SysDB) RenderSQL(format string, args ...any) string {
 	return s.dialect.RewriteQuery(fmt.Sprintf(format, args...))
+}
+
+const DefaultIdleTransactionTimeout = time.Minute
+
+const MaxIdleTransactionTimeout = time.Duration(math.MaxInt32) * time.Millisecond
+
+func connConfigSetsIdleTransactionTimeout(config *pgx.ConnConfig) bool {
+	if _, ok := config.RuntimeParams["idle_in_transaction_session_timeout"]; ok {
+		return true
+	}
+	return strings.Contains(config.RuntimeParams["options"], "idle_in_transaction_session_timeout")
 }
 
 // reports whether the connection string specifies pool_max_conns
@@ -1089,12 +1103,15 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		config.ConnConfig.ConnectTimeout = 10 * time.Second
 		config.ConnConfig.OnNotice = forwardNotice
 
+		if config.ConnConfig.RuntimeParams == nil {
+			config.ConnConfig.RuntimeParams = make(map[string]string)
+		}
 		// Set application_name parameter if provided
 		if inputs.ConnectionAppName != "" {
-			if config.ConnConfig.RuntimeParams == nil {
-				config.ConnConfig.RuntimeParams = make(map[string]string)
-			}
 			config.ConnConfig.RuntimeParams["application_name"] = inputs.ConnectionAppName
+		}
+		if inputs.IdleTransactionTimeout > 0 && !connConfigSetsIdleTransactionTimeout(config.ConnConfig) {
+			config.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = strconv.FormatInt(inputs.IdleTransactionTimeout.Milliseconds(), 10)
 		}
 
 		// Create pool with configuration

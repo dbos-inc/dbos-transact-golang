@@ -498,6 +498,162 @@ func TestSystemDBStartupTimeoutConfig(t *testing.T) {
 	})
 }
 
+func TestSystemDBIdleTransactionTimeoutConfig(t *testing.T) {
+	t.Run("Default", func(t *testing.T) {
+		config, err := processConfig(&Config{AppName: "test", DatabaseURL: "sqlite::memory:"})
+		require.NoError(t, err)
+		assert.Equal(t, time.Minute, config.SystemDBIdleTransactionTimeout)
+	})
+
+	t.Run("NegativeDisables", func(t *testing.T) {
+		config, err := processConfig(&Config{AppName: "test", DatabaseURL: "sqlite::memory:", SystemDBIdleTransactionTimeout: -1})
+		require.NoError(t, err)
+		assert.Equal(t, time.Duration(-1), config.SystemDBIdleTransactionTimeout)
+	})
+
+	t.Run("TooLarge", func(t *testing.T) {
+		_, err := processConfig(&Config{AppName: "test", DatabaseURL: "sqlite::memory:", SystemDBIdleTransactionTimeout: 30 * 24 * time.Hour})
+		require.EqualError(t, err, "systemDBIdleTransactionTimeout cannot exceed 596h31m23.647s")
+	})
+}
+
+func TestSystemDBIdleTransactionTimeout(t *testing.T) {
+	skipIfSqlite(t, "idle_in_transaction_session_timeout is a Postgres setting")
+	databaseURL := backendDatabaseURL(t)
+
+	// settings reads the session setting on two connections of the pool.
+	settings := func(t *testing.T, pool sysdb.Pool) []string {
+		t.Helper()
+		var seen []string
+		for range 2 {
+			var value string
+			require.NoError(t, pool.QueryRow(context.Background(), "SHOW idle_in_transaction_session_timeout").Scan(&value))
+			seen = append(seen, value)
+		}
+		return seen
+	}
+	serverDefault := func(t *testing.T) string {
+		t.Helper()
+		pool, err := pgxpool.New(context.Background(), databaseURL)
+		require.NoError(t, err)
+		defer pool.Close()
+		var value string
+		require.NoError(t, pool.QueryRow(context.Background(), "SHOW idle_in_transaction_session_timeout").Scan(&value))
+		return value
+	}
+	sysPool := func(ctx Context) sysdb.Pool {
+		return ctx.(*dbosContext).systemDB.(*sysdb.SysDB).Pool()
+	}
+	// skipIfServerDefaultIsOurs: leaving the server's setting cannot be told apart from applying the default.
+	skipIfServerDefaultIsOurs := func(t *testing.T) string {
+		t.Helper()
+		value := serverDefault(t)
+		if value == "1min" {
+			t.Skip("the server default equals DBOS's")
+		}
+		return value
+	}
+
+	t.Run("Default", func(t *testing.T) {
+		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-default", DatabaseURL: databaseURL})
+		require.NoError(t, err)
+		defer Shutdown(ctx, 10*time.Second)
+		assert.Equal(t, []string{"1min", "1min"}, settings(t, sysPool(ctx)))
+	})
+
+	t.Run("Custom", func(t *testing.T) {
+		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-custom", DatabaseURL: databaseURL, SystemDBIdleTransactionTimeout: 5 * time.Second})
+		require.NoError(t, err)
+		defer Shutdown(ctx, 10*time.Second)
+		assert.Equal(t, []string{"5s", "5s"}, settings(t, sysPool(ctx)))
+	})
+
+	t.Run("Disabled", func(t *testing.T) {
+		want := skipIfServerDefaultIsOurs(t)
+		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-disabled", DatabaseURL: databaseURL, SystemDBIdleTransactionTimeout: -1})
+		require.NoError(t, err)
+		defer Shutdown(ctx, 10*time.Second)
+		assert.Equal(t, []string{want, want}, settings(t, sysPool(ctx)))
+	})
+
+	t.Run("UserSettingTakesPrecedence", func(t *testing.T) {
+		u, err := url.Parse(databaseURL)
+		require.NoError(t, err)
+		q := u.Query()
+		q.Set("options", "-c idle_in_transaction_session_timeout=7000")
+		u.RawQuery = q.Encode()
+		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-user", DatabaseURL: u.String()})
+		require.NoError(t, err)
+		defer Shutdown(ctx, 10*time.Second)
+		assert.Equal(t, []string{"7s", "7s"}, settings(t, sysPool(ctx)))
+	})
+
+	t.Run("Client", func(t *testing.T) {
+		client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL, SystemDBIdleTransactionTimeout: 5 * time.Second})
+		require.NoError(t, err)
+		defer client.Shutdown(client, 10*time.Second)
+		assert.Equal(t, []string{"5s", "5s"}, settings(t, client.(*dbosContext).systemDB.(*sysdb.SysDB).Pool()))
+	})
+
+	t.Run("CustomPoolUntouched", func(t *testing.T) {
+		want := skipIfServerDefaultIsOurs(t)
+		pool, err := pgxpool.New(context.Background(), databaseURL)
+		require.NoError(t, err)
+		defer pool.Close()
+		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-custom-pool", SystemDBPool: pool})
+		require.NoError(t, err)
+		defer Shutdown(ctx, 10*time.Second)
+		assert.Equal(t, []string{want, want}, settings(t, sysPool(ctx)))
+	})
+
+	t.Run("StrandedLockDoesNotBlockCancel", func(t *testing.T) {
+		// A session frozen inside a transaction that holds a workflow's status row
+		// is ended by the server, so cancelling that workflow returns instead of hanging.
+		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-stranded-lock", DatabaseURL: databaseURL, SystemDBIdleTransactionTimeout: time.Second})
+		require.NoError(t, err)
+		defer Shutdown(ctx, 10*time.Second)
+		started := NewEvent()
+		release := make(chan struct{})
+		defer func() { close(release) }()
+		blockedWorkflow := func(ctx Context, _ string) (string, error) {
+			started.Set()
+			<-release
+			return "done", nil
+		}
+		RegisterWorkflow(ctx, blockedWorkflow)
+		require.NoError(t, Launch(ctx))
+
+		handle, err := RunWorkflow(ctx, blockedWorkflow, "")
+		require.NoError(t, err)
+		wfID := handle.GetWorkflowID()
+		started.Wait()
+
+		// The frozen client: it locks the row, then never sends another statement.
+		sysDB := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
+		holder, err := sysDB.Pool().BeginTx(context.Background(), sysdb.TxOptions{})
+		require.NoError(t, err)
+		defer holder.Rollback(context.Background())
+		_, err = holder.Exec(context.Background(), sysDB.RenderSQL(`SELECT workflow_uuid FROM %sworkflow_status WHERE workflow_uuid = $1 FOR UPDATE`, sysDB.Dialect().SchemaPrefix(sysDB.Schema())), wfID)
+		require.NoError(t, err)
+
+		begin := time.Now()
+		require.NoError(t, CancelWorkflow(ctx, wfID))
+		elapsed := time.Since(begin)
+		// Waited on the stranded lock, and was released by the timeout, not by the holder.
+		assert.Greater(t, elapsed, 500*time.Millisecond)
+		assert.Less(t, elapsed, 15*time.Second)
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusCancelled, status.Status)
+
+		// The holder's session is gone; the pool replaces it.
+		_, err = holder.Exec(context.Background(), "SELECT 1")
+		require.Error(t, err)
+		var one int
+		require.NoError(t, sysDB.Pool().QueryRow(context.Background(), "SELECT 1").Scan(&one))
+	})
+}
+
 func TestSystemDBStartupTimeoutBoundsSQLitePoolWait(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)

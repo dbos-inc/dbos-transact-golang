@@ -280,7 +280,8 @@ func (PostgresDialect) IsRetryable(err error, logger *slog.Logger) bool {
 			pgerrcode.SQLServerRejectedEstablishmentOfSQLConnection,
 			pgerrcode.AdminShutdown,
 			pgerrcode.CrashShutdown,
-			pgerrcode.CannotConnectNow:
+			pgerrcode.CannotConnectNow,
+			pgerrcode.IdleInTransactionSessionTimeout:
 			return true
 		}
 	}
