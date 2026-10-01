@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -521,34 +522,44 @@ func TestSystemDBIdleTransactionTimeout(t *testing.T) {
 	skipIfSqlite(t, "idle_in_transaction_session_timeout is a Postgres setting")
 	databaseURL := backendDatabaseURL(t)
 
-	// settings reads the session setting on two connections of the pool.
-	settings := func(t *testing.T, pool sysdb.Pool) []string {
+	// parseSetting reads a SHOW value: Postgres normalizes to units ("1min", "5s"), CockroachDB echoes the raw milliseconds.
+	parseSetting := func(t *testing.T, value string) time.Duration {
 		t.Helper()
-		var seen []string
+		if ms, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return time.Duration(ms) * time.Millisecond
+		}
+		d, err := time.ParseDuration(strings.Replace(value, "min", "m", 1))
+		require.NoError(t, err, "unparseable idle_in_transaction_session_timeout %q", value)
+		return d
+	}
+	// settings reads the session setting on two connections of the pool.
+	settings := func(t *testing.T, pool sysdb.Pool) []time.Duration {
+		t.Helper()
+		var seen []time.Duration
 		for range 2 {
 			var value string
 			require.NoError(t, pool.QueryRow(context.Background(), "SHOW idle_in_transaction_session_timeout").Scan(&value))
-			seen = append(seen, value)
+			seen = append(seen, parseSetting(t, value))
 		}
 		return seen
 	}
-	serverDefault := func(t *testing.T) string {
+	serverDefault := func(t *testing.T) time.Duration {
 		t.Helper()
 		pool, err := pgxpool.New(context.Background(), databaseURL)
 		require.NoError(t, err)
 		defer pool.Close()
 		var value string
 		require.NoError(t, pool.QueryRow(context.Background(), "SHOW idle_in_transaction_session_timeout").Scan(&value))
-		return value
+		return parseSetting(t, value)
 	}
 	sysPool := func(ctx Context) sysdb.Pool {
 		return ctx.(*dbosContext).systemDB.(*sysdb.SysDB).Pool()
 	}
 	// skipIfServerDefaultIsOurs: leaving the server's setting cannot be told apart from applying the default.
-	skipIfServerDefaultIsOurs := func(t *testing.T) string {
+	skipIfServerDefaultIsOurs := func(t *testing.T) time.Duration {
 		t.Helper()
 		value := serverDefault(t)
-		if value == "1min" {
+		if value == time.Minute {
 			t.Skip("the server default equals DBOS's")
 		}
 		return value
@@ -558,14 +569,14 @@ func TestSystemDBIdleTransactionTimeout(t *testing.T) {
 		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-default", DatabaseURL: databaseURL})
 		require.NoError(t, err)
 		defer Shutdown(ctx, 10*time.Second)
-		assert.Equal(t, []string{"1min", "1min"}, settings(t, sysPool(ctx)))
+		assert.Equal(t, []time.Duration{time.Minute, time.Minute}, settings(t, sysPool(ctx)))
 	})
 
 	t.Run("Custom", func(t *testing.T) {
 		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-custom", DatabaseURL: databaseURL, SystemDBIdleTransactionTimeout: 5 * time.Second})
 		require.NoError(t, err)
 		defer Shutdown(ctx, 10*time.Second)
-		assert.Equal(t, []string{"5s", "5s"}, settings(t, sysPool(ctx)))
+		assert.Equal(t, []time.Duration{5 * time.Second, 5 * time.Second}, settings(t, sysPool(ctx)))
 	})
 
 	t.Run("Disabled", func(t *testing.T) {
@@ -573,7 +584,7 @@ func TestSystemDBIdleTransactionTimeout(t *testing.T) {
 		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-disabled", DatabaseURL: databaseURL, SystemDBIdleTransactionTimeout: -1})
 		require.NoError(t, err)
 		defer Shutdown(ctx, 10*time.Second)
-		assert.Equal(t, []string{want, want}, settings(t, sysPool(ctx)))
+		assert.Equal(t, []time.Duration{want, want}, settings(t, sysPool(ctx)))
 	})
 
 	t.Run("UserSettingTakesPrecedence", func(t *testing.T) {
@@ -585,14 +596,14 @@ func TestSystemDBIdleTransactionTimeout(t *testing.T) {
 		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-user", DatabaseURL: u.String()})
 		require.NoError(t, err)
 		defer Shutdown(ctx, 10*time.Second)
-		assert.Equal(t, []string{"7s", "7s"}, settings(t, sysPool(ctx)))
+		assert.Equal(t, []time.Duration{7 * time.Second, 7 * time.Second}, settings(t, sysPool(ctx)))
 	})
 
 	t.Run("Client", func(t *testing.T) {
 		client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: databaseURL, SystemDBIdleTransactionTimeout: 5 * time.Second})
 		require.NoError(t, err)
 		defer client.Shutdown(client, 10*time.Second)
-		assert.Equal(t, []string{"5s", "5s"}, settings(t, client.(*dbosContext).systemDB.(*sysdb.SysDB).Pool()))
+		assert.Equal(t, []time.Duration{5 * time.Second, 5 * time.Second}, settings(t, client.(*dbosContext).systemDB.(*sysdb.SysDB).Pool()))
 	})
 
 	t.Run("CustomPoolUntouched", func(t *testing.T) {
@@ -603,7 +614,7 @@ func TestSystemDBIdleTransactionTimeout(t *testing.T) {
 		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-custom-pool", SystemDBPool: pool})
 		require.NoError(t, err)
 		defer Shutdown(ctx, 10*time.Second)
-		assert.Equal(t, []string{want, want}, settings(t, sysPool(ctx)))
+		assert.Equal(t, []time.Duration{want, want}, settings(t, sysPool(ctx)))
 	})
 
 	t.Run("StrandedLockDoesNotBlockCancel", func(t *testing.T) {
