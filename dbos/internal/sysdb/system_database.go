@@ -13,7 +13,6 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1111,7 +1110,11 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 			config.ConnConfig.RuntimeParams["application_name"] = inputs.ConnectionAppName
 		}
 		if inputs.IdleTransactionTimeout > 0 && !connConfigSetsIdleTransactionTimeout(config.ConnConfig) {
-			config.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = strconv.FormatInt(inputs.IdleTransactionTimeout.Milliseconds(), 10)
+			timeoutMs := max(int64(1), (inputs.IdleTransactionTimeout.Nanoseconds()+int64(time.Millisecond)-1)/int64(time.Millisecond))
+			config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+				_, err := conn.Exec(ctx, fmt.Sprintf("SET idle_in_transaction_session_timeout = %d", timeoutMs))
+				return err
+			}
 		}
 
 		// Create pool with configuration
