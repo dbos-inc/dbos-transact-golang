@@ -523,15 +523,22 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 		return replayCompletion(completion)
 	}
 
-	resolveRecordedCompletion := func() (any, error) {
+	stillOwns := func() error {
 		owner, err := sysdb.RetryWithResult(c, func() (*string, error) {
 			return c.systemDB.GetWorkflowOwner(uncancellableCtx, stepState.workflowID)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
-			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking workflow owner: %w", err))
+			return models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking workflow owner: %w", err))
 		}
 		if owner == nil || *owner != stepState.ownerXID {
-			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, models.NewWorkflowConflictIDError(stepState.workflowID))
+			return models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, models.NewWorkflowConflictIDError(stepState.workflowID))
+		}
+		return nil
+	}
+
+	resolveRecordedCompletion := func() (any, error) {
+		if err := stillOwns(); err != nil {
+			return nil, err
 		}
 		completion, err := sysdb.RetryWithResult(c, func() (*completionRecord, error) {
 			return ds.checkCompletion(uncancellableCtx, ds.pool, stepState.workflowID, stepState.stepID)
@@ -575,6 +582,12 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 		if recErr := ds.recordCompletion(uncancellableCtx, tx, stepState.workflowID, stepState.stepID, encoded, nil, ser.Name()); recErr != nil {
 			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("recording transaction completion: %w", recErr))
 		}
+		if err := stillOwns(); err != nil {
+			return nil, err
+		}
+		// We might still lose ownership between the previous read and the commit
+		// The later, owning writer will adopt our write.
+		// Still correct because fn must be deterministic.
 		if cmErr := tx.Commit(uncancellableCtx); cmErr != nil {
 			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", cmErr))
 		}
@@ -597,6 +610,10 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 	// outcome: nothing is checkpointed, so a resume re-executes the step.
 	if isWorkflowCtxCancelled(stepState) {
 		return stepOutput, interruptedStepError(stepState, stepError)
+	}
+	// The workflow changed hands before txn1 committed. We rolled back and, now, park.
+	if errors.Is(stepError, ErrConflictingWorkflowID) {
+		return nil, stepError
 	}
 
 	// txn2: checkpoint the outcome into the system database.

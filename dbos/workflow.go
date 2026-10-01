@@ -2575,7 +2575,9 @@ func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptio
 	// terminal, returning the raw error (no wrapping). The predicate gates the
 	// NEXT retry and is not consulted once the budget is exhausted.
 	decide := func(err error, runs int) (bool, error) {
-		if errors.Is(err, errCompletionRecorded) {
+		// Do not retry steps from workflows that have lost ownership (ErrConflictingWorkflowID)
+		// Or datasource steps that have already recorded their checkpoint (errCompletionRecorded)
+		if errors.Is(err, errCompletionRecorded) || errors.Is(err, ErrConflictingWorkflowID) {
 			return false, err
 		}
 		joinedErrors = errors.Join(joinedErrors, err)

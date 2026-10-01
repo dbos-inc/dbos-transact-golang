@@ -977,6 +977,52 @@ func TestRunAsTransaction(t *testing.T) {
 		_, err = h.GetResult()
 		require.NoError(t, err)
 	})
+
+	t.Run("StaleOwnerRollsBackBeforeCommit", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ds := ub.register(t, ctx, "app")
+		sys := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
+
+		var wfID, newOwner string
+		var runs atomic.Int32
+		stepErrs := make(chan error, 1)
+		wf := func(dctx Context, _ string) (string, error) {
+			res, err := RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				runs.Add(1)
+				if _, err := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), "stale", "write"); err != nil {
+					return "", err
+				}
+				// The workflow changes hands while fn is running.
+				newOwner = setWorkflowOwner(t, sys, wfID)
+				return "mine", nil
+			}, WithStepMaxRetries(2))
+			stepErrs <- err
+			return res, err
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+
+		wfID = uuid.NewString()
+		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		require.ErrorIs(t, <-stepErrs, ErrConflictingWorkflowID)
+
+		// The stale run's transaction rolled back: no application write, no completion
+		// row, no checkpoint, and no user retry of fn.
+		require.EqualValues(t, 1, runs.Load())
+		require.Equal(t, 0, ub.countRows(t, `SELECT COUNT(*) FROM kv`))
+		require.Equal(t, 0, ub.countRows(t, `SELECT COUNT(*) FROM `+ub.completionTable()+` WHERE workflow_id = $1`, wfID))
+		steps, err := GetWorkflowSteps(ctx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 0)
+		ok, err := sys.UpdateWorkflowOutcome(context.Background(), sysdb.UpdateWorkflowOutcomeDBInput{WorkflowID: wfID, Status: WorkflowStatusSuccess, OwnerXID: newOwner})
+		require.NoError(t, err)
+		require.True(t, ok)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+	})
 }
 
 // setupSharedDBOS builds a DBOS context whose system-database pool is ALSO the
