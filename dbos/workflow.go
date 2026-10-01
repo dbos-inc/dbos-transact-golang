@@ -1591,6 +1591,9 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 	// Register a cancel function that durably cancels the workflow in the DB as soon as
 	// the context is manually cancelled. Timeouts cause durable cancellation through a
 	// separate batch process (see cancelTimedOutWorkflows).
+	// The cancel is fenced on this execution's token: once the workflow changed hands
+	// (recovered or resumed elsewhere), cancelling this context -- including a parent's
+	// context propagating to a child -- no longer reaches it. Use CancelWorkflow for that.
 	cancelFuncCompleted := make(chan struct{})
 	workflowCancelFunction := func() {
 		defer close(cancelFuncCompleted)
