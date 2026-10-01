@@ -3122,6 +3122,8 @@ func (s *SysDB) AwaitWorkflowResult(ctx context.Context, workflowID string, poll
 // The row stays locked until commit, so a hand-off (cancel, resume, recovery) cannot
 // land between this check and the caller's write.
 func (s *SysDB) checkOwner(ctx context.Context, q Querier, workflowID, ownerXID string) error {
+	// Take FOR NO KEY UPDATE, which serializes all concurrent checkers: FOR SHARE is regression-prone.
+	// If we later add a write in q's transaction, it would cause deadlocks.
 	query := s.RenderSQL(`SELECT owner_xid FROM %sworkflow_status WHERE workflow_uuid = $1 `+s.dialect.LockNoKeyUpdate(), s.dialect.SchemaPrefix(s.schema))
 	var current *string
 	if err := q.QueryRow(ctx, query, workflowID).Scan(&current); err != nil && err != pgx.ErrNoRows {
