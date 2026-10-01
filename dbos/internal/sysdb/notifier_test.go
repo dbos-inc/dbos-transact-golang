@@ -131,6 +131,55 @@ func TestRegistriesThatDoNotPushOnlyWakeLocalWaiters(t *testing.T) {
 	}
 }
 
+func TestTwoWaitersOnOneKeyAreBothWoken(t *testing.T) {
+	// Two executions of a workflow can wait on the same payload (a stale one and
+	// its replacement in recv, or two stream readers): each has its own wake
+	// channel, and the key stays registered until its last waiter leaves.
+	n := newNotifyRegistry(_DBOS_NOTIFICATIONS_CHANNEL, false)
+	woken := func(ch chan struct{}) bool {
+		select {
+		case <-ch:
+			return true
+		default:
+			return false
+		}
+	}
+
+	first := n.subscribe("wf::topic")
+	n.notify("wf::topic")
+	// A waiter joining after an earlier one was woken starts unwoken.
+	second := n.subscribe("wf::topic")
+	if woken(second) {
+		t.Fatal("a new waiter must not inherit an earlier waiter's wake")
+	}
+	if !woken(first) {
+		t.Fatal("the first waiter lost its wake")
+	}
+
+	// A signal wakes every waiter, and draining one leaves the others woken.
+	n.notify("wf::topic")
+	if !woken(first) {
+		t.Fatal("the first waiter was not woken")
+	}
+	if !woken(second) {
+		t.Fatal("the second waiter was not woken")
+	}
+
+	// The key stays registered until its last waiter leaves.
+	n.unsubscribe("wf::topic", first)
+	if got := n.WaiterCount("wf::topic"); got != 1 {
+		t.Fatalf("expected the second waiter to remain registered, got %d", got)
+	}
+	n.notify("wf::topic")
+	if !woken(second) {
+		t.Fatal("the remaining waiter was not woken after the first left")
+	}
+	n.unsubscribe("wf::topic", second)
+	if n.Has("wf::topic") {
+		t.Fatal("the key must be dropped once its last waiter leaves")
+	}
+}
+
 func TestFlushRetriesTransientErrorsAndDropsTheRest(t *testing.T) {
 	// A database blip must not cost waiters in other processes their wakeup: the
 	// push is retried until it lands.

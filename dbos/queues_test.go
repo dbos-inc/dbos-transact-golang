@@ -2258,11 +2258,16 @@ func TestPartitionedQueueDoesNotStarvePartitions(t *testing.T) {
 
 func TestCountActiveWorkflows(t *testing.T) {
 	ctx := &dbosContext{activeExecutions: &sync.Map{}}
-	ctx.activeExecutions.Store("a", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})
-	ctx.activeExecutions.Store("b", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})
-	ctx.activeExecutions.Store("c", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p2"})
-	ctx.activeExecutions.Store("d", activeWorkflowEntry{queueName: "q"})
-	ctx.activeExecutions.Store("e", activeWorkflowEntry{queueName: "other", queuePartitionKey: "p1"})
+	store := func(workflowID, ownerXID, queue, partition string) executionKey {
+		key := executionKey{workflowID: workflowID, ownerXID: ownerXID}
+		ctx.activeExecutions.Store(key, activeWorkflowEntry{workflowID: workflowID, queueName: queue, queuePartitionKey: partition})
+		return key
+	}
+	store("a", "t-a", "q", "p1")
+	store("b", "t-b", "q", "p1")
+	store("c", "t-c", "q", "p2")
+	store("d", "t-d", "q", "")
+	store("e", "t-e", "other", "p1")
 
 	require.Equal(t, 4, ctx.countActiveWorkflowsForQueue("q"))
 	require.Equal(t, 2, ctx.countActiveWorkflowsForPartition("q", "p1"))
@@ -2270,6 +2275,20 @@ func TestCountActiveWorkflows(t *testing.T) {
 	require.Equal(t, 1, ctx.countActiveWorkflowsForPartition("q", ""))
 	require.Equal(t, 0, ctx.countActiveWorkflowsForQueue("missing"))
 	require.Equal(t, 0, (&dbosContext{}).countActiveWorkflowsForQueue("q"))
+
+	// A resumed workflow's executions can sit in different queues: each counts,
+	// and releasing one leaves the other.
+	first := store("x", "t-x1", "q", "p1")
+	second := store("x", "t-x2", "other", "")
+	require.Equal(t, 5, ctx.countActiveWorkflowsForQueue("q"))
+	require.Equal(t, 2, ctx.countActiveWorkflowsForQueue("other"))
+	require.Len(t, ctx.activeExecutionsOf("x"), 2)
+	ctx.activeExecutions.Delete(first)
+	require.Equal(t, 4, ctx.countActiveWorkflowsForQueue("q"))
+	require.Equal(t, 2, ctx.countActiveWorkflowsForQueue("other"))
+	require.Len(t, ctx.activeExecutionsOf("x"), 1)
+	ctx.activeExecutions.Delete(second)
+	require.Empty(t, ctx.activeExecutionsOf("x"))
 }
 
 func TestNewQueueRunner(t *testing.T) {
