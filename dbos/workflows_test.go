@@ -5450,6 +5450,142 @@ func TestSendBulk(t *testing.T) {
 	})
 }
 
+// notificationPayloads returns the decoded string messages sent to workflowID.
+func notificationPayloads(t *testing.T, ctx Context, workflowID string) []string {
+	t.Helper()
+	rows, err := ctx.(*dbosContext).systemDB.GetAllNotifications(context.Background(), workflowID)
+	require.NoError(t, err)
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		raw, err := base64.StdEncoding.DecodeString(row.Message)
+		require.NoError(t, err)
+		var msg string
+		require.NoError(t, json.Unmarshal(raw, &msg))
+		out = append(out, msg)
+	}
+	return out
+}
+
+// TestSendToForks verifies WithForks on Send and SendBulk delivers each message
+// to the destination and every workflow recursively forked from it, and only
+// that subtree.
+func TestSendToForks(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	forkable := func(ctx Context, _ string) (string, error) {
+		return "ok", nil
+	}
+	RegisterWorkflow(dbosCtx, forkable)
+	require.NoError(t, Launch(dbosCtx))
+
+	runRoot := func(t *testing.T) string {
+		t.Helper()
+		h, err := RunWorkflow(dbosCtx, forkable, "")
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+		return h.GetWorkflowID()
+	}
+	forkFrom := func(t *testing.T, id string) string {
+		t.Helper()
+		h, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: id})
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+		status, err := h.GetStatus()
+		require.NoError(t, err)
+		require.Equal(t, id, status.ForkedFrom)
+		return h.GetWorkflowID()
+	}
+
+	// root, its fork, and a fork of that fork.
+	type forkTree struct {
+		root, fork, forkFork string
+	}
+	grow := func(t *testing.T) forkTree {
+		t.Helper()
+		root := runRoot(t)
+		f := forkFrom(t, root)
+		return forkTree{root: root, fork: f, forkFork: forkFrom(t, f)}
+	}
+	assertMessages := func(t *testing.T, id string, want ...string) {
+		t.Helper()
+		require.ElementsMatch(t, want, notificationPayloads(t, dbosCtx, id))
+	}
+	assertOneMessageUUID := func(t *testing.T, key, id string) {
+		t.Helper()
+		n := rawQueryInt(t, dbosCtx, `SELECT COUNT(*) FROM %snotifications WHERE message_uuid = $1`, key+"::"+id)
+		require.Equal(t, 1, n, "idempotency key should address %s once", id)
+	}
+
+	t.Run("Send", func(t *testing.T) {
+		a := grow(t)
+		// An unrelated workflow and its fork must not receive the message.
+		c := runRoot(t)
+		cFork := forkFrom(t, c)
+
+		key := "send-fork-key"
+		require.NoError(t, Send(dbosCtx, a.root, "to-a", "send-forks", WithForks(), WithIdempotencyKey(key)))
+
+		assertMessages(t, a.root, "to-a")
+		assertMessages(t, a.fork, "to-a")
+		assertMessages(t, a.forkFork, "to-a")
+		assertMessages(t, c)
+		assertMessages(t, cFork)
+		for _, id := range []string{a.root, a.fork, a.forkFork} {
+			assertOneMessageUUID(t, key, id)
+		}
+
+		// The same key is one message per recipient, including the forks.
+		require.NoError(t, Send(dbosCtx, a.root, "again", "send-forks", WithForks(), WithIdempotencyKey(key)))
+		assertMessages(t, a.root, "to-a")
+		assertMessages(t, a.fork, "to-a")
+		assertMessages(t, a.forkFork, "to-a")
+	})
+
+	t.Run("SendSkipsForksWithoutOption", func(t *testing.T) {
+		d := grow(t)
+		require.NoError(t, Send(dbosCtx, d.root, "only-root", "send-noforks"))
+		assertMessages(t, d.root, "only-root")
+		assertMessages(t, d.fork)
+		assertMessages(t, d.forkFork)
+	})
+
+	t.Run("SendBulk", func(t *testing.T) {
+		a := grow(t)
+		b := runRoot(t)
+		bFork := forkFrom(t, b)
+		c := runRoot(t)
+		cFork := forkFrom(t, c)
+
+		key := "bulk-fork-key"
+		require.NoError(t, SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: a.root, Message: "to-a", Topic: "bulk-forks", IdempotencyKey: key},
+			{DestinationID: b, Message: "to-b", Topic: "bulk-forks"},
+		}, WithForks()))
+
+		// Each destination reaches only its own fork subtree.
+		assertMessages(t, a.root, "to-a")
+		assertMessages(t, a.fork, "to-a")
+		assertMessages(t, a.forkFork, "to-a")
+		assertMessages(t, b, "to-b")
+		assertMessages(t, bFork, "to-b")
+		assertMessages(t, c)
+		assertMessages(t, cFork)
+		for _, id := range []string{a.root, a.fork, a.forkFork} {
+			assertOneMessageUUID(t, key, id)
+		}
+
+		before := rawQueryInt(t, dbosCtx, `SELECT COUNT(*) FROM %snotifications`)
+		require.NoError(t, SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: a.root, Message: "x", Topic: "bulk-forks", IdempotencyKey: key},
+		}, WithForks()))
+		after := rawQueryInt(t, dbosCtx, `SELECT COUNT(*) FROM %snotifications`)
+		require.Equal(t, before, after, "resending with the same key must not insert again")
+		assertMessages(t, a.root, "to-a")
+		assertMessages(t, a.forkFork, "to-a")
+	})
+}
+
 var (
 	setEventStart                 = NewEvent()
 	setSecondEventSignal          = NewEvent()
