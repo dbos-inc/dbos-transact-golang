@@ -1810,13 +1810,19 @@ func (c *dbosContext) cancelTimedOutWorkflows() {
 			}
 			return
 		}
+		timedOut := make(map[string]struct{}, len(cancelled))
 		for _, workflowID := range cancelled {
 			c.logger.Info("Workflow timed out", "workflow_id", workflowID)
-			for _, entry := range c.activeExecutionsOf(workflowID) {
-				if entry.cancel != nil {
+			timedOut[workflowID] = struct{}{}
+		}
+		if c.activeExecutions != nil {
+			c.activeExecutions.Range(func(_, value any) bool {
+				entry, ok := value.(activeWorkflowEntry)
+				if _, hit := timedOut[entry.workflowID]; ok && hit && entry.cancel != nil {
 					entry.cancel(errDBOSContextTimeout)
 				}
-			}
+				return true
+			})
 		}
 		if len(cancelled) < _WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE {
 			return
