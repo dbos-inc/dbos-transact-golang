@@ -13,6 +13,7 @@ import (
 	_ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+	"github.com/google/uuid"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
@@ -310,6 +311,17 @@ func setWorkflowStatusPending(t *testing.T, dbosCtx Context, workflowID string) 
 	require.NoError(t, err, "failed to set workflow status to PENDING")
 }
 
+// setWorkflowOwner stamps a fresh token onto the row's owner_xid and returns it.
+func setWorkflowOwner(t *testing.T, sysDB *sysdb.SysDB, workflowID string) string {
+	t.Helper()
+	ownerXID := uuid.NewString()
+	query := sysDB.Dialect().RewriteQuery(fmt.Sprintf(`UPDATE %sworkflow_status SET owner_xid = $1 WHERE workflow_uuid = $2`,
+		sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
+	_, err := sysDB.Pool().Exec(context.Background(), query, ownerXID, workflowID)
+	require.NoError(t, err, "failed to set workflow owner")
+	return ownerXID
+}
+
 func queueEntriesAreCleanedUp(ctx Context) bool {
 	maxTries := 10
 	success := false
@@ -352,13 +364,16 @@ func queueEntriesAreCleanedUp(ctx Context) bool {
 }
 
 // startDuplicateExecution starts a second, concurrent execution of an already-PENDING
-// workflow the way the queue runner dispatches a workflow it has claimed: straight to
-// the execution phase, with no status insert. The queue runner discards the execution's
-// handle, so the caller gets a polling handle on the workflow's recorded outcome.
-func startDuplicateExecution[P any, R any](ctx Context, fn Workflow[P, R], input P, workflowID string) WorkflowHandle[R] {
+// workflow the way the queue runner dispatches a workflow it has claimed: the claim
+// rotates the row's ownership token, so the original execution is stale from here on,
+// and the run goes straight to the execution phase with no status insert. The queue
+// runner discards the execution's handle, so the caller gets a polling handle.
+func startDuplicateExecution[P any, R any](t *testing.T, ctx Context, fn Workflow[P, R], input P, workflowID string) WorkflowHandle[R] {
+	t.Helper()
 	c := ctx.(*dbosContext)
+	ownerXID := setWorkflowOwner(t, c.systemDB.(*sysdb.SysDB), workflowID)
 	handle := c.executeWorkflow(func(ctx Context, in any) (any, error) {
 		return fn(ctx, in.(P))
-	}, input, workflowExecution{workflowID: workflowID})
+	}, input, workflowExecution{workflowID: workflowID, ownerXID: ownerXID})
 	return typedHandle[R](c, handle)
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -207,6 +208,34 @@ func TestIsRetryableRejectsContextErrors(t *testing.T) {
 				t.Fatalf("IsRetryable(%v) = true; want false", tc.err)
 			}
 		})
+	}
+}
+
+func TestIsRetryableAcceptsIdleTransactionKill(t *testing.T) {
+	err := &pgconn.PgError{Code: pgerrcode.IdleInTransactionSessionTimeout, Message: "terminating connection due to idle-in-transaction timeout"}
+	if !(PostgresDialect{}).IsRetryable(err, nil) {
+		t.Fatal("the server's idle-in-transaction kill must be retried")
+	}
+}
+
+func TestConnConfigSetsIdleTransactionTimeout(t *testing.T) {
+	cases := []struct {
+		connString string
+		want       bool
+	}{
+		{"postgres://user:pass@localhost:5432/dbos?options=-c%20idle_in_transaction_session_timeout%3D7000", true},
+		{"postgres://user:pass@localhost:5432/dbos?idle_in_transaction_session_timeout=7000", true},
+		{"postgres://user:pass@localhost:5432/dbos?options=-c%20statement_timeout%3D7000", false},
+		{"postgres://user:pass@localhost:5432/dbos?sslmode=disable", false},
+	}
+	for _, c := range cases {
+		config, err := pgx.ParseConfig(c.connString)
+		if err != nil {
+			t.Fatalf("ParseConfig(%q): %v", c.connString, err)
+		}
+		if got := connConfigSetsIdleTransactionTimeout(config); got != c.want {
+			t.Errorf("connConfigSetsIdleTransactionTimeout(%q) = %v, want %v", c.connString, got, c.want)
+		}
 	}
 }
 

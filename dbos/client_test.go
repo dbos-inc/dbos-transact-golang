@@ -612,12 +612,24 @@ func TestCancelResume(t *testing.T) {
 
 		assert.Equal(t, WorkflowStatusCancelled, cancelStatus.Status, "expected workflow status to be CANCELLED")
 
+		// Release the cancelled run: it stops at step two without running it
+		proceedSignal.Set()
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected the cancelled workflow to report cancellation")
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected a DBOS error, got %T", err)
+		assert.Equal(t, ErrorCodeAwaitedWorkflowCancelled, dbosErr.Code)
+		assert.Equal(t, 1, stepsCompleted, "expected steps completed to remain 1 after cancellation")
+		// The polling handle reports the CANCELLED row before the run has reached step two.
+		// Resuming earlier would hand the row to a new execution the old run still races.
+		require.Eventually(t, func() bool {
+			return len(serverCtx.(*dbosContext).activeExecutionsOf(workflowID)) == 0
+		}, 10*time.Second, 10*time.Millisecond, "the cancelled run never stopped")
+
 		// Resume the workflow
 		resumeHandle, err := client.ResumeWorkflow(client, workflowID)
 		require.NoError(t, err, "failed to resume workflow")
 
-		// Wait for workflow completion
-		proceedSignal.Set() // Allow the workflow to proceed to step two
 		resultAny, err := resumeHandle.GetResult()
 		require.NoError(t, err, "failed to get result from resumed workflow")
 

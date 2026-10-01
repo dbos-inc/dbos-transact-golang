@@ -42,4 +42,6 @@ var (
 	// ErrInvalidOption matches errors from invalid or inconsistent options passed to a DBOS API.
 	ErrInvalidOption = &Error{Code: ErrorCodeInvalidOption}
 	ErrWorkflowPanic = &Error{Code: ErrorCodeWorkflowPanic}
+	// ErrStepNondeterminism matches errors from an execution recording a step ID it had already recorded differently.
+	ErrStepNondeterminism = &Error{Code: ErrorCodeStepNondeterminism}
 )
