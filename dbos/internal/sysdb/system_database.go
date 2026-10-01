@@ -65,6 +65,7 @@ type SystemDatabase interface {
 	RecordOperationResult(ctx context.Context, input RecordOperationResultDBInput) error
 	CheckOperationExecution(ctx context.Context, input CheckOperationExecutionDBInput) (*RecordedResult, error)
 	GetWorkflowSteps(ctx context.Context, input GetWorkflowStepsInput) ([]StepRow, error)
+	GetWorkflowOwner(ctx context.Context, workflowID string) (*string, error)
 
 	// Aggregates
 	GetWorkflowAggregates(ctx context.Context, input GetWorkflowAggregatesDBInput) ([]WorkflowAggregateRow, error)
@@ -3142,10 +3143,10 @@ type RecordOperationResultDBInput struct {
 //   - identical to input (including the caller's timestamps) → our own earlier
 //     write whose commit ack was lost; the retry is a no-op success.
 //   - different function name → determinism violation (ErrorCodeUnexpectedStep).
-//   - anything else → a concurrent execution of this workflow checkpointed the
-//     step first → ErrorCodeConflictingID. Callers must surface it as the step
-//     error so the workflow-level handler parks this run in polling mode
-//     rather than racing the other execution step by step.
+//   - anything else → the owning execution recorded this step ID before, with
+//     different content (ErrorCodeStepNondeterminism): the fence rules out a
+//     concurrent execution, so this is our own doing or an executor that does
+//     not fence.
 //
 // ON CONFLICT DO NOTHING (instead of letting the unique violation surface)
 // keeps a caller-owned transaction healthy so it can still be used or rolled
@@ -3214,7 +3215,7 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			// This should only happen if the conflicting row was deleted, e.g., during GC
-			return models.NewWorkflowConflictIDError(input.WorkflowID)
+			return fmt.Errorf("step %d of workflow %s conflicted with an existing checkpoint that is no longer there", input.StepID, input.WorkflowID)
 		}
 		return fmt.Errorf("failed to read existing operation result: %w", err)
 	}
@@ -3234,9 +3235,17 @@ func (s *SysDB) RecordOperationResult(ctx context.Context, input RecordOperation
 	if input.StepName != storedFunctionName {
 		return models.NewUnexpectedStepError(input.WorkflowID, input.StepID, input.StepName, storedFunctionName)
 	}
-	// A concurrent execution's row differs (at minimum in its timestamps):
-	// report the conflict so the caller parks this run.
-	return models.NewWorkflowConflictIDError(input.WorkflowID)
+	return models.NewStepNondeterminismError(input.WorkflowID, input.StepID)
+}
+
+// GetWorkflowOwner returns the workflow's current ownership token; nil if unowned or missing.
+func (s *SysDB) GetWorkflowOwner(ctx context.Context, workflowID string) (*string, error) {
+	query := s.RenderSQL(`SELECT owner_xid FROM %sworkflow_status WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
+	var owner *string
+	if err := s.pool.QueryRow(ctx, query, workflowID).Scan(&owner); err != nil && err != pgx.ErrNoRows {
+		return nil, fmt.Errorf("failed to read workflow owner: %w", err)
+	}
+	return owner, nil
 }
 
 // nullableStrEq compares two nullable strings, treating NULL and "" as equal.

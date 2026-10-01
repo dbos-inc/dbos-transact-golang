@@ -115,6 +115,7 @@
 //	Enqueue rejected by deduplication ID                 ErrQueueDeduplicated
 //	Workflow ID conflict or duplicate operation          ErrConflictingWorkflowID
 //	Workflow ID reused with different function or queue  ErrUnexpectedWorkflow
+//	Step ID recorded twice with different results        ErrStepNondeterminism
 //	Step exhausted its retries                           ErrMaxStepRetriesExceeded
 //	Workflow not found                                   ErrNonExistentWorkflow
 //	Queue not found                                      ErrQueueNotFound

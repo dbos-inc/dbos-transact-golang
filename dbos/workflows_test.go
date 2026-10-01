@@ -1967,9 +1967,9 @@ func TestSteps(t *testing.T) {
 			require.NoError(t, err, "replaying our own committed write must succeed")
 		})
 
-		t.Run("DifferentWriteIsConflict", func(t *testing.T) {
-			// Same step, different content/timestamps: a concurrent execution
-			// checkpointed first; the caller must park via ErrorCodeConflictingID.
+		t.Run("DifferentWriteIsNondeterminism", func(t *testing.T) {
+			// Same step, different content/timestamps, under the owning token: the
+			// fence rules out a concurrent execution, so this run recorded the step twice.
 			differentPayload := "different-payload"
 			err := sysDB.RecordOperationResult(ctx, sysdb.RecordOperationResultDBInput{
 				WorkflowID:    wfID,
@@ -1981,10 +1981,11 @@ func TestSteps(t *testing.T) {
 				Serialization: *recordedSerialization,
 				OwnerXID:      ownerXID,
 			})
-			require.Error(t, err, "a different write at a recorded step must be a conflict")
+			require.Error(t, err, "a different write at a recorded step must be a non-determinism error")
 			var dbosErr *Error
 			require.ErrorAs(t, err, &dbosErr)
-			require.Equal(t, ErrorCodeConflictingID, dbosErr.Code)
+			require.Equal(t, ErrorCodeStepNondeterminism, dbosErr.Code)
+			require.Equal(t, 0, dbosErr.StepID)
 		})
 
 		t.Run("FreshRecordSucceeds", func(t *testing.T) {

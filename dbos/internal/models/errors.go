@@ -35,6 +35,7 @@ const (
 	ErrorCodeScheduleNotFound
 	ErrorCodeInvalidOption
 	ErrorCodeWorkflowPanic
+	ErrorCodeStepNondeterminism
 
 	// _errorCodeSentinel must remain the last value: it bounds parseErrorCode.
 	_errorCodeSentinel
@@ -85,6 +86,8 @@ func (c ErrorCode) String() string {
 		return "InvalidOption"
 	case ErrorCodeWorkflowPanic:
 		return "WorkflowPanic"
+	case ErrorCodeStepNondeterminism:
+		return "StepNondeterminism"
 	default:
 		return fmt.Sprintf("ErrorCode(%d)", int(c))
 	}
@@ -260,6 +263,15 @@ func NewUnexpectedStepError(workflowID string, stepID int, expectedName, recorde
 		StepID:       stepID,
 		ExpectedName: expectedName,
 		RecordedName: recordedName,
+	}
+}
+
+func NewStepNondeterminismError(workflowID string, stepID int) *Error {
+	return &Error{
+		Message:    fmt.Sprintf("Step %d of workflow %s was recorded twice by the same execution with different results. Check that your workflow is deterministic.", stepID, workflowID),
+		Code:       ErrorCodeStepNondeterminism,
+		WorkflowID: workflowID,
+		StepID:     stepID,
 	}
 }
 

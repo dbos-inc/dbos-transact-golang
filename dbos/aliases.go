@@ -90,6 +90,7 @@ const (
 	ErrorCodeScheduleNotFound         = models.ErrorCodeScheduleNotFound         // Referenced schedule does not exist
 	ErrorCodeInvalidOption            = models.ErrorCodeInvalidOption            // Invalid or inconsistent options passed to a DBOS API
 	ErrorCodeWorkflowPanic            = models.ErrorCodeWorkflowPanic            // Workflow function panicked; the panic was recovered and recorded as the workflow's error
+	ErrorCodeStepNondeterminism       = models.ErrorCodeStepNondeterminism       // The execution recorded a step ID it had already recorded differently (non-deterministic workflow)
 )
 
 // The portable SQL surface DBOS writes through, one implementation per backend

@@ -127,6 +127,15 @@ func (u *userBackend) completionCells(t *testing.T, wfID string, stepID int) (ou
 	return output, errStr
 }
 
+// insertCompletion writes a success row for (wfID, stepID) as another execution would.
+func (u *userBackend) insertCompletion(t *testing.T, wfID string, stepID int, output *string, serialization string) {
+	t.Helper()
+	_, err := u.pool.Exec(context.Background(), u.rw(fmt.Sprintf(
+		`INSERT INTO %s (workflow_id, step_id, output, error, serialization, created_at) VALUES ($1, $2, $3, $4, $5, %s)`,
+		u.completionTable(), u.dialect.NowMsSQL())), wfID, stepID, output, (*string)(nil), serialization)
+	require.NoError(t, err)
+}
+
 // completionTableExists reports whether the transaction_completion table exists.
 func (u *userBackend) completionTableExists(t *testing.T) bool {
 	t.Helper()
@@ -889,6 +898,84 @@ func TestRunAsTransaction(t *testing.T) {
 
 		// fn never ran, so nothing was written.
 		require.Equal(t, 0, ub.countRows(t, `SELECT count(*) FROM kv`))
+	})
+
+	// A concurrent execution commits the step's completion row between this run's
+	// layer-2 check and its own commit. Whose row it is depends on the ownership token.
+	t.Run("RecordedRowWinsWhileOwner", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ds := ub.register(t, ctx, "app")
+
+		recorded, err := resolveEncoder(ctx).Encode("theirs")
+		require.NoError(t, err)
+		var wfID string
+		var runs atomic.Int32
+		wf := func(dctx Context, _ string) (string, error) {
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				runs.Add(1)
+				// A stale execution's txn1 lands now: its checkpoint fails the fence, so this run inherits the row.
+				ub.insertCompletion(t, wfID, 0, recorded, resolveEncoder(ctx).Name())
+				return "mine", nil
+			}, WithStepMaxRetries(2))
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+
+		wfID = uuid.NewString()
+		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		res, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "theirs", res)
+		require.Equal(t, int32(1), runs.Load(), "a recorded row is not a retryable failure")
+
+		steps, err := GetWorkflowSteps(ctx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		output, _ := ub.completionCells(t, wfID, 0)
+		require.Equal(t, *recorded, *output)
+	})
+
+	t.Run("RecordedRowParksStaleOwner", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ds := ub.register(t, ctx, "app")
+		sys := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
+
+		recorded, err := resolveEncoder(ctx).Encode("theirs")
+		require.NoError(t, err)
+		var wfID, newOwner string
+		stepErrs := make(chan error, 1)
+		wf := func(dctx Context, _ string) (string, error) {
+			res, err := RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				// The workflow changed hands and the new owner committed the step.
+				newOwner = setWorkflowOwner(t, sys, wfID)
+				ub.insertCompletion(t, wfID, 0, recorded, resolveEncoder(ctx).Name())
+				return "mine", nil
+			})
+			stepErrs <- err
+			return res, err
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+
+		wfID = uuid.NewString()
+		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		require.ErrorIs(t, <-stepErrs, ErrConflictingWorkflowID)
+
+		// The stale run parks without checkpointing; the owner's outcome is what the handle reports.
+		steps, err := GetWorkflowSteps(ctx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 0)
+		ok, err := sys.UpdateWorkflowOutcome(context.Background(), sysdb.UpdateWorkflowOutcomeDBInput{WorkflowID: wfID, Status: WorkflowStatusSuccess, OwnerXID: newOwner})
+		require.NoError(t, err)
+		require.True(t, ok)
+		_, err = h.GetResult()
+		require.NoError(t, err)
 	})
 }
 
