@@ -191,6 +191,11 @@ func TestClientEnqueue(t *testing.T) {
 
 		assert.Equal(t, "processed: test-input", result)
 
+		// Under the reject policy, the same ID is refused
+		_, err = Enqueue[string, wfInput](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
+			WithEnqueueWorkflowID(customWorkflowID), WithEnqueueWorkflowIDReusePolicy(WorkflowIDReusePolicyReject))
+		require.ErrorIs(t, err, ErrWorkflowIDInUse)
+
 		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after global concurrency test")
 	})
 

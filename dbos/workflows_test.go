@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3420,10 +3421,11 @@ func TestChildWorkflowDeterminismCheck(t *testing.T) {
 	parentOwnerXID := setWorkflowOwner(t, sysDB, parentID)
 
 	t.Run("MatchingNameReturnsChildID", func(t *testing.T) {
-		childID, err := sysDB.CheckChildWorkflow(ctx, parentID, 0, recordedName)
+		record, err := sysDB.CheckChildWorkflow(ctx, parentID, 0, recordedName)
 		require.NoError(t, err, "matching child workflow name must not error")
-		require.NotNil(t, childID, "expected a recorded child workflow ID")
-		require.Equal(t, expectedChildID, *childID)
+		require.NotNil(t, record, "expected a recorded child workflow")
+		require.NotNil(t, record.ChildWorkflowID, "expected a recorded child workflow ID")
+		require.Equal(t, expectedChildID, *record.ChildWorkflowID)
 	})
 
 	t.Run("MismatchedNameIsNonDeterminismError", func(t *testing.T) {
@@ -3672,11 +3674,23 @@ func TestWorkflowIDReusePolicy(t *testing.T) {
 	})
 
 	t.Run("SameParentStartsSameChildTwice", func(t *testing.T) {
-		handle, err := RunWorkflow(dbosCtx, startSameChildTwice, uuid.NewString())
+		childID := uuid.NewString()
+		handle, err := RunWorkflow(dbosCtx, startSameChildTwice, childID)
 		require.NoError(t, err)
 		result, err := handle.GetResult()
 		require.NoError(t, err)
 		require.Equal(t, "rejected", result)
+
+		// Free the ID: a child start re-executed on replay would now succeed.
+		require.NoError(t, DeleteWorkflows(dbosCtx, []string{childID}))
+		setWorkflowStatusPending(t, dbosCtx, handle.GetWorkflowID())
+		recovered, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err)
+		idx := slices.IndexFunc(recovered, func(h WorkflowHandle[any]) bool { return h.GetWorkflowID() == handle.GetWorkflowID() })
+		require.NotEqual(t, -1, idx, "the parent should have been recovered")
+		replayed, err := recovered[idx].GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "rejected", replayed, "the replay must return the checkpointed rejection")
 	})
 }
 

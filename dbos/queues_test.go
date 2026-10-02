@@ -3338,6 +3338,8 @@ type enqueueDedupCallerInput struct {
 	Input          string
 	DedupID        string
 	ReturnExisting bool
+	WorkflowID     string
+	RejectReuse    bool
 }
 
 // enqueueDedupCaller enqueues a workflow holding a deduplication ID and reports
@@ -3347,10 +3349,19 @@ func enqueueDedupCaller(ctx Context, in enqueueDedupCallerInput) (string, error)
 	if in.ReturnExisting {
 		opts = append(opts, WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting))
 	}
+	if in.WorkflowID != "" {
+		opts = append(opts, WithEnqueueWorkflowID(in.WorkflowID))
+	}
+	if in.RejectReuse {
+		opts = append(opts, WithEnqueueWorkflowIDReusePolicy(WorkflowIDReusePolicyReject))
+	}
 	handle, err := Enqueue[string](ctx, in.Queue, in.WorkflowName, in.Input, opts...)
 	if err != nil {
 		if errors.Is(err, ErrQueueDeduplicated) {
 			return "deduplicated", nil
+		}
+		if errors.Is(err, ErrWorkflowIDInUse) {
+			return "in use", nil
 		}
 		return "", err
 	}
@@ -3465,6 +3476,40 @@ func TestEnqueueWithinWorkflowDeduplication(t *testing.T) {
 		after, err := ListWorkflows(dbosCtx)
 		require.NoError(t, err, "failed to list workflows")
 		assert.Len(t, after, len(before), "the replay must not enqueue a new workflow")
+	})
+
+	t.Run("RejectReusePolicyCheckpointsTheRejection", func(t *testing.T) {
+		holder := plantHolder(t, "reuse-key")
+
+		// The creatorXID collides on the workflow ID before unique constraint violation on the dedup ID
+		_, err := Enqueue[string](dbosCtx, queue.GetName(), targetName, "direct",
+			WithEnqueueWorkflowID(holder.GetWorkflowID()), WithEnqueueDeduplicationID("reuse-key"),
+			WithEnqueueWorkflowIDReusePolicy(WorkflowIDReusePolicyReject))
+		require.ErrorIs(t, err, ErrWorkflowIDInUse)
+
+		handle, err := RunWorkflow(dbosCtx, enqueueDedupCaller, enqueueDedupCallerInput{
+			Queue:        queue.GetName(),
+			WorkflowName: targetName,
+			Input:        "caller",
+			DedupID:      "reuse-key",
+			WorkflowID:   holder.GetWorkflowID(),
+			RejectReuse:  true,
+		})
+		require.NoError(t, err, "failed to start the caller workflow")
+		result, err := handle.GetResult()
+		require.NoError(t, err, "the caller should swallow the rejection")
+		assert.Equal(t, "in use", result)
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 1, "the caller should record a single enqueue step")
+		require.ErrorIs(t, steps[0].Error, ErrWorkflowIDInUse, "the rejection must be checkpointed as the step's error")
+
+		// Free the ID: an enqueue re-executed on replay would now succeed.
+		require.NoError(t, DeleteWorkflows(dbosCtx, []string{holder.GetWorkflowID()}), "failed to delete the holder")
+		assert.Equal(t, "in use", replayCaller(t, handle.GetWorkflowID()), "the replay must return the checkpointed rejection")
+		remaining, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(holder.GetWorkflowID()))
+		require.NoError(t, err, "failed to list workflows")
+		assert.Empty(t, remaining, "the replay must not enqueue a new workflow")
 	})
 }
 

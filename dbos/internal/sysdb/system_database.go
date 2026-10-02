@@ -60,7 +60,7 @@ type SystemDatabase interface {
 	// Child workflows
 	GetWorkflowChildren(ctx context.Context, input GetWorkflowChildrenDBInput) ([]models.WorkflowStatus, error)
 	RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error
-	CheckChildWorkflow(ctx context.Context, workflowUUID string, functionID int, functionName string) (*string, error)
+	CheckChildWorkflow(ctx context.Context, workflowUUID string, functionID int, functionName string) (*ChildWorkflowRecord, error)
 
 	// Steps
 	RecordOperationResult(ctx context.Context, input RecordOperationResultDBInput) error
@@ -3356,14 +3356,21 @@ func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkfl
 	return nil
 }
 
-func (s *SysDB) CheckChildWorkflow(ctx context.Context, workflowID string, functionID int, functionName string) (*string, error) {
-	query := s.RenderSQL(`SELECT child_workflow_id, function_name
+// ChildWorkflowRecord is what a parent recorded when starting a child at a step: the child's ID, or the error the start failed with.
+type ChildWorkflowRecord struct {
+	ChildWorkflowID *string
+	ErrStr          *string
+}
+
+// CheckChildWorkflow returns the record at the parent's step, or nil if the step is not recorded.
+func (s *SysDB) CheckChildWorkflow(ctx context.Context, workflowID string, functionID int, functionName string) (*ChildWorkflowRecord, error) {
+	query := s.RenderSQL(`SELECT child_workflow_id, error, function_name
               FROM %soperation_outputs
               WHERE workflow_uuid = $1 AND function_id = $2`, s.dialect.SchemaPrefix(s.schema))
 
-	var childWorkflowID *string
+	var record ChildWorkflowRecord
 	var recordedFunctionName string
-	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID, &recordedFunctionName)
+	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&record.ChildWorkflowID, &record.ErrStr, &recordedFunctionName)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -3378,7 +3385,7 @@ func (s *SysDB) CheckChildWorkflow(ctx context.Context, workflowID string, funct
 		return nil, models.NewUnexpectedStepError(workflowID, functionID, functionName, recordedFunctionName)
 	}
 
-	return childWorkflowID, nil
+	return &record, nil
 }
 
 // GetDeduplicatedWorkflow returns the ID of the workflow currently holding the
