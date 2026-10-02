@@ -59,10 +59,14 @@ func (s *SysDB) GarbageCollectWorkflows(ctx context.Context, input GarbageCollec
 	return s.garbageCollectPayloads(ctx, *cutoff, batchSize)
 }
 
-// Every SDK derives the key this way, so rounds in different languages contend.
-func retentionLockKey(schema string) int64 {
-	sum := sha256.Sum256([]byte("dbos.retention." + schema))
+// AdvisoryLockKey derives a pg advisory lock key from a name.
+func AdvisoryLockKey(name string) int64 {
+	sum := sha256.Sum256([]byte(name))
 	return int64(binary.BigEndian.Uint64(sum[:8])) // #nosec G115 -- the sign flip is the point: the key is a signed bigint
+}
+
+func retentionLockKey(schema string) int64 {
+	return AdvisoryLockKey("dbos.retention." + schema)
 }
 
 // Session-scoped advisory lock; engines without one always take it.
