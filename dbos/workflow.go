@@ -1033,6 +1033,8 @@ func WithAuthenticatedRoles(roles ...string) WorkflowOption {
 // workflow that already completed, RunWorkflow does not re-execute it: it
 // returns a handle to the recorded execution and the recorded result, and the
 // new input is ignored. To re-execute with the same ID, use ForkWorkflow.
+// To fail with ErrWorkflowIDInUse instead when the ID already exists, pass
+// WithWorkflowIDReusePolicy(WorkflowIDReusePolicyReject).
 //
 // Example:
 //
@@ -1485,7 +1487,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 				insertStatusResult.CreatorXID != creatorXID // the row was already there (another execution created it)
 
 		if shouldSkip {
-			// Commit the transaction to update the number of attempts and/or enact the enqueue
+			// Commit the transaction to enact the enqueue and/or the child workflow record
 			if err := tx.Commit(uncancellableCtx); err != nil {
 				return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
 			}
