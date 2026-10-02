@@ -141,6 +141,9 @@ func rejectConflictingDebounceOptions(options *workflowOptions) error {
 	if options.DeduplicationPolicy != DeduplicationPolicyReject {
 		return models.NewInvalidOptionError("cannot debounce a workflow with a deduplication policy set: a debounce owns the deduplication behavior")
 	}
+	if options.WorkflowIDReuse == WorkflowIDReusePolicyReject {
+		return models.NewInvalidOptionError("cannot debounce a workflow with the reject workflow ID reuse policy: a debounce owns how its workflow is started")
+	}
 	return nil
 }
 
