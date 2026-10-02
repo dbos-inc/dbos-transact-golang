@@ -122,6 +122,7 @@
 //	Execution no longer owns the workflow (recovered,    ErrConflictingWorkflowID
 //	resumed or completed elsewhere); its writes are refused
 //	Workflow ID reused with different function or queue  ErrUnexpectedWorkflow
+//	Workflow ID already exists, under the reject policy  ErrWorkflowIDInUse
 //	Step ID recorded twice with different results        ErrStepNondeterminism
 //	Step exhausted its retries                           ErrMaxStepRetriesExceeded
 //	Workflow not found                                   ErrNonExistentWorkflow

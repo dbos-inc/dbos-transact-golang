@@ -36,6 +36,7 @@ const (
 	ErrorCodeInvalidOption
 	ErrorCodeWorkflowPanic
 	ErrorCodeStepNondeterminism
+	ErrorCodeWorkflowIDInUse
 
 	// _errorCodeSentinel must remain the last value: it bounds parseErrorCode.
 	_errorCodeSentinel
@@ -88,6 +89,8 @@ func (c ErrorCode) String() string {
 		return "WorkflowPanic"
 	case ErrorCodeStepNondeterminism:
 		return "StepNondeterminism"
+	case ErrorCodeWorkflowIDInUse:
+		return "WorkflowIDInUse"
 	default:
 		return fmt.Sprintf("ErrorCode(%d)", int(c))
 	}
@@ -373,6 +376,15 @@ func NewQueueDeduplicatedError(workflowID, queueName, deduplicationID string) *E
 		WorkflowID:      workflowID,
 		QueueName:       queueName,
 		DeduplicationID: deduplicationID,
+	}
+}
+
+func NewWorkflowIDInUseError(workflowID string, status WorkflowStatusType, workflowName string) *Error {
+	return &Error{
+		Message:      fmt.Sprintf("Workflow ID %s is already in use by workflow %s with status %s", workflowID, workflowName, status),
+		Code:         ErrorCodeWorkflowIDInUse,
+		WorkflowID:   workflowID,
+		RecordedName: workflowName,
 	}
 }
 

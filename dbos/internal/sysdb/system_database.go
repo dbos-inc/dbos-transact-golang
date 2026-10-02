@@ -60,7 +60,7 @@ type SystemDatabase interface {
 	// Child workflows
 	GetWorkflowChildren(ctx context.Context, input GetWorkflowChildrenDBInput) ([]models.WorkflowStatus, error)
 	RecordChildWorkflow(ctx context.Context, input RecordChildWorkflowDBInput) error
-	CheckChildWorkflow(ctx context.Context, workflowUUID string, functionID int, functionName string) (*string, error)
+	CheckChildWorkflow(ctx context.Context, workflowUUID string, functionID int, functionName string) (*ChildWorkflowRecord, error)
 
 	// Steps
 	RecordOperationResult(ctx context.Context, input RecordOperationResultDBInput) error
@@ -1377,14 +1377,18 @@ type InsertWorkflowResult struct {
 }
 
 type InsertWorkflowStatusDBInput struct {
-	Status     models.WorkflowStatus
-	Tx         Tx
-	CreatorXID *string
+	Status         models.WorkflowStatus
+	Tx             Tx
+	CreatorXID     *string
+	RejectExisting bool
 }
 
 func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error) {
 	if input.Tx == nil {
 		return nil, errors.New("transaction is required for InsertWorkflowStatus")
+	}
+	if input.RejectExisting && input.CreatorXID == nil {
+		return nil, errors.New("a creator token is required to reject an existing workflow ID")
 	}
 
 	// Set default values
@@ -1502,7 +1506,7 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
         application_name
     ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, %s, $11, %s, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
     ON CONFLICT (workflow_uuid)
-        DO UPDATE SET updated_at = EXCLUDED.updated_at
+        DO UPDATE SET creator_xid = workflow_status.creator_xid
         RETURNING status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, creator_xid`, s.dialect.SchemaPrefix(s.schema), nowMs, nowMs)
 
 	var result InsertWorkflowResult
@@ -1573,6 +1577,10 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 			)
 		}
 		return nil, fmt.Errorf("failed to insert workflow status: %w", err)
+	}
+
+	if input.RejectExisting && result.CreatorXID != *input.CreatorXID {
+		return nil, models.NewWorkflowIDInUseError(input.Status.ID, result.Status, result.Name)
 	}
 
 	inputsQuery := s.RenderSQL(`INSERT INTO %sworkflow_input (workflow_uuid, inputs)
@@ -3348,14 +3356,21 @@ func (s *SysDB) RecordChildWorkflow(ctx context.Context, input RecordChildWorkfl
 	return nil
 }
 
-func (s *SysDB) CheckChildWorkflow(ctx context.Context, workflowID string, functionID int, functionName string) (*string, error) {
-	query := s.RenderSQL(`SELECT child_workflow_id, function_name
+// ChildWorkflowRecord is what a parent recorded when starting a child at a step: the child's ID, or the error the start failed with.
+type ChildWorkflowRecord struct {
+	ChildWorkflowID *string
+	ErrStr          *string
+}
+
+// CheckChildWorkflow returns the record at the parent's step, or nil if the step is not recorded.
+func (s *SysDB) CheckChildWorkflow(ctx context.Context, workflowID string, functionID int, functionName string) (*ChildWorkflowRecord, error) {
+	query := s.RenderSQL(`SELECT child_workflow_id, error, function_name
               FROM %soperation_outputs
               WHERE workflow_uuid = $1 AND function_id = $2`, s.dialect.SchemaPrefix(s.schema))
 
-	var childWorkflowID *string
+	var record ChildWorkflowRecord
 	var recordedFunctionName string
-	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&childWorkflowID, &recordedFunctionName)
+	err := s.pool.QueryRow(ctx, query, workflowID, functionID).Scan(&record.ChildWorkflowID, &record.ErrStr, &recordedFunctionName)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -3370,7 +3385,7 @@ func (s *SysDB) CheckChildWorkflow(ctx context.Context, workflowID string, funct
 		return nil, models.NewUnexpectedStepError(workflowID, functionID, functionName, recordedFunctionName)
 	}
 
-	return childWorkflowID, nil
+	return &record, nil
 }
 
 // GetDeduplicatedWorkflow returns the ID of the workflow currently holding the

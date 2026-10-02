@@ -44,4 +44,6 @@ var (
 	ErrWorkflowPanic = &Error{Code: ErrorCodeWorkflowPanic}
 	// ErrStepNondeterminism matches errors from an execution recording a step ID it had already recorded differently.
 	ErrStepNondeterminism = &Error{Code: ErrorCodeStepNondeterminism}
+	// ErrWorkflowIDInUse matches errors from starting a workflow under WorkflowIDReusePolicyReject with an ID that already exists.
+	ErrWorkflowIDInUse = &Error{Code: ErrorCodeWorkflowIDInUse}
 )

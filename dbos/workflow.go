@@ -848,9 +848,20 @@ const (
 	DeduplicationPolicyReturnExisting
 )
 
+// WorkflowIDReusePolicy controls how starting a workflow with an ID that already exists is handled.
+type WorkflowIDReusePolicy int
+
+const (
+	// WorkflowIDReusePolicyReturnExisting (default) returns a handle to the existing workflow.
+	WorkflowIDReusePolicyReturnExisting WorkflowIDReusePolicy = iota
+	// WorkflowIDReusePolicyReject rejects the start.
+	WorkflowIDReusePolicyReject
+)
+
 type workflowOptions struct {
 	WorkflowName        string
 	WorkflowID          string
+	WorkflowIDReuse     WorkflowIDReusePolicy
 	queue               Queue
 	ApplicationVersion  string
 	DeduplicationID     string
@@ -874,6 +885,13 @@ type WorkflowOption func(*workflowOptions)
 func WithWorkflowID(id string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.WorkflowID = id
+	}
+}
+
+// WithWorkflowIDReusePolicy sets how a workflow ID that already exists is handled.
+func WithWorkflowIDReusePolicy(policy WorkflowIDReusePolicy) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.WorkflowIDReuse = policy
 	}
 }
 
@@ -1015,6 +1033,8 @@ func WithAuthenticatedRoles(roles ...string) WorkflowOption {
 // workflow that already completed, RunWorkflow does not re-execute it: it
 // returns a handle to the recorded execution and the recorded result, and the
 // new input is ignored. To re-execute with the same ID, use ForkWorkflow.
+// To fail with ErrWorkflowIDInUse instead when the ID already exists, pass
+// WithWorkflowIDReusePolicy(WorkflowIDReusePolicyReject).
 //
 // Example:
 //
@@ -1286,7 +1306,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
-		childWorkflowID, err := sysdb.RetryWithResult(c, func() (*string, error) {
+		childRecord, err := sysdb.RetryWithResult(c, func() (*sysdb.ChildWorkflowRecord, error) {
 			return c.systemDB.CheckChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID, params.WorkflowName)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
@@ -1300,7 +1320,11 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			c.logger.Error("failed to check child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID)
 			return nil, models.NewWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("checking child workflow: %w", err))
 		}
-		if childWorkflowID != nil {
+		if childRecord != nil && childRecord.ErrStr != nil {
+			return nil, deserializeWorkflowError(childRecord.ErrStr)
+		}
+		if childRecord != nil && childRecord.ChildWorkflowID != nil {
+			childWorkflowID := childRecord.ChildWorkflowID
 			c.logger.Info("child workflow already recorded", "workflow_name", params.WorkflowName, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID, "child_workflow_id", *childWorkflowID)
 			return newWorkflowPollingHandle[any](uncancellableCtx, *childWorkflowID), nil
 		}
@@ -1419,12 +1443,16 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 		// Insert workflow status with transaction
 		insertInput := sysdb.InsertWorkflowStatusDBInput{
-			Status:     workflowStatus,
-			Tx:         tx,
-			CreatorXID: &creatorXID,
+			Status:         workflowStatus,
+			Tx:             tx,
+			CreatorXID:     &creatorXID,
+			RejectExisting: params.WorkflowIDReuse == WorkflowIDReusePolicyReject,
 		}
 		insertStatusResult, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
+			if errors.Is(err, ErrWorkflowIDInUse) {
+				return err
+			}
 			// Silence dedup error under return-existing policy.
 			if !(returnExisting && errors.Is(err, ErrQueueDeduplicated)) {
 				c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
@@ -1459,7 +1487,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 				insertStatusResult.CreatorXID != creatorXID // the row was already there (another execution created it)
 
 		if shouldSkip {
-			// Commit the transaction to update the number of attempts and/or enact the enqueue
+			// Commit the transaction to enact the enqueue and/or the child workflow record
 			if err := tx.Commit(uncancellableCtx); err != nil {
 				return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
 			}
@@ -1480,6 +1508,27 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		if err == nil {
 			// Common path
 			break
+		}
+		// A rejected child start is checkpointed at the parent's step, so a replay returns it even if the ID has been freed since.
+		if isChildWorkflow && errors.Is(err, ErrWorkflowIDInUse) {
+			serialization := resolveEncoder(c).Name()
+			errStr := serializeWorkflowError(c.logger, err, serialization)
+			rejectionInput := sysdb.RecordOperationResultDBInput{
+				WorkflowID:    parentWorkflowState.workflowID,
+				StepID:        parentWorkflowState.stepID,
+				StepName:      params.WorkflowName,
+				ErrStr:        &errStr,
+				StartedAt:     childStartTime,
+				CompletedAt:   time.Now(),
+				Serialization: serialization,
+				OwnerXID:      parentWorkflowState.ownerXID,
+			}
+			if recErr := sysdb.Retry(c, func() error {
+				return c.systemDB.RecordOperationResult(uncancellableCtx, rejectionInput)
+			}, sysdb.WithRetrierLogger(c.logger)); recErr != nil {
+				return nil, models.NewWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording rejected child workflow: %w", recErr))
+			}
+			return nil, err
 		}
 		// Now handle the case where the insert failed because the deduplication ID is already held by another workflow.
 		// We must also handle the case were a parent workflow spawned a return-existing child, and record their parent-child relationship.
@@ -1844,6 +1893,13 @@ func WithEnqueueWorkflowID(id string) EnqueueOption {
 	}
 }
 
+// WithEnqueueWorkflowIDReusePolicy sets how a workflow ID that already exists is handled.
+func WithEnqueueWorkflowIDReusePolicy(policy WorkflowIDReusePolicy) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.workflowIDReuse = policy
+	}
+}
+
 // WithEnqueueApplicationVersion overrides the application version for the enqueued workflow.
 func WithEnqueueApplicationVersion(version string) EnqueueOption {
 	return func(opts *enqueueOptions) {
@@ -1959,6 +2015,7 @@ func WithEnqueueAttributes(attributes map[string]any) EnqueueOption {
 type enqueueOptions struct {
 	workflowName        string
 	workflowID          string
+	workflowIDReuse     WorkflowIDReusePolicy
 	applicationVersion  string
 	applicationName     string
 	deduplicationID     string
@@ -2151,17 +2208,18 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 
 	uncancellableCtx := WithoutCancel(c)
 	returnExisting := params.deduplicationPolicy == DeduplicationPolicyReturnExisting
+	creatorXID := uuid.New().String()
 
 	for {
 		var enqueuedID string
 		var err error
 		if isWithinWorkflow {
 			enqueuedID, err = runAsTxn(c, func(ctx context.Context, tx Tx) (string, error) {
-				return c.insertEnqueuedWorkflow(ctx, tx, status, queueName, params, returnExisting)
+				return c.insertEnqueuedWorkflow(ctx, tx, status, creatorXID, queueName, params, returnExisting)
 			}, WithStepName("DBOS.enqueue"), withChildWorkflowIDOutput())
 		} else if userTx != nil {
 			// The caller owns the transaction: no commit, no retry.
-			enqueuedID, err = c.insertEnqueuedWorkflow(uncancellableCtx, userTx, status, queueName, params, false)
+			enqueuedID, err = c.insertEnqueuedWorkflow(uncancellableCtx, userTx, status, creatorXID, queueName, params, false)
 		} else {
 			enqueuedID, err = func() (string, error) {
 				tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
@@ -2169,7 +2227,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 					return "", models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
 				}
 				defer tx.Rollback(uncancellableCtx)
-				enqueuedID, err := c.insertEnqueuedWorkflow(uncancellableCtx, tx, status, queueName, params, returnExisting)
+				enqueuedID, err := c.insertEnqueuedWorkflow(uncancellableCtx, tx, status, creatorXID, queueName, params, returnExisting)
 				if err != nil {
 					return enqueuedID, err
 				}
@@ -2187,7 +2245,9 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 				// The dedup slot was freed before the holder lookup; enqueue again
 				continue
 			}
-			c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
+			if !errors.Is(err, ErrWorkflowIDInUse) {
+				c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
+			}
 			return nil, err
 		}
 		return newWorkflowPollingHandle[any](uncancellableCtx, enqueuedID), nil
@@ -2196,10 +2256,12 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 
 // Insert the enqueued workflow and lookup any existing deduplicated workflow if
 // a serialization error is raised AND the policy is return existing.
-func (c *dbosContext) insertEnqueuedWorkflow(ctx context.Context, tx Tx, status WorkflowStatus, queueName string, params *enqueueOptions, returnExisting bool) (string, error) {
+func (c *dbosContext) insertEnqueuedWorkflow(ctx context.Context, tx Tx, status WorkflowStatus, creatorXID string, queueName string, params *enqueueOptions, returnExisting bool) (string, error) {
 	insertInput := sysdb.InsertWorkflowStatusDBInput{
-		Status: status,
-		Tx:     tx,
+		Status:         status,
+		Tx:             tx,
+		CreatorXID:     &creatorXID,
+		RejectExisting: params.workflowIDReuse == WorkflowIDReusePolicyReject,
 	}
 	if _, err := c.systemDB.InsertWorkflowStatus(ctx, insertInput); err != nil {
 		if returnExisting && errors.Is(err, ErrQueueDeduplicated) {
@@ -2232,6 +2294,7 @@ func (c *dbosContext) insertEnqueuedWorkflow(ctx context.Context, tx Tx, status 
 //   - WithEnqueueApplicationVersion: Application version override
 //   - WithEnqueueDeduplicationID: Deduplication identifier for idempotent enqueuing
 //   - WithEnqueueDeduplicationPolicy: How a colliding deduplication ID is handled
+//   - WithEnqueueWorkflowIDReusePolicy: How a workflow ID that already exists is handled
 //   - WithEnqueuePriority: Execution priority
 //   - WithEnqueueTimeout: Maximum execution time for the workflow
 //   - WithEnqueueDelay: Delay before the workflow becomes eligible for dequeue

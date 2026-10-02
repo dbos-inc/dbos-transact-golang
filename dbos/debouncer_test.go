@@ -552,6 +552,7 @@ func TestDebouncerWorkflowOptions(t *testing.T) {
 		{"Priority", WithPriority(5)},
 		{"QueuePartitionKey", WithQueuePartitionKey("pk")},
 		{"DeduplicationPolicy", WithDeduplicationPolicy(DeduplicationPolicyReturnExisting)},
+		{"WorkflowIDReusePolicy", WithWorkflowIDReusePolicy(WorkflowIDReusePolicyReject)},
 	} {
 		_, err := debouncer.Debounce(dbosCtx, "rejected-options-key", 200*time.Millisecond, testInput, tc.opt)
 		assert.Error(t, err, "option %s should be rejected", tc.name)

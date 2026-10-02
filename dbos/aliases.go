@@ -91,6 +91,7 @@ const (
 	ErrorCodeInvalidOption            = models.ErrorCodeInvalidOption            // Invalid or inconsistent options passed to a DBOS API
 	ErrorCodeWorkflowPanic            = models.ErrorCodeWorkflowPanic            // Workflow function panicked; the panic was recovered and recorded as the workflow's error
 	ErrorCodeStepNondeterminism       = models.ErrorCodeStepNondeterminism       // The execution recorded a step ID it had already recorded differently (non-deterministic workflow)
+	ErrorCodeWorkflowIDInUse          = models.ErrorCodeWorkflowIDInUse          // Workflow ID already exists and the reuse policy rejects it
 )
 
 // The portable SQL surface DBOS writes through, one implementation per backend
