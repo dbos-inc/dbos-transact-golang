@@ -528,3 +528,92 @@ func TestSkipMigrationsSqlite(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), fmt.Sprintf("is at schema version 0, but this version of DBOS requires %d", latest))
 }
+
+// TestMigrate prepares a system database for an application role that cannot
+// run DDL, which then launches with SkipMigrations.
+func TestMigrate(t *testing.T) {
+	skipIfSqlite(t, "pg roles and schemas; sqlite is covered by TestMigrateSqlite")
+	skipIfCockroach(t, "insecure-mode CRDB rejects password login roles")
+	bg := context.Background()
+	parsedURL, err := url.Parse(getDatabaseURL())
+	require.NoError(t, err)
+	if parsedURL.Scheme == "" {
+		t.Skip("DBOS_SYSTEM_DATABASE_URL is not in URL form")
+	}
+
+	const schema = "programmatic_migrate"
+	const role = "dbos_migrate_app_role"
+	const rolePw = "migrate_pw"
+	// The system database exists before the limited role connects to it.
+	require.NoError(t, Migrate(bg, getDatabaseURL(), WithMigrateSchema(schema)))
+
+	admin, err := pgxpool.New(bg, getDatabaseURL())
+	require.NoError(t, err)
+	defer admin.Close()
+	dropRole := func() {
+		_, _ = admin.Exec(bg, "DROP OWNED BY "+role)
+		_, _ = admin.Exec(bg, "DROP ROLE IF EXISTS "+role)
+	}
+	dropRole()
+	_, err = admin.Exec(bg, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOCREATEDB NOCREATEROLE", role, rolePw))
+	require.NoError(t, err)
+	_, err = admin.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		dropRole()
+		_, _ = admin.Exec(bg, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schema))
+	})
+
+	limitedURL := *parsedURL
+	limitedURL.User = url.UserPassword(role, rolePw)
+	newLimitedContext := func() (Context, error) {
+		return NewContext(bg, Config{
+			DatabaseURL:    limitedURL.String(),
+			AppName:        "test-app",
+			DatabaseSchema: schema,
+			SkipMigrations: true,
+		})
+	}
+
+	_, err = newLimitedContext()
+	require.Error(t, err, "the schema is not migrated yet")
+
+	require.NoError(t, Migrate(bg, getDatabaseURL(), WithMigrateSchema(schema), WithMigrateApplicationRole(role)))
+	migs := sysdb.BuildMigrations(schema, false)
+	var version int64
+	require.NoError(t, admin.QueryRow(bg, fmt.Sprintf("SELECT version FROM %s.%s", schema, sysdb.MigrationTable)).Scan(&version))
+	assert.Equal(t, migs[len(migs)-1].Version, version)
+	// Already migrated: a no-op.
+	require.NoError(t, Migrate(bg, getDatabaseURL(), WithMigrateSchema(schema)))
+
+	limitedCtx, err := newLimitedContext()
+	require.NoError(t, err)
+	t.Cleanup(func() { Shutdown(limitedCtx, 30*time.Second) })
+	workflow := func(ctx Context, _ string) (string, error) { return "migrated", nil }
+	RegisterWorkflow(limitedCtx, workflow, WithWorkflowName("MigrateWorkflow"))
+	require.NoError(t, limitedCtx.Launch())
+	handle, err := RunWorkflow(limitedCtx, workflow, "")
+	require.NoError(t, err)
+	result, err := handle.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, "migrated", result)
+}
+
+// TestMigrateSqlite migrates a sqlite file that SkipMigrations then accepts.
+func TestMigrateSqlite(t *testing.T) {
+	bg := context.Background()
+	databaseURL := "sqlite:" + filepath.Join(t.TempDir(), "migrated.db")
+
+	err := Migrate(bg, databaseURL, WithMigrateApplicationRole("app"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not supported for SQLite")
+
+	require.NoError(t, Migrate(bg, databaseURL))
+	ctx, err := NewContext(bg, Config{
+		DatabaseURL:    databaseURL,
+		AppName:        "test-app",
+		SkipMigrations: true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, Shutdown(ctx, 30*time.Second))
+}
