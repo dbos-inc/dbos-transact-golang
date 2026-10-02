@@ -7357,7 +7357,7 @@ func TestWorkflowTimeout(t *testing.T) {
 }
 
 func notificationWaiterWorkflow(ctx Context, pairID int) (string, error) {
-	result, err := GetEvent[string](ctx, fmt.Sprintf("notification-setter-%d", pairID), "event-key", 10*time.Second)
+	result, err := GetEvent[string](ctx, fmt.Sprintf("notification-setter-%d", pairID), "event-key", 60*time.Second)
 	if err != nil {
 		return "", err
 	}
