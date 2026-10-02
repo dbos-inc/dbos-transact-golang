@@ -1377,14 +1377,18 @@ type InsertWorkflowResult struct {
 }
 
 type InsertWorkflowStatusDBInput struct {
-	Status     models.WorkflowStatus
-	Tx         Tx
-	CreatorXID *string
+	Status         models.WorkflowStatus
+	Tx             Tx
+	CreatorXID     *string
+	RejectExisting bool
 }
 
 func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error) {
 	if input.Tx == nil {
 		return nil, errors.New("transaction is required for InsertWorkflowStatus")
+	}
+	if input.RejectExisting && input.CreatorXID == nil {
+		return nil, errors.New("a creator token is required to reject an existing workflow ID")
 	}
 
 	// Set default values
@@ -1573,6 +1577,10 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 			)
 		}
 		return nil, fmt.Errorf("failed to insert workflow status: %w", err)
+	}
+
+	if input.RejectExisting && result.CreatorXID != *input.CreatorXID {
+		return nil, models.NewWorkflowIDInUseError(input.Status.ID, result.Status, result.Name)
 	}
 
 	inputsQuery := s.RenderSQL(`INSERT INTO %sworkflow_input (workflow_uuid, inputs)

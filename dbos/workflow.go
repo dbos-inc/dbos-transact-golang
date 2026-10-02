@@ -848,9 +848,20 @@ const (
 	DeduplicationPolicyReturnExisting
 )
 
+// WorkflowIDReusePolicy controls how starting a workflow with an ID that already exists is handled.
+type WorkflowIDReusePolicy int
+
+const (
+	// WorkflowIDReusePolicyReturnExisting (default) returns a handle to the existing workflow.
+	WorkflowIDReusePolicyReturnExisting WorkflowIDReusePolicy = iota
+	// WorkflowIDReusePolicyReject rejects the start.
+	WorkflowIDReusePolicyReject
+)
+
 type workflowOptions struct {
 	WorkflowName        string
 	WorkflowID          string
+	WorkflowIDReuse     WorkflowIDReusePolicy
 	queue               Queue
 	ApplicationVersion  string
 	DeduplicationID     string
@@ -874,6 +885,13 @@ type WorkflowOption func(*workflowOptions)
 func WithWorkflowID(id string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.WorkflowID = id
+	}
+}
+
+// WithWorkflowIDReusePolicy sets how a workflow ID that already exists is handled.
+func WithWorkflowIDReusePolicy(policy WorkflowIDReusePolicy) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.WorkflowIDReuse = policy
 	}
 }
 
@@ -1419,12 +1437,16 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 		// Insert workflow status with transaction
 		insertInput := sysdb.InsertWorkflowStatusDBInput{
-			Status:     workflowStatus,
-			Tx:         tx,
-			CreatorXID: &creatorXID,
+			Status:         workflowStatus,
+			Tx:             tx,
+			CreatorXID:     &creatorXID,
+			RejectExisting: params.WorkflowIDReuse == WorkflowIDReusePolicyReject,
 		}
 		insertStatusResult, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
+			if errors.Is(err, ErrWorkflowIDInUse) {
+				return err
+			}
 			// Silence dedup error under return-existing policy.
 			if !(returnExisting && errors.Is(err, ErrQueueDeduplicated)) {
 				c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)

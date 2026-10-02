@@ -3555,6 +3555,131 @@ func TestWorkflowIdempotency(t *testing.T) {
 	})
 }
 
+func TestWorkflowIDReusePolicy(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	reject := WithWorkflowIDReusePolicy(WorkflowIDReusePolicyReject)
+	gate := NewEvent()
+	t.Cleanup(gate.Set)
+
+	echo := func(ctx Context, input string) (string, error) {
+		return input, nil
+	}
+	gated := func(ctx Context, input string) (string, error) {
+		gate.Wait()
+		return input, nil
+	}
+	other := func(ctx Context, input string) (string, error) {
+		return input, nil
+	}
+	startSameChildTwice := func(ctx Context, childID string) (string, error) {
+		handle, err := RunWorkflow(ctx, echo, "first", WithWorkflowID(childID), reject)
+		if err != nil {
+			return "", err
+		}
+		if _, err := handle.GetResult(); err != nil {
+			return "", err
+		}
+		if _, err := RunWorkflow(ctx, echo, "second", WithWorkflowID(childID), reject); !errors.Is(err, ErrWorkflowIDInUse) {
+			return "", fmt.Errorf("expected ErrWorkflowIDInUse, got %v", err)
+		}
+		return "rejected", nil
+	}
+	RegisterWorkflow(dbosCtx, echo)
+	RegisterWorkflow(dbosCtx, gated)
+	RegisterWorkflow(dbosCtx, other)
+	RegisterWorkflow(dbosCtx, startSameChildTwice)
+	queue, err := RegisterQueue(dbosCtx, "workflow-id-reuse-queue")
+	require.NoError(t, err)
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	snapshot := func(t *testing.T, workflowID string) WorkflowStatus {
+		workflows, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
+		require.NoError(t, err)
+		require.Len(t, workflows, 1)
+		return workflows[0]
+	}
+
+	for _, status := range []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued, WorkflowStatusSuccess} {
+		t.Run("RejectExisting"+string(status), func(t *testing.T) {
+			workflowID := uuid.NewString()
+			switch status {
+			case WorkflowStatusPending:
+				_, err := RunWorkflow(dbosCtx, gated, "original", WithWorkflowID(workflowID))
+				require.NoError(t, err)
+			case WorkflowStatusEnqueued:
+				_, err := RunWorkflow(dbosCtx, echo, "original", WithWorkflowID(workflowID), WithQueue(queue), WithApplicationVersion("no-executor-runs-this"))
+				require.NoError(t, err)
+			case WorkflowStatusSuccess:
+				handle, err := RunWorkflow(dbosCtx, echo, "original", WithWorkflowID(workflowID))
+				require.NoError(t, err)
+				_, err = handle.GetResult()
+				require.NoError(t, err)
+			}
+			before := snapshot(t, workflowID)
+			require.Equal(t, status, before.Status)
+
+			_, err := RunWorkflow(dbosCtx, echo, "new", WithWorkflowID(workflowID), reject)
+			require.ErrorIs(t, err, ErrWorkflowIDInUse)
+			var dbosErr *Error
+			require.ErrorAs(t, err, &dbosErr)
+			require.Equal(t, ErrorCodeWorkflowIDInUse, dbosErr.Code)
+			require.Equal(t, workflowID, dbosErr.WorkflowID)
+			require.Equal(t, before.Name, dbosErr.RecordedName)
+			require.Contains(t, dbosErr.Message, string(status))
+			require.Equal(t, before, snapshot(t, workflowID), "a rejected start must leave the existing workflow unchanged")
+		})
+	}
+
+	t.Run("FreshIDRunsThenNameMismatchIsInUse", func(t *testing.T) {
+		workflowID := uuid.NewString()
+		handle, err := RunWorkflow(dbosCtx, echo, "first", WithWorkflowID(workflowID), reject)
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "first", result)
+
+		// A different function on the same ID is rejected as in use, not as an unexpected workflow.
+		_, err = RunWorkflow(dbosCtx, other, "new", WithWorkflowID(workflowID), reject)
+		require.ErrorIs(t, err, ErrWorkflowIDInUse)
+		var dbosErr *Error
+		require.ErrorAs(t, err, &dbosErr)
+		require.Equal(t, snapshot(t, workflowID).Name, dbosErr.RecordedName)
+	})
+
+	t.Run("RetriedInsertIsNotRejected", func(t *testing.T) {
+		sysDB := dbosCtx.(*dbosContext).systemDB
+		workflowID := uuid.NewString()
+		insert := func(creatorXID *string) error {
+			tx, err := sysDB.Pool().BeginTx(dbosCtx, sysdb.TxOptions{})
+			require.NoError(t, err)
+			defer tx.Rollback(dbosCtx)
+			_, err = sysDB.InsertWorkflowStatus(dbosCtx, sysdb.InsertWorkflowStatusDBInput{
+				Status:         models.WorkflowStatus{ID: workflowID, Name: "retried", Status: WorkflowStatusPending},
+				Tx:             tx,
+				CreatorXID:     creatorXID,
+				RejectExisting: true,
+			})
+			if err != nil {
+				return err
+			}
+			return tx.Commit(dbosCtx)
+		}
+		creatorXID := uuid.NewString()
+		require.NoError(t, insert(&creatorXID))
+		require.NoError(t, insert(&creatorXID), "an insert retried with its own token must not be rejected")
+		require.Error(t, insert(nil), "rejecting requires a creator token")
+		require.NoError(t, CancelWorkflow(dbosCtx, workflowID))
+	})
+
+	t.Run("SameParentStartsSameChildTwice", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, startSameChildTwice, uuid.NewString())
+		require.NoError(t, err)
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "rejected", result)
+	})
+}
+
 func TestNoConcurrentWorkflowSameID(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
