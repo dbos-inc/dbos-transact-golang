@@ -1502,7 +1502,7 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
         application_name
     ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, %s, $11, %s, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
     ON CONFLICT (workflow_uuid)
-        DO UPDATE SET updated_at = EXCLUDED.updated_at
+        DO UPDATE SET creator_xid = workflow_status.creator_xid
         RETURNING status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, creator_xid`, s.dialect.SchemaPrefix(s.schema), nowMs, nowMs)
 
 	var result InsertWorkflowResult

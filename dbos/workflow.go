@@ -2151,17 +2151,18 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 
 	uncancellableCtx := WithoutCancel(c)
 	returnExisting := params.deduplicationPolicy == DeduplicationPolicyReturnExisting
+	creatorXID := uuid.New().String()
 
 	for {
 		var enqueuedID string
 		var err error
 		if isWithinWorkflow {
 			enqueuedID, err = runAsTxn(c, func(ctx context.Context, tx Tx) (string, error) {
-				return c.insertEnqueuedWorkflow(ctx, tx, status, queueName, params, returnExisting)
+				return c.insertEnqueuedWorkflow(ctx, tx, status, creatorXID, queueName, params, returnExisting)
 			}, WithStepName("DBOS.enqueue"), withChildWorkflowIDOutput())
 		} else if userTx != nil {
 			// The caller owns the transaction: no commit, no retry.
-			enqueuedID, err = c.insertEnqueuedWorkflow(uncancellableCtx, userTx, status, queueName, params, false)
+			enqueuedID, err = c.insertEnqueuedWorkflow(uncancellableCtx, userTx, status, creatorXID, queueName, params, false)
 		} else {
 			enqueuedID, err = func() (string, error) {
 				tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
@@ -2169,7 +2170,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 					return "", models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
 				}
 				defer tx.Rollback(uncancellableCtx)
-				enqueuedID, err := c.insertEnqueuedWorkflow(uncancellableCtx, tx, status, queueName, params, returnExisting)
+				enqueuedID, err := c.insertEnqueuedWorkflow(uncancellableCtx, tx, status, creatorXID, queueName, params, returnExisting)
 				if err != nil {
 					return enqueuedID, err
 				}
@@ -2196,10 +2197,11 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 
 // Insert the enqueued workflow and lookup any existing deduplicated workflow if
 // a serialization error is raised AND the policy is return existing.
-func (c *dbosContext) insertEnqueuedWorkflow(ctx context.Context, tx Tx, status WorkflowStatus, queueName string, params *enqueueOptions, returnExisting bool) (string, error) {
+func (c *dbosContext) insertEnqueuedWorkflow(ctx context.Context, tx Tx, status WorkflowStatus, creatorXID string, queueName string, params *enqueueOptions, returnExisting bool) (string, error) {
 	insertInput := sysdb.InsertWorkflowStatusDBInput{
-		Status: status,
-		Tx:     tx,
+		Status:     status,
+		Tx:         tx,
+		CreatorXID: &creatorXID,
 	}
 	if _, err := c.systemDB.InsertWorkflowStatus(ctx, insertInput); err != nil {
 		if returnExisting && errors.Is(err, ErrQueueDeduplicated) {

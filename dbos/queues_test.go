@@ -401,6 +401,9 @@ func TestWorkflowQueues(t *testing.T) {
 		dlqStartEvent.Wait()
 		dlqStartEvent.Clear()
 
+		before, err := originalHandle.GetStatus()
+		require.NoError(t, err, "failed to get status before re-enqueueing")
+
 		// Re-enqueue the same workflow ID many times; should not trigger DLQ (attempts stay 1)
 		for i := range dlqMaxRetries * 2 {
 			_, err := RunWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue), WithWorkflowID(workflowID))
@@ -417,6 +420,7 @@ func TestWorkflowQueues(t *testing.T) {
 		status, err := originalHandle.GetStatus()
 		require.NoError(t, err, "failed to get status of original workflow handle")
 		assert.Equal(t, 1, status.Attempts, "expected attempts to be 1")
+		assert.Equal(t, before, status, "expected re-enqueues to leave the workflow row unchanged")
 
 		// Deblock so the workflow can complete
 		dlqCompleteEvent.Set()
