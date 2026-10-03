@@ -43,6 +43,9 @@ type SystemDatabase interface {
 	// Workflows
 	InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
 	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]models.WorkflowStatus, error)
+	// ForkDescendants returns, for each root, every workflow recursively forked
+	// from it, excluding the root. One query, on input.Tx.
+	ForkDescendants(ctx context.Context, input ForkDescendantsDBInput) (map[string][]string, error)
 	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) (bool, error)
 	SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration, failIfMissing bool) (*AwaitWorkflowResultOutput, error)
@@ -1945,6 +1948,94 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 	}
 
 	return workflows, nil
+}
+
+// ForkDescendantsDBInput is the set of workflows whose fork subtrees to read.
+// Tx is the send transaction, so the read commits or rolls back with the insert.
+type ForkDescendantsDBInput struct {
+	Roots []string
+	Tx    Tx
+}
+
+// ForkDescendants lists every workflow recursively forked from Roots, excluding
+// the roots themselves. One recursive CTE. Cycles and self-references are omitted.
+// Each slice is sorted.
+func (s *SysDB) ForkDescendants(ctx context.Context, input ForkDescendantsDBInput) (map[string][]string, error) {
+	out := make(map[string][]string, len(input.Roots))
+	for _, root := range input.Roots {
+		if _, ok := out[root]; ok {
+			continue
+		}
+		out[root] = []string{}
+	}
+	if len(out) == 0 {
+		return out, nil
+	}
+	if input.Tx == nil {
+		return nil, errors.New("fork descendants must run on the send transaction")
+	}
+
+	roots := make([]string, 0, len(out))
+	for root := range out {
+		roots = append(roots, root)
+	}
+	rootsParam, err := encodeArrayParam(s.dialect, roots)
+	if err != nil {
+		return nil, fmt.Errorf("fork descendants: %w", err)
+	}
+
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+	rootMatch := dialectAnyClause(s.dialect, "forked_from", 1)
+	var query string
+	if s.dialect.SupportsArrayParameters() {
+		query = s.RenderSQL(`WITH RECURSIVE fork_tree AS (
+			SELECT workflow_uuid AS id, forked_from AS root,
+			       ARRAY[forked_from, workflow_uuid]::text[] AS path
+			FROM %sworkflow_status
+			WHERE %s AND workflow_uuid <> forked_from
+			UNION ALL
+			SELECT w.workflow_uuid, t.root, t.path || w.workflow_uuid
+			FROM %sworkflow_status w
+			INNER JOIN fork_tree t ON w.forked_from = t.id
+			WHERE w.workflow_uuid <> w.forked_from
+			  AND NOT (w.workflow_uuid = ANY(t.path))
+		)
+		SELECT root, id FROM fork_tree WHERE id <> root ORDER BY root, id`,
+			schemaPrefix, rootMatch, schemaPrefix)
+	} else {
+		query = s.RenderSQL(`WITH RECURSIVE fork_tree AS (
+			SELECT workflow_uuid AS id, forked_from AS root,
+			       json_array(forked_from, workflow_uuid) AS path
+			FROM %sworkflow_status
+			WHERE %s AND workflow_uuid <> forked_from
+			UNION ALL
+			SELECT w.workflow_uuid, t.root, json_insert(t.path, '$[#]', w.workflow_uuid)
+			FROM %sworkflow_status w
+			INNER JOIN fork_tree t ON w.forked_from = t.id
+			WHERE w.workflow_uuid <> w.forked_from
+			  AND NOT EXISTS (SELECT 1 FROM json_each(t.path) AS seen WHERE seen.value = w.workflow_uuid)
+		)
+		SELECT root, id FROM fork_tree WHERE id <> root ORDER BY root, id`,
+			schemaPrefix, rootMatch, schemaPrefix)
+	}
+
+	rows, err := input.Tx.Query(ctx, query, rootsParam)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list fork descendants: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var root, id string
+		if err := rows.Scan(&root, &id); err != nil {
+			return nil, fmt.Errorf("failed to scan fork descendant: %w", err)
+		}
+		out[root] = append(out[root], id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating fork descendants: %w", err)
+	}
+	return out, nil
 }
 
 type UpdateWorkflowOutcomeDBInput struct {
