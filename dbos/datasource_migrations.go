@@ -2,12 +2,15 @@ package dbos
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
 
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Records the data source schema version. Separate from the system database's
@@ -166,6 +169,108 @@ func migrateDataSourceTx(ctx context.Context, tx Querier, dialect Dialect, schem
 	}
 	if _, err := tx.Exec(ctx, dialect.RewriteQuery(record), latest); err != nil {
 		return fmt.Errorf("failed to record data source schema version %d: %w", latest, err)
+	}
+	return nil
+}
+
+// verifyDataSource errors unless the data source schema is migrated, creating
+// and changing nothing. A schema ahead of this build belongs to a newer peer,
+// which migration also tolerates.
+func verifyDataSource(ctx context.Context, pool Pool, dialect Dialect, schema, name string) error {
+	current, err := sysdb.RetryWithResult(ctx, func() (int64, error) {
+		return readDataSourceVersion(ctx, pool, dialect, schema)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to read the data source schema version: %w", err)
+	}
+	latest := int64(len(dataSourceMigrations(dialect, schema)))
+	if current < latest {
+		return models.NewInitializationError(fmt.Sprintf(
+			"data source %q schema %q is at transaction schema version %d, but this version of DBOS requires %d. "+
+				"This data source is configured with SkipMigrations, so it will not migrate it: either migrate it "+
+				"out of band (dbos.MigrateDataSource) or create it with migrations enabled",
+			name, schema, current, latest))
+	}
+	return nil
+}
+
+// DataSourcePermissionStatements returns the SQL granting roleName the minimal
+// permissions a data source needs at runtime on schemaName: read the schema
+// version, and read, write and delete checkpoints. MigrateDataSource executes
+// it for WithMigrateApplicationRole.
+func DataSourcePermissionStatements(schemaName, roleName string) []string {
+	if schemaName == "" {
+		schemaName = _DEFAULT_SYSTEM_DB_SCHEMA
+	}
+	schemaSQL := pgx.Identifier{schemaName}.Sanitize()
+	roleSQL := pgx.Identifier{roleName}.Sanitize()
+	return []string{
+		fmt.Sprintf(`GRANT USAGE ON SCHEMA %s TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`GRANT SELECT, INSERT, DELETE ON %s.%s TO %s`, schemaSQL, transactionCompletionTable, roleSQL),
+		fmt.Sprintf(`GRANT SELECT ON %s.%s TO %s`, schemaSQL, dataSourceMigrationsTable, roleSQL),
+	}
+}
+
+// MigrateDataSource creates or migrates the DBOS schema of a data source's
+// database, typically with a privileged role, without a DBOS context. Pair it
+// with WithDataSourceSkipMigrations for application processes whose role cannot
+// run DDL. It accepts the same engine types as NewDataSource and the schema,
+// application role and logger options of Migrate.
+//
+// Example:
+//
+//	err := dbos.MigrateDataSource(ctx, adminPool, dbos.WithMigrateApplicationRole("app_user"))
+func MigrateDataSource[E Engine](ctx context.Context, engine E, opts ...MigrateOption) error {
+	options := migrateOptions{schema: _DEFAULT_SYSTEM_DB_SCHEMA, logger: slog.Default()}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	if options.schema == "" {
+		options.schema = _DEFAULT_SYSTEM_DB_SCHEMA
+	}
+	if options.logger == nil {
+		options.logger = slog.Default()
+	}
+
+	var (
+		pool    Pool
+		dialect Dialect
+	)
+	switch e := any(engine).(type) {
+	case *pgxpool.Pool:
+		if e == nil {
+			return errors.New("data source engine (*pgxpool.Pool) is nil")
+		}
+		pool = sysdb.NewPgxPool(e)
+		dialect = sysdb.PostgresDialect{}
+	case *sql.DB:
+		if e == nil {
+			return errors.New("data source engine (*sql.DB) is nil")
+		}
+		if options.applicationRole != "" {
+			return errors.New("an application role is not supported for SQLite")
+		}
+		pool = sysdb.NewSQLPool(e)
+		dialect = sysdb.SqliteDialect{}
+	}
+	dialect, err := resolvePoolDialect(ctx, pool, dialect, options.logger)
+	if err != nil {
+		return err
+	}
+	if err := migrateDataSource(ctx, pool, dialect, options.schema, options.logger); err != nil {
+		return err
+	}
+	if options.applicationRole == "" {
+		return nil
+	}
+	options.logger.Info("Granting data source permissions", "schema", options.schema, "role", options.applicationRole)
+	for _, stmt := range DataSourcePermissionStatements(options.schema, options.applicationRole) {
+		if err := sysdb.Retry(ctx, func() error {
+			_, err := pool.Exec(ctx, stmt)
+			return err
+		}, sysdb.WithRetrierLogger(options.logger)); err != nil {
+			return fmt.Errorf("failed to grant permissions to role %s: %w", options.applicationRole, err)
+		}
 	}
 	return nil
 }
