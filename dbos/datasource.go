@@ -356,15 +356,17 @@ func (ds *DataSource) deleteCheckpoints(ctx context.Context, workflowID string, 
 	return nil
 }
 
+var errCompletionRecorded = errors.New("transaction completion already recorded")
+
 // recordCompletion writes the durability row for (workflowID, stepID).
-// A duplicate row surfaces as a workflow-conflict error.
+// A duplicate row surfaces as errCompletionRecorded.
 func (ds *DataSource) recordCompletion(ctx context.Context, q Querier, workflowID string, stepID int, output, errStr *string, serialization string) error {
 	query := ds.dialect.RewriteQuery(fmt.Sprintf(
 		`INSERT INTO %s (workflow_id, step_id, output, error, serialization, created_at) VALUES ($1, $2, $3, $4, $5, %s)`,
 		ds.qualifiedCompletionTable(), ds.dialect.NowMsSQL()))
 	if _, err := q.Exec(ctx, query, workflowID, stepID, output, errStr, serialization); err != nil {
 		if ds.dialect.IsUniqueViolation(err) {
-			return models.NewWorkflowConflictIDError(workflowID)
+			return errCompletionRecorded
 		}
 		return err
 	}
@@ -473,6 +475,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 			StartedAt:     startedAt,
 			CompletedAt:   time.Now(),
 			Serialization: serialization,
+			OwnerXID:      stepState.ownerXID,
 		}
 		return sysdb.Retry(c, func() error {
 			return c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
@@ -504,7 +507,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 	if err != nil {
 		return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking transaction completion: %w", err))
 	}
-	if completion != nil {
+	replayCompletion := func(completion *completionRecord) (any, error) {
 		// Replay with the codec the row was written with, not the current one.
 		replaySer := completion.serialization
 		if replaySer == "" {
@@ -515,6 +518,39 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 		}
 		return stepCheckpointedOutcome{value: completion.output, serialization: replaySer},
 			deserializeWorkflowError(completion.errStr)
+	}
+	if completion != nil {
+		return replayCompletion(completion)
+	}
+
+	stillOwns := func() error {
+		owner, err := sysdb.RetryWithResult(c, func() (*string, error) {
+			return c.systemDB.GetWorkflowOwner(uncancellableCtx, stepState.workflowID)
+		}, sysdb.WithRetrierLogger(c.logger))
+		if err != nil {
+			return models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking workflow owner: %w", err))
+		}
+		if owner == nil || *owner != stepState.ownerXID {
+			return models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, models.NewWorkflowConflictIDError(stepState.workflowID))
+		}
+		return nil
+	}
+
+	resolveRecordedCompletion := func() (any, error) {
+		if err := stillOwns(); err != nil {
+			return nil, err
+		}
+		completion, err := sysdb.RetryWithResult(c, func() (*completionRecord, error) {
+			return ds.checkCompletion(uncancellableCtx, ds.pool, stepState.workflowID, stepState.stepID)
+		}, sysdb.WithRetrierLogger(c.logger))
+		if err != nil {
+			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking transaction completion: %w", err))
+		}
+		// This should only happen if the user deleted the row, or during a weird rewind race
+		if completion == nil {
+			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("%w, but no row was found", errCompletionRecorded))
+		}
+		return replayCompletion(completion)
 	}
 
 	// Fresh execution.
@@ -546,6 +582,12 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 		if recErr := ds.recordCompletion(uncancellableCtx, tx, stepState.workflowID, stepState.stepID, encoded, nil, ser.Name()); recErr != nil {
 			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("recording transaction completion: %w", recErr))
 		}
+		if err := stillOwns(); err != nil {
+			return nil, err
+		}
+		// We might still lose ownership between the previous read and the commit
+		// The later, owning writer will adopt our write.
+		// Still correct because fn must be deterministic.
 		if cmErr := tx.Commit(uncancellableCtx); cmErr != nil {
 			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to commit transaction: %w", cmErr))
 		}
@@ -569,6 +611,10 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 	if isWorkflowCtxCancelled(stepState) {
 		return stepOutput, interruptedStepError(stepState, stepError)
 	}
+	// The workflow changed hands before txn1 committed. We rolled back and, now, park.
+	if errors.Is(stepError, ErrConflictingWorkflowID) {
+		return nil, stepError
+	}
 
 	// txn2: checkpoint the outcome into the system database.
 	encodedStepOutput, serErr := ser.Encode(stepOutput)
@@ -576,7 +622,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 		return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize transaction output: %w", serErr))
 	}
 	var serializedErr *string
-	if stepError != nil {
+	if stepError != nil && !errors.Is(stepError, errCompletionRecorded) {
 		s := serializeWorkflowError(c.logger, stepError, ser.Name())
 		serializedErr = &s
 	}
@@ -584,14 +630,25 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 	// Mirror the failure into the user database so the user's own database is self-describing.
 	// fn's transaction rolled back, so this is a standalone insert on the pool,
 	// written before the system-DB checkpoint to keep the layer-1-then-layer-2 recovery order.
-	// Best-effort.
+	// Best-effort, except that a row recorded meanwhile wins over the failure.
+	// This refers to non-conflict errors only
 	if serializedErr != nil {
 		if recErr := sysdb.Retry(c, func() error {
 			return ds.recordCompletion(uncancellableCtx, ds.pool, stepState.workflowID, stepState.stepID, nil, serializedErr, ser.Name())
 		}, sysdb.WithRetrierLogger(c.logger)); recErr != nil {
-			c.logger.Warn("Failed to record transaction failure in the user database; the system database remains the source of truth",
-				"datasource", ds.name, "workflow_id", stepState.workflowID, "step_id", stepState.stepID, "error", recErr)
+			if errors.Is(recErr, errCompletionRecorded) {
+				stepError = recErr
+			} else {
+				c.logger.Warn("Failed to record transaction failure in the user database; the system database remains the source of truth",
+					"datasource", ds.name, "workflow_id", stepState.workflowID, "step_id", stepState.stepID, "error", recErr)
+			}
 		}
+	}
+	// If the step completion was already recorded, we might have lost ownership of this execution
+	// Or we tried to write after having lost the commit ack
+	// Resolve the situation (park or replay)
+	if errors.Is(stepError, errCompletionRecorded) {
+		return resolveRecordedCompletion()
 	}
 
 	if cerr := checkpoint(encodedStepOutput, serializedErr, ser.Name(), stepStartTime); cerr != nil {

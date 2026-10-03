@@ -191,6 +191,11 @@ func TestClientEnqueue(t *testing.T) {
 
 		assert.Equal(t, "processed: test-input", result)
 
+		// Under the reject policy, the same ID is refused
+		_, err = Enqueue[string, wfInput](client, queue.GetName(), "ServerWorkflow", wfInput{Input: "test-input"},
+			WithEnqueueWorkflowID(customWorkflowID), WithEnqueueWorkflowIDReusePolicy(WorkflowIDReusePolicyReject))
+		require.ErrorIs(t, err, ErrWorkflowIDInUse)
+
 		assert.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after global concurrency test")
 	})
 
@@ -612,12 +617,24 @@ func TestCancelResume(t *testing.T) {
 
 		assert.Equal(t, WorkflowStatusCancelled, cancelStatus.Status, "expected workflow status to be CANCELLED")
 
+		// Release the cancelled run: it stops at step two without running it
+		proceedSignal.Set()
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected the cancelled workflow to report cancellation")
+		dbosErr, ok := err.(*Error)
+		require.True(t, ok, "expected a DBOS error, got %T", err)
+		assert.Equal(t, ErrorCodeAwaitedWorkflowCancelled, dbosErr.Code)
+		assert.Equal(t, 1, stepsCompleted, "expected steps completed to remain 1 after cancellation")
+		// The polling handle reports the CANCELLED row before the run has reached step two.
+		// Resuming earlier would hand the row to a new execution the old run still races.
+		require.Eventually(t, func() bool {
+			return len(serverCtx.(*dbosContext).activeExecutionsOf(workflowID)) == 0
+		}, 10*time.Second, 10*time.Millisecond, "the cancelled run never stopped")
+
 		// Resume the workflow
 		resumeHandle, err := client.ResumeWorkflow(client, workflowID)
 		require.NoError(t, err, "failed to resume workflow")
 
-		// Wait for workflow completion
-		proceedSignal.Set() // Allow the workflow to proceed to step two
 		resultAny, err := resumeHandle.GetResult()
 		require.NoError(t, err, "failed to get result from resumed workflow")
 
@@ -1054,6 +1071,35 @@ func TestForkWorkflow(t *testing.T) {
 		require.NoError(t, err)
 		for _, wf := range forkedFromFalse {
 			assert.NotEqual(t, originalWorkflowID, wf.ID, "WithFilterWasForkedFrom(false) must exclude forked-from workflows")
+		}
+
+		// WithFilterIsFork filters on the other end of the relationship: the forks themselves.
+		forks, err := client.ListWorkflows(client, WithFilterForkedFrom(originalWorkflowID))
+		require.NoError(t, err)
+		require.NotEmpty(t, forks, "expected forks of the original workflow")
+
+		isForkTrue, err := client.ListWorkflows(client, WithFilterIsFork(true))
+		require.NoError(t, err)
+		isForkIDs := make(map[string]bool)
+		for _, wf := range isForkTrue {
+			assert.NotEmpty(t, wf.ForkedFrom, "WithFilterIsFork(true) must only return forks")
+			isForkIDs[wf.ID] = true
+		}
+		for _, fork := range forks {
+			assert.True(t, isForkIDs[fork.ID], "fork %s should be returned by WithFilterIsFork(true)", fork.ID)
+		}
+		assert.False(t, isForkIDs[originalWorkflowID], "original workflow must not be returned by WithFilterIsFork(true)")
+
+		isForkFalse, err := client.ListWorkflows(client, WithFilterIsFork(false))
+		require.NoError(t, err)
+		nonForkIDs := make(map[string]bool)
+		for _, wf := range isForkFalse {
+			assert.Empty(t, wf.ForkedFrom, "WithFilterIsFork(false) must only return non-forks")
+			nonForkIDs[wf.ID] = true
+		}
+		assert.True(t, nonForkIDs[originalWorkflowID], "original workflow should be returned by WithFilterIsFork(false)")
+		for _, fork := range forks {
+			assert.False(t, nonForkIDs[fork.ID], "fork %s must be excluded by WithFilterIsFork(false)", fork.ID)
 		}
 	})
 

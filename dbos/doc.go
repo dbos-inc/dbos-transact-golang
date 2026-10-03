@@ -97,6 +97,12 @@
 //	// Resume a cancelled workflow
 //	err = dbos.ResumeWorkflow(ctx, workflowID)
 //
+// Cancelling the context a workflow was started under (including a parent's context
+// propagating to its children) durably cancels the workflow only while that execution
+// still owns it. Once the workflow was recovered or resumed elsewhere, the context no
+// longer reaches it: use CancelWorkflow, which cancels whichever execution owns it.
+// A step still running when a cancel lands is not checkpointed; a resume re-executes it.
+//
 //	// Fork a workflow from a specific step
 //	handle, err := dbos.ForkWorkflow[string](ctx, dbos.ForkWorkflowInput{OriginalWorkflowID: originalID, StartStep: stepNumber})
 //
@@ -113,8 +119,11 @@
 //	Awaiting a workflow that was cancelled               ErrAwaitedWorkflowCancelled
 //	Recv/GetEvent/GetResult wait timeout                 ErrTimeout
 //	Enqueue rejected by deduplication ID                 ErrQueueDeduplicated
-//	Workflow ID conflict or duplicate operation          ErrConflictingWorkflowID
+//	Execution no longer owns the workflow (recovered,    ErrConflictingWorkflowID
+//	resumed or completed elsewhere); its writes are refused
 //	Workflow ID reused with different function or queue  ErrUnexpectedWorkflow
+//	Workflow ID already exists, under the reject policy  ErrWorkflowIDInUse
+//	Step ID recorded twice with different results        ErrStepNondeterminism
 //	Step exhausted its retries                           ErrMaxStepRetriesExceeded
 //	Workflow not found                                   ErrNonExistentWorkflow
 //	Queue not found                                      ErrQueueNotFound

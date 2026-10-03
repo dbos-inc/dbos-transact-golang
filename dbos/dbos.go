@@ -46,24 +46,25 @@ type Config struct {
 	// sqlite::memory:). Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
 	// SQLite URLs additionally require importing the driver package:
 	// import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
-	DatabaseURL                  string
-	SystemDBPool                 *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
-	SQLiteSystemDB               *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
-	DatabaseSchema               string          // Database schema name (defaults to "dbos")
-	Logger                       *slog.Logger    // Custom logger instance (defaults to a new slog logger)
-	ConductorURL                 string          // DBOS conductor service URL (optional)
-	ConductorAPIKey              string          // DBOS conductor API key (optional)
-	ConductorExecutorMetadata    map[string]any  // Metadata associated with this executor that may be used to identify it on the Conductor dashboard. Must be JSON-serializable.
-	ApplicationVersion           string          // Application version (optional, overridden by DBOS__APPVERSION env var)
-	ExecutorID                   string          // Executor ID (optional, overridden by DBOS__VMID env var)
-	EnablePatching               bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
-	Serializer                   Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
-	SchedulerPollingInterval     time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
-	SystemDBStartupTimeout       time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
-	NotificationCoalesceInterval time.Duration   // Controls how often stream-write and set-event notifications are batched
-	SkipMigrations               bool            // Verify the system database schema on launch instead of creating and migrating it
-	namelessOwner                bool            // Act for no specific application: write unclaimed rows, matches all. Used by clients without an AppName.
-	isClient                     bool            // Client handle: runs no workflows, so enqueues leave the version unset by default.
+	DatabaseURL                    string
+	SystemDBPool                   *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
+	SQLiteSystemDB                 *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
+	DatabaseSchema                 string          // Database schema name (defaults to "dbos")
+	Logger                         *slog.Logger    // Custom logger instance (defaults to a new slog logger)
+	ConductorURL                   string          // DBOS conductor service URL (optional)
+	ConductorAPIKey                string          // DBOS conductor API key (optional)
+	ConductorExecutorMetadata      map[string]any  // Metadata associated with this executor that may be used to identify it on the Conductor dashboard. Must be JSON-serializable.
+	ApplicationVersion             string          // Application version (optional, overridden by DBOS__APPVERSION env var)
+	ExecutorID                     string          // Executor ID (optional, overridden by DBOS__VMID env var)
+	EnablePatching                 bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
+	Serializer                     Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
+	SchedulerPollingInterval       time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
+	SystemDBStartupTimeout         time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
+	SystemDBIdleTransactionTimeout time.Duration   // Postgres idle_in_transaction_session_timeout for the connections DBOS creates (defaults to 1 minute; negative leaves the server setting)
+	NotificationCoalesceInterval   time.Duration   // Controls how often stream-write and set-event notifications are batched
+	SkipMigrations                 bool            // Verify the system database schema on launch instead of creating and migrating it
+	namelessOwner                  bool            // Act for no specific application: write unclaimed rows, matches all. Used by clients without an AppName.
+	isClient                       bool            // Client handle: runs no workflows, so enqueues leave the version unset by default.
 }
 
 var applicationNamePattern = regexp.MustCompile(`^[a-z0-9-_]{3,256}$`)
@@ -87,30 +88,34 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	if inputConfig.SystemDBStartupTimeout < 0 {
 		return nil, fmt.Errorf("systemDBStartupTimeout cannot be negative")
 	}
+	if inputConfig.SystemDBIdleTransactionTimeout > sysdb.MaxIdleTransactionTimeout {
+		return nil, fmt.Errorf("systemDBIdleTransactionTimeout cannot exceed %s", sysdb.MaxIdleTransactionTimeout)
+	}
 	if inputConfig.NotificationCoalesceInterval < 0 || (inputConfig.NotificationCoalesceInterval > 0 && inputConfig.NotificationCoalesceInterval < sysdb.MinNotificationCoalesceInterval) {
 		return nil, fmt.Errorf("notificationCoalesceInterval must be at least %s, got %s", sysdb.MinNotificationCoalesceInterval, inputConfig.NotificationCoalesceInterval)
 	}
 
 	dbosConfig := &Config{
-		DatabaseURL:                  inputConfig.DatabaseURL,
-		AppName:                      inputConfig.AppName,
-		DatabaseSchema:               inputConfig.DatabaseSchema,
-		SkipMigrations:               inputConfig.SkipMigrations,
-		Logger:                       inputConfig.Logger,
-		ConductorURL:                 inputConfig.ConductorURL,
-		ConductorAPIKey:              inputConfig.ConductorAPIKey,
-		ConductorExecutorMetadata:    inputConfig.ConductorExecutorMetadata,
-		ApplicationVersion:           inputConfig.ApplicationVersion,
-		ExecutorID:                   inputConfig.ExecutorID,
-		SystemDBPool:                 inputConfig.SystemDBPool,
-		SQLiteSystemDB:               inputConfig.SQLiteSystemDB,
-		EnablePatching:               inputConfig.EnablePatching,
-		Serializer:                   inputConfig.Serializer,
-		SchedulerPollingInterval:     inputConfig.SchedulerPollingInterval,
-		SystemDBStartupTimeout:       inputConfig.SystemDBStartupTimeout,
-		NotificationCoalesceInterval: inputConfig.NotificationCoalesceInterval,
-		namelessOwner:                inputConfig.namelessOwner,
-		isClient:                     inputConfig.isClient,
+		DatabaseURL:                    inputConfig.DatabaseURL,
+		AppName:                        inputConfig.AppName,
+		DatabaseSchema:                 inputConfig.DatabaseSchema,
+		SkipMigrations:                 inputConfig.SkipMigrations,
+		Logger:                         inputConfig.Logger,
+		ConductorURL:                   inputConfig.ConductorURL,
+		ConductorAPIKey:                inputConfig.ConductorAPIKey,
+		ConductorExecutorMetadata:      inputConfig.ConductorExecutorMetadata,
+		ApplicationVersion:             inputConfig.ApplicationVersion,
+		ExecutorID:                     inputConfig.ExecutorID,
+		SystemDBPool:                   inputConfig.SystemDBPool,
+		SQLiteSystemDB:                 inputConfig.SQLiteSystemDB,
+		EnablePatching:                 inputConfig.EnablePatching,
+		Serializer:                     inputConfig.Serializer,
+		SchedulerPollingInterval:       inputConfig.SchedulerPollingInterval,
+		SystemDBStartupTimeout:         inputConfig.SystemDBStartupTimeout,
+		SystemDBIdleTransactionTimeout: inputConfig.SystemDBIdleTransactionTimeout,
+		NotificationCoalesceInterval:   inputConfig.NotificationCoalesceInterval,
+		namelessOwner:                  inputConfig.namelessOwner,
+		isClient:                       inputConfig.isClient,
 	}
 
 	if dbosConfig.ConductorExecutorMetadata != nil {
@@ -138,6 +143,9 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 	if dbosConfig.SystemDBStartupTimeout == 0 {
 		dbosConfig.SystemDBStartupTimeout = _DEFAULT_SYSTEM_DB_STARTUP_TIMEOUT
+	}
+	if dbosConfig.SystemDBIdleTransactionTimeout == 0 {
+		dbosConfig.SystemDBIdleTransactionTimeout = sysdb.DefaultIdleTransactionTimeout
 	}
 	if dbosConfig.NotificationCoalesceInterval == 0 {
 		dbosConfig.NotificationCoalesceInterval = sysdb.DefaultNotificationCoalesceInterval
@@ -248,7 +256,7 @@ type Context interface {
 	Client
 
 	// Context Lifecycle
-	Launch() error // Launch the DBOS runtime (system database, queues, scheduler) and recover this executor's PENDING workflows: interrupted workflows resume from their last completed step; queued ones are returned to their queue. Only valid on the Context returned by NewContext
+	Launch() error // Launch the DBOS runtime (system database, queues, scheduler) and recover this executor's PENDING workflows: interrupted workflows resume from their last completed step; queued ones are returned to their queue. When Conductor is configured, recovery is left to Conductor. Only valid on the Context returned by NewContext
 
 	// Workflow operations
 	RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any, error)                                      // Execute a function as a durable step within a workflow
@@ -277,12 +285,13 @@ type Context interface {
 	GetApplicationID() string      // Get the application ID for this context
 
 	// Context management
-	From(_ Context, ctx context.Context) Context                                // Returns a copy of the current Context wrapping the provided context.Context
-	WithoutCancel(_ Context) Context                                            // Returns a copy that is not canceled when the parent is canceled
-	WithTimeout(_ Context, timeout time.Duration) (Context, context.CancelFunc) // Returns a copy that is canceled after the timeout
-	WithValue(key, val any) Context                                             // Returns a copy of the DBOS context with the given key-value pair
-	WithCancel() (Context, context.CancelFunc)                                  // Returns a copy that can be manually canceled
-	WithCancelCause() (Context, context.CancelCauseFunc)                        // Returns a copy of the DBOS context that can be canceled with a cause
+	From(_ Context, ctx context.Context) Context                                                // Returns a copy of the current Context wrapping the provided context.Context
+	WithoutCancel(_ Context) Context                                                            // Returns a copy that is not canceled when the parent is canceled
+	WithTimeout(_ Context, timeout time.Duration) (Context, context.CancelFunc)                 // Returns a copy that is canceled after the timeout
+	WithDeadlineCause(_ Context, deadline time.Time, cause error) (Context, context.CancelFunc) // Returns a copy that is canceled at the deadline with the given cause
+	WithValue(key, val any) Context                                                             // Returns a copy of the DBOS context with the given key-value pair
+	WithCancel() (Context, context.CancelFunc)                                                  // Returns a copy that can be manually canceled
+	WithCancelCause() (Context, context.CancelCauseFunc)                                        // Returns a copy of the DBOS context that can be canceled with a cause
 
 	// Alert handling
 	SetAlertHandler(handler AlertHandler) // Register a handler for alerts from DBOS Conductor (must be called before Launch)
@@ -290,6 +299,7 @@ type Context interface {
 
 type dbosContext struct {
 	ctx           context.Context
+	rootCtx       context.Context
 	ctxCancelFunc context.CancelCauseFunc
 	root          bool
 
@@ -320,13 +330,14 @@ type dbosContext struct {
 	workflowRegistry        *sync.Map // map[string]WorkflowRegistryEntry
 	workflowCustomNametoFQN *sync.Map // Maps fully qualified workflow names to custom names. Usefor when client enqueues a workflow by name because registry is indexed by FQN.
 
-	// Set of workflow IDs currently running on this context (key = workflow ID, value = activeWorkflowEntry)
-	activeWorkflowIDs *sync.Map
+	// Executions running on this context (key = executionKey, value = activeWorkflowEntry)
+	activeExecutions *sync.Map
 
 	// Workflow scheduler
-	workflowScheduler        *cron.Cron
-	workflowSchedulerStarted atomic.Bool
-	scheduleReconcilerWg     sync.WaitGroup
+	workflowScheduler         *cron.Cron
+	workflowSchedulerStarted  atomic.Bool
+	scheduleReconcilerWg      sync.WaitGroup
+	workflowTimeoutsMonitorWg sync.WaitGroup
 
 	scheduleMu sync.Mutex
 	// Schedule entry ID mapping (scheduleName -> cron.EntryID)
@@ -417,13 +428,14 @@ func (c *dbosContext) Value(key any) any {
 func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 	childCtx := &dbosContext{
 		ctx:                     ctx,
+		rootCtx:                 c.rootCtx,
 		config:                  c.config,
 		logger:                  c.logger,
 		systemDB:                c.systemDB,
 		workflowsWg:             c.workflowsWg,
 		workflowRegistry:        c.workflowRegistry,
 		workflowCustomNametoFQN: c.workflowCustomNametoFQN,
-		activeWorkflowIDs:       c.activeWorkflowIDs,
+		activeExecutions:        c.activeExecutions,
 		applicationVersion:      c.applicationVersion,
 		executorID:              c.executorID,
 		applicationID:           c.applicationID,
@@ -531,6 +543,20 @@ func WithTimeout(ctx Context, timeout time.Duration) (Context, context.CancelFun
 	return ctx.WithTimeout(ctx, timeout)
 }
 
+func (c *dbosContext) WithDeadlineCause(_ Context, deadline time.Time, cause error) (Context, context.CancelFunc) {
+	newCtx, cancelFunc := context.WithDeadlineCause(c.ctx, deadline, cause)
+	return c.clone(newCtx), cancelFunc
+}
+
+// WithDeadlineCause returns a copy of the DBOS context that is canceled at the given deadline,
+// with cause as the error returned by context.Cause.
+func WithDeadlineCause(ctx Context, deadline time.Time, cause error) (Context, context.CancelFunc) {
+	if ctx == nil {
+		return nil, func() {}
+	}
+	return ctx.WithDeadlineCause(ctx, deadline, cause)
+}
+
 func (c *dbosContext) getWorkflowScheduler() *cron.Cron {
 	return c.workflowScheduler
 }
@@ -608,12 +634,13 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	initExecutor := &dbosContext{
 		workflowsWg:                 &sync.WaitGroup{},
 		ctx:                         dbosBaseCtx,
+		rootCtx:                     dbosBaseCtx,
 		ctxCancelFunc:               cancelFunc,
 		root:                        true,
 		launched:                    &atomic.Bool{},
 		workflowRegistry:            &sync.Map{},
 		workflowCustomNametoFQN:     &sync.Map{},
-		activeWorkflowIDs:           &sync.Map{},
+		activeExecutions:            &sync.Map{},
 		dataSources:                 &dataSourceRegistry{},
 		workflowScheduler:           cron.New(cron.WithSeconds()),
 		scheduleEntryIDs:            make(map[string]cron.EntryID),
@@ -651,6 +678,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		Logger:                       initExecutor.logger,
 		AppName:                      ownerAppName,
 		ConnectionAppName:            config.AppName,
+		IdleTransactionTimeout:       config.SystemDBIdleTransactionTimeout,
 		NotificationCoalesceInterval: config.NotificationCoalesceInterval,
 		EncodeScheduledInput: func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error) {
 			ser := resolveEncoder(ctx)
@@ -731,14 +759,15 @@ type ClientConfig struct {
 	// Exactly one of DatabaseURL, SystemDBPool, or SQLiteSystemDB must be set.
 	// SQLite URLs additionally require importing the driver package:
 	// import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
-	DatabaseURL            string
-	AppName                string          // The application this client acts on behalf of. Leave empty to list all workflows, but beware that writing will serve all applications.
-	SystemDBPool           *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
-	SQLiteSystemDB         *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
-	DatabaseSchema         string          // Database schema name (defaults to "dbos")
-	Logger                 *slog.Logger    // Optional custom logger
-	Serializer             Serializer[any] // Optional custom serializer (defaults to JSON)
-	SystemDBStartupTimeout time.Duration   // Maximum time for system-database connection and schema verification (defaults to 2 minutes)
+	DatabaseURL                    string
+	AppName                        string          // The application this client acts on behalf of. Leave empty to list all workflows, but beware that writing will serve all applications.
+	SystemDBPool                   *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
+	SQLiteSystemDB                 *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
+	DatabaseSchema                 string          // Database schema name (defaults to "dbos")
+	Logger                         *slog.Logger    // Optional custom logger
+	Serializer                     Serializer[any] // Optional custom serializer (defaults to JSON)
+	SystemDBStartupTimeout         time.Duration   // Maximum time for system-database connection and schema verification (defaults to 2 minutes)
+	SystemDBIdleTransactionTimeout time.Duration   // Postgres idle_in_transaction_session_timeout for the connections the client creates (defaults to 1 minute; negative leaves the server setting)
 }
 
 // NewClient creates a new DBOS client with the provided configuration.
@@ -763,17 +792,18 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 		appName = "dbos-client" // Connection label only
 	}
 	dbosCtx, err := NewContext(ctx, Config{
-		DatabaseURL:            config.DatabaseURL,
-		DatabaseSchema:         config.DatabaseSchema,
-		AppName:                appName,
-		Logger:                 config.Logger,
-		SystemDBPool:           config.SystemDBPool,
-		SQLiteSystemDB:         config.SQLiteSystemDB,
-		Serializer:             config.Serializer,
-		SystemDBStartupTimeout: config.SystemDBStartupTimeout,
-		SkipMigrations:         true, // Clients never own the schema
-		namelessOwner:          config.AppName == "",
-		isClient:               true,
+		DatabaseURL:                    config.DatabaseURL,
+		DatabaseSchema:                 config.DatabaseSchema,
+		AppName:                        appName,
+		Logger:                         config.Logger,
+		SystemDBPool:                   config.SystemDBPool,
+		SQLiteSystemDB:                 config.SQLiteSystemDB,
+		Serializer:                     config.Serializer,
+		SystemDBStartupTimeout:         config.SystemDBStartupTimeout,
+		SystemDBIdleTransactionTimeout: config.SystemDBIdleTransactionTimeout,
+		SkipMigrations:                 true, // Clients never own the schema
+		namelessOwner:                  config.AppName == "",
+		isClient:                       true,
 	})
 	if err != nil {
 		return nil, err
@@ -809,8 +839,9 @@ func (c *dbosContext) requestedOwner(explicit string) *string {
 }
 
 // Launch initializes and starts the DBOS runtime components including the system database
-// and conductor (if configured), recovers any pending workflows on this executor, then
-// starts the queue runner and workflow scheduler.
+// and conductor (if configured), recovers any pending workflows on this executor (unless
+// Conductor is configured, in which case Conductor drives recovery), then starts the queue
+// runner and workflow scheduler.
 //
 // Returns an error if the context is already launched or if any component fails to start.
 // A failed Launch is terminal: the context is torn down (system database closed) and
@@ -852,15 +883,20 @@ func (c *dbosContext) Launch() error {
 	}
 
 	// Recover local pending workflows before starting the queue runner so
-	// recovered workflows are not racing a fresh dequeue pass.
-	recoveryHandles, err := recoverPendingWorkflows(c, []string{c.executorID})
-	if err != nil {
-		return models.NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
-	}
-	if len(recoveryHandles) > 0 {
-		c.logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
+	// recovered workflows are not racing a fresh dequeue pass. When Conductor
+	// is configured it drives recovery, so the executor does not recover itself.
+	if c.conductor == nil {
+		recoveryHandles, err := recoverPendingWorkflows(c, []string{c.executorID})
+		if err != nil {
+			return models.NewInitializationError(fmt.Sprintf("failed to recover pending workflows during launch: %v", err))
+		}
+		if len(recoveryHandles) > 0 {
+			c.logger.Info("Recovered pending workflows", "count", len(recoveryHandles))
+		} else {
+			c.logger.Debug("No pending workflows to recover")
+		}
 	} else {
-		c.logger.Debug("No pending workflows to recover")
+		c.logger.Debug("Skipping self-recovery: Conductor is configured")
 	}
 
 	// Start the queue runner in a goroutine
@@ -881,6 +917,12 @@ func (c *dbosContext) Launch() error {
 	go func() {
 		defer c.scheduleReconcilerWg.Done()
 		c.runScheduleReconciler()
+	}()
+
+	c.workflowTimeoutsMonitorWg.Add(1)
+	go func() {
+		defer c.workflowTimeoutsMonitorWg.Done()
+		c.runWorkflowTimeoutsMonitor()
 	}()
 
 	// Start the conductor if it has been initialized
@@ -946,6 +988,19 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	case <-time.After(timeout):
 		c.logger.Warn("Timeout waiting for schedule reconciler to complete", "timeout", timeout)
 		pending = append(pending, "schedule reconciler")
+	}
+
+	monitorDone := make(chan struct{})
+	go func() {
+		c.workflowTimeoutsMonitorWg.Wait()
+		close(monitorDone)
+	}()
+	select {
+	case <-monitorDone:
+		c.logger.Debug("Workflow timeouts monitor completed")
+	case <-time.After(timeout):
+		c.logger.Warn("Timeout waiting for workflow timeouts monitor to complete", "timeout", timeout)
+		pending = append(pending, "workflow timeouts monitor")
 	}
 
 	// Wait for queue runner to finish

@@ -401,6 +401,9 @@ func TestWorkflowQueues(t *testing.T) {
 		dlqStartEvent.Wait()
 		dlqStartEvent.Clear()
 
+		before, err := originalHandle.GetStatus()
+		require.NoError(t, err, "failed to get status before re-enqueueing")
+
 		// Re-enqueue the same workflow ID many times; should not trigger DLQ (attempts stay 1)
 		for i := range dlqMaxRetries * 2 {
 			_, err := RunWorkflow(dbosCtx, enqueueWorkflowDLQ, "test-input", WithQueue(dlqEnqueueQueue), WithWorkflowID(workflowID))
@@ -417,6 +420,7 @@ func TestWorkflowQueues(t *testing.T) {
 		status, err := originalHandle.GetStatus()
 		require.NoError(t, err, "failed to get status of original workflow handle")
 		assert.Equal(t, 1, status.Attempts, "expected attempts to be 1")
+		assert.Equal(t, before, status, "expected re-enqueues to leave the workflow row unchanged")
 
 		// Deblock so the workflow can complete
 		dlqCompleteEvent.Set()
@@ -1308,12 +1312,96 @@ func TestQueueTimeouts(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, fastWorkflow)
 
+	var deadlineQueue *workflowQueue // database-backed; registered after Launch
+	deadlineBlockingEvent := NewEvent()
+	deadlineBlockingWorkflow := func(ctx Context, _ string) (string, error) {
+		deadlineBlockingEvent.Wait()
+		return "blocking-done", nil
+	}
+	RegisterWorkflow(dbosCtx, deadlineBlockingWorkflow)
+	enqueueChildrenWorkflow := func(ctx Context, _ string) (string, error) {
+		myID, err := GetWorkflowID(ctx)
+		if err != nil {
+			return "", err
+		}
+		if _, err := RunWorkflow(ctx, fastWorkflow, "inherited", WithQueue(deadlineQueue), WithWorkflowID(myID+"-inherited")); err != nil {
+			return "", err
+		}
+		explicitCtx, cancelExplicit := WithTimeout(ctx, 10*time.Minute)
+		defer cancelExplicit()
+		if _, err := RunWorkflow(explicitCtx, fastWorkflow, "explicit", WithQueue(deadlineQueue), WithWorkflowID(myID+"-explicit")); err != nil {
+			return "", err
+		}
+		detachedCtx, cancelDetached := WithTimeout(WithoutCancel(ctx), 2*time.Hour)
+		defer cancelDetached()
+		if _, err := RunWorkflow(detachedCtx, fastWorkflow, "detached", WithQueue(deadlineQueue), WithWorkflowID(myID+"-detached")); err != nil {
+			return "", err
+		}
+		return "enqueued", nil
+	}
+	RegisterWorkflow(dbosCtx, enqueueChildrenWorkflow)
+
 	Launch(dbosCtx)
 
 	timeoutQueue, err := registerWFQ(dbosCtx, "timeout-queue")
 	require.NoError(t, err)
 	timeoutOnDequeueQueue, err = registerWFQ(dbosCtx, "timeout-on-dequeue-queue", WithGlobalConcurrency(1))
 	require.NoError(t, err)
+	deadlineQueue, err = registerWFQ(dbosCtx, "deadline-queue", WithGlobalConcurrency(1))
+	require.NoError(t, err)
+
+	t.Run("EnqueuedChildDeadline", func(t *testing.T) {
+		blockingHandle, err := RunWorkflow(dbosCtx, deadlineBlockingWorkflow, "blocking", WithQueue(deadlineQueue))
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			status, err := blockingHandle.GetStatus()
+			return err == nil && status.Status == WorkflowStatusPending
+		}, 10*time.Second, 50*time.Millisecond, "blocking workflow was not dequeued")
+
+		parentCtx, cancelParent := WithTimeout(dbosCtx, time.Hour)
+		defer cancelParent()
+		parentHandle, err := RunWorkflow(parentCtx, enqueueChildrenWorkflow, "parent")
+		require.NoError(t, err)
+		_, err = parentHandle.GetResult()
+		require.NoError(t, err)
+		parentStatus, err := parentHandle.GetStatus()
+		require.NoError(t, err)
+		require.False(t, parentStatus.Deadline.IsZero())
+
+		childStatus := func(suffix string) WorkflowStatus {
+			h, err := RetrieveWorkflow[string](dbosCtx, parentHandle.GetWorkflowID()+"-"+suffix)
+			require.NoError(t, err)
+			status, err := h.GetStatus()
+			require.NoError(t, err)
+			require.Equal(t, WorkflowStatusEnqueued, status.Status, "%s child should still be enqueued", suffix)
+			return status
+		}
+
+		// A child on the parent's context inherits its absolute deadline.
+		inherited := childStatus("inherited")
+		assert.Equal(t, parentStatus.Deadline.UnixMilli(), inherited.Deadline.UnixMilli())
+
+		// An explicit timeout starts at dequeue, whether shorter or set on a detached context.
+		explicit := childStatus("explicit")
+		assert.True(t, explicit.Deadline.IsZero(), "explicit child should have no deadline while enqueued")
+		assert.InDelta(t, 10*time.Minute, explicit.Timeout, float64(time.Minute))
+
+		detached := childStatus("detached")
+		assert.True(t, detached.Deadline.IsZero(), "detached child should have no deadline while enqueued")
+		assert.InDelta(t, 2*time.Hour, detached.Timeout, float64(time.Minute))
+
+		deadlineBlockingEvent.Set()
+		_, err = blockingHandle.GetResult()
+		require.NoError(t, err)
+		for _, suffix := range []string{"inherited", "explicit", "detached"} {
+			h, err := RetrieveWorkflow[string](dbosCtx, parentHandle.GetWorkflowID()+"-"+suffix)
+			require.NoError(t, err)
+			result, err := h.GetResult()
+			require.NoError(t, err)
+			assert.Equal(t, "done", result)
+		}
+		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after test")
+	})
 
 	t.Run("EnqueueWorkflowTimeout", func(t *testing.T) {
 		// Start a workflow that will wait indefinitely
@@ -2016,6 +2104,7 @@ func TestQueueWideLimitHoldsAcrossExecutors(t *testing.T) {
 								ExecutorID:         fmt.Sprintf("executor-%d", i),
 								ApplicationVersion: parkedVersion,
 								QueuePartitionKey:  partition,
+								OwnerXID:           uuid.NewString(),
 							})
 						}()
 					}
@@ -2172,12 +2261,17 @@ func TestPartitionedQueueDoesNotStarvePartitions(t *testing.T) {
 }
 
 func TestCountActiveWorkflows(t *testing.T) {
-	ctx := &dbosContext{activeWorkflowIDs: &sync.Map{}}
-	ctx.activeWorkflowIDs.Store("a", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})
-	ctx.activeWorkflowIDs.Store("b", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p1"})
-	ctx.activeWorkflowIDs.Store("c", activeWorkflowEntry{queueName: "q", queuePartitionKey: "p2"})
-	ctx.activeWorkflowIDs.Store("d", activeWorkflowEntry{queueName: "q"})
-	ctx.activeWorkflowIDs.Store("e", activeWorkflowEntry{queueName: "other", queuePartitionKey: "p1"})
+	ctx := &dbosContext{activeExecutions: &sync.Map{}}
+	store := func(workflowID, ownerXID, queue, partition string) executionKey {
+		key := executionKey{workflowID: workflowID, ownerXID: ownerXID}
+		ctx.activeExecutions.Store(key, activeWorkflowEntry{workflowID: workflowID, queueName: queue, queuePartitionKey: partition})
+		return key
+	}
+	store("a", "t-a", "q", "p1")
+	store("b", "t-b", "q", "p1")
+	store("c", "t-c", "q", "p2")
+	store("d", "t-d", "q", "")
+	store("e", "t-e", "other", "p1")
 
 	require.Equal(t, 4, ctx.countActiveWorkflowsForQueue("q"))
 	require.Equal(t, 2, ctx.countActiveWorkflowsForPartition("q", "p1"))
@@ -2185,6 +2279,20 @@ func TestCountActiveWorkflows(t *testing.T) {
 	require.Equal(t, 1, ctx.countActiveWorkflowsForPartition("q", ""))
 	require.Equal(t, 0, ctx.countActiveWorkflowsForQueue("missing"))
 	require.Equal(t, 0, (&dbosContext{}).countActiveWorkflowsForQueue("q"))
+
+	// A resumed workflow's executions can sit in different queues: each counts,
+	// and releasing one leaves the other.
+	first := store("x", "t-x1", "q", "p1")
+	second := store("x", "t-x2", "other", "")
+	require.Equal(t, 5, ctx.countActiveWorkflowsForQueue("q"))
+	require.Equal(t, 2, ctx.countActiveWorkflowsForQueue("other"))
+	require.Len(t, ctx.activeExecutionsOf("x"), 2)
+	ctx.activeExecutions.Delete(first)
+	require.Equal(t, 4, ctx.countActiveWorkflowsForQueue("q"))
+	require.Equal(t, 2, ctx.countActiveWorkflowsForQueue("other"))
+	require.Len(t, ctx.activeExecutionsOf("x"), 1)
+	ctx.activeExecutions.Delete(second)
+	require.Empty(t, ctx.activeExecutionsOf("x"))
 }
 
 func TestNewQueueRunner(t *testing.T) {
@@ -3230,6 +3338,8 @@ type enqueueDedupCallerInput struct {
 	Input          string
 	DedupID        string
 	ReturnExisting bool
+	WorkflowID     string
+	RejectReuse    bool
 }
 
 // enqueueDedupCaller enqueues a workflow holding a deduplication ID and reports
@@ -3239,10 +3349,19 @@ func enqueueDedupCaller(ctx Context, in enqueueDedupCallerInput) (string, error)
 	if in.ReturnExisting {
 		opts = append(opts, WithEnqueueDeduplicationPolicy(DeduplicationPolicyReturnExisting))
 	}
+	if in.WorkflowID != "" {
+		opts = append(opts, WithEnqueueWorkflowID(in.WorkflowID))
+	}
+	if in.RejectReuse {
+		opts = append(opts, WithEnqueueWorkflowIDReusePolicy(WorkflowIDReusePolicyReject))
+	}
 	handle, err := Enqueue[string](ctx, in.Queue, in.WorkflowName, in.Input, opts...)
 	if err != nil {
 		if errors.Is(err, ErrQueueDeduplicated) {
 			return "deduplicated", nil
+		}
+		if errors.Is(err, ErrWorkflowIDInUse) {
+			return "in use", nil
 		}
 		return "", err
 	}
@@ -3357,6 +3476,40 @@ func TestEnqueueWithinWorkflowDeduplication(t *testing.T) {
 		after, err := ListWorkflows(dbosCtx)
 		require.NoError(t, err, "failed to list workflows")
 		assert.Len(t, after, len(before), "the replay must not enqueue a new workflow")
+	})
+
+	t.Run("RejectReusePolicyCheckpointsTheRejection", func(t *testing.T) {
+		holder := plantHolder(t, "reuse-key")
+
+		// The creatorXID collides on the workflow ID before unique constraint violation on the dedup ID
+		_, err := Enqueue[string](dbosCtx, queue.GetName(), targetName, "direct",
+			WithEnqueueWorkflowID(holder.GetWorkflowID()), WithEnqueueDeduplicationID("reuse-key"),
+			WithEnqueueWorkflowIDReusePolicy(WorkflowIDReusePolicyReject))
+		require.ErrorIs(t, err, ErrWorkflowIDInUse)
+
+		handle, err := RunWorkflow(dbosCtx, enqueueDedupCaller, enqueueDedupCallerInput{
+			Queue:        queue.GetName(),
+			WorkflowName: targetName,
+			Input:        "caller",
+			DedupID:      "reuse-key",
+			WorkflowID:   holder.GetWorkflowID(),
+			RejectReuse:  true,
+		})
+		require.NoError(t, err, "failed to start the caller workflow")
+		result, err := handle.GetResult()
+		require.NoError(t, err, "the caller should swallow the rejection")
+		assert.Equal(t, "in use", result)
+		steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 1, "the caller should record a single enqueue step")
+		require.ErrorIs(t, steps[0].Error, ErrWorkflowIDInUse, "the rejection must be checkpointed as the step's error")
+
+		// Free the ID: an enqueue re-executed on replay would now succeed.
+		require.NoError(t, DeleteWorkflows(dbosCtx, []string{holder.GetWorkflowID()}), "failed to delete the holder")
+		assert.Equal(t, "in use", replayCaller(t, handle.GetWorkflowID()), "the replay must return the checkpointed rejection")
+		remaining, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(holder.GetWorkflowID()))
+		require.NoError(t, err, "failed to list workflows")
+		assert.Empty(t, remaining, "the replay must not enqueue a new workflow")
 	})
 }
 

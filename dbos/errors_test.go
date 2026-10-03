@@ -88,3 +88,73 @@ func TestWrappedCauseSurvivesDBRoundTrip(t *testing.T) {
 		assert.False(t, errors.Is(got, context.DeadlineExceeded))
 	})
 }
+
+func TestWorkflowPanicIsRecovered(t *testing.T) {
+	ctx, err := NewContext(context.Background(), Config{
+		AppName:     "test-workflow-panic",
+		DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "dbos.db"),
+	})
+	require.NoError(t, err)
+	defer Shutdown(ctx, 5*time.Second)
+
+	sentinel := errors.New("boom")
+	panicWithString := func(ctx Context, in string) (string, error) { panic("bad " + in) }
+	panicWithError := func(ctx Context, in string) (string, error) { panic(sentinel) }
+	stepPanics := func(ctx Context, in string) (string, error) {
+		return RunAsStep(ctx, func(ctx context.Context) (string, error) { panic("in step") })
+	}
+	var goStepErr error
+	goStepPanics := func(ctx Context, in string) (string, error) {
+		ch, err := Go(ctx, func(ctx context.Context) (string, error) { panic("in go step") })
+		if err != nil {
+			return "", err
+		}
+		out := <-ch
+		goStepErr = out.Err
+		return out.Result, out.Err
+	}
+	RegisterWorkflow(ctx, panicWithString)
+	RegisterWorkflow(ctx, panicWithError)
+	RegisterWorkflow(ctx, stepPanics)
+	RegisterWorkflow(ctx, goStepPanics)
+	require.NoError(t, Launch(ctx))
+
+	check := func(t *testing.T, wf func(Context, string) (string, error), contains string) *Error {
+		t.Helper()
+		handle, err := RunWorkflow(ctx, wf, "input")
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.ErrorIs(t, err, ErrWorkflowPanic)
+		var dbosErr *Error
+		require.ErrorAs(t, err, &dbosErr)
+		assert.Equal(t, handle.GetWorkflowID(), dbosErr.WorkflowID)
+		assert.Contains(t, dbosErr.Message, contains)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, WorkflowStatusError, status.Status)
+		require.ErrorIs(t, status.Error, ErrWorkflowPanic, "recorded error survives the DB round trip")
+
+		// A fresh handle reads the outcome back from the database.
+		retrieved, err := RetrieveWorkflow[string](ctx, handle.GetWorkflowID())
+		require.NoError(t, err)
+		_, err = retrieved.GetResult()
+		require.ErrorIs(t, err, ErrWorkflowPanic)
+		return dbosErr
+	}
+
+	t.Run("PanicWithString", func(t *testing.T) {
+		check(t, panicWithString, "bad input")
+	})
+	t.Run("PanicWithError", func(t *testing.T) {
+		dbosErr := check(t, panicWithError, "boom")
+		assert.ErrorIs(t, dbosErr, sentinel, "an error panic value is wrapped as the cause")
+	})
+	t.Run("PanicInStep", func(t *testing.T) {
+		check(t, stepPanics, "in step")
+	})
+	t.Run("PanicInGoStep", func(t *testing.T) {
+		check(t, goStepPanics, "in go step")
+		assert.ErrorIs(t, goStepErr, ErrWorkflowPanic, "the workflow sees the panic as the step outcome")
+	})
+}

@@ -34,6 +34,9 @@ const (
 	ErrorCodeQueueNotFound
 	ErrorCodeScheduleNotFound
 	ErrorCodeInvalidOption
+	ErrorCodeWorkflowPanic
+	ErrorCodeStepNondeterminism
+	ErrorCodeWorkflowIDInUse
 
 	// _errorCodeSentinel must remain the last value: it bounds parseErrorCode.
 	_errorCodeSentinel
@@ -82,6 +85,12 @@ func (c ErrorCode) String() string {
 		return "ScheduleNotFound"
 	case ErrorCodeInvalidOption:
 		return "InvalidOption"
+	case ErrorCodeWorkflowPanic:
+		return "WorkflowPanic"
+	case ErrorCodeStepNondeterminism:
+		return "StepNondeterminism"
+	case ErrorCodeWorkflowIDInUse:
+		return "WorkflowIDInUse"
 	default:
 		return fmt.Sprintf("ErrorCode(%d)", int(c))
 	}
@@ -260,6 +269,15 @@ func NewUnexpectedStepError(workflowID string, stepID int, expectedName, recorde
 	}
 }
 
+func NewStepNondeterminismError(workflowID string, stepID int) *Error {
+	return &Error{
+		Message:    fmt.Sprintf("Step %d of workflow %s was recorded twice by the same execution with different results. Check that your workflow is deterministic.", stepID, workflowID),
+		Code:       ErrorCodeStepNondeterminism,
+		WorkflowID: workflowID,
+		StepID:     stepID,
+	}
+}
+
 func NewAwaitedWorkflowCancelledError(workflowID string) *Error {
 	return &Error{
 		Message:    fmt.Sprintf("Awaited workflow %s was cancelled", workflowID),
@@ -280,7 +298,7 @@ func NewWorkflowCancelledError(workflowID string, cause error) *Error {
 
 func NewWorkflowConflictIDError(workflowID string) *Error {
 	return &Error{
-		Message:    fmt.Sprintf("Conflicting workflow ID %s", workflowID),
+		Message:    fmt.Sprintf("Workflow %s is no longer owned by this execution", workflowID),
 		Code:       ErrorCodeConflictingID,
 		WorkflowID: workflowID,
 	}
@@ -307,6 +325,20 @@ func NewWorkflowExecutionError(workflowID string, err error) *Error {
 		Code:       ErrorCodeWorkflowExecution,
 		WorkflowID: workflowID,
 	}).withCause(err)
+}
+
+// NewWorkflowPanicError reports a panic recovered from a workflow function. When the
+// panic value is an error it is wrapped, so errors.Is/errors.As still reach it.
+func NewWorkflowPanicError(workflowID string, value any) *Error {
+	e := &Error{
+		Message:    fmt.Sprintf("Workflow %s panicked: %v", workflowID, value),
+		Code:       ErrorCodeWorkflowPanic,
+		WorkflowID: workflowID,
+	}
+	if cause, ok := value.(error); ok {
+		return e.withCause(cause)
+	}
+	return e
 }
 
 func NewStepExecutionError(workflowID, stepName string, err error) *Error {
@@ -344,6 +376,15 @@ func NewQueueDeduplicatedError(workflowID, queueName, deduplicationID string) *E
 		WorkflowID:      workflowID,
 		QueueName:       queueName,
 		DeduplicationID: deduplicationID,
+	}
+}
+
+func NewWorkflowIDInUseError(workflowID string, status WorkflowStatusType, workflowName string) *Error {
+	return &Error{
+		Message:      fmt.Sprintf("Workflow ID %s is already in use by workflow %s with status %s", workflowID, workflowName, status),
+		Code:         ErrorCodeWorkflowIDInUse,
+		WorkflowID:   workflowID,
+		RecordedName: workflowName,
 	}
 }
 

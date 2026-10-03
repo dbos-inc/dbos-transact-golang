@@ -793,6 +793,9 @@ func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	if req.Body.WasForkedFrom != nil {
 		opts = append(opts, WithFilterWasForkedFrom(*req.Body.WasForkedFrom))
 	}
+	if req.Body.IsFork != nil {
+		opts = append(opts, WithFilterIsFork(*req.Body.IsFork))
+	}
 	if req.Body.HasParent != nil {
 		opts = append(opts, WithFilterHasParent(*req.Body.HasParent))
 	}
@@ -930,6 +933,9 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	}
 	if req.Body.WasForkedFrom != nil {
 		opts = append(opts, WithFilterWasForkedFrom(*req.Body.WasForkedFrom))
+	}
+	if req.Body.IsFork != nil {
+		opts = append(opts, WithFilterIsFork(*req.Body.IsFork))
 	}
 	if req.Body.HasParent != nil {
 		opts = append(opts, WithFilterHasParent(*req.Body.HasParent))
@@ -1702,6 +1708,7 @@ func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 		ParentWorkflowID:          req.Body.ParentWorkflowID.toSlice(),
 		ApplicationName:           req.Body.ApplicationName.toSlice(),
 		WasForkedFrom:             req.Body.WasForkedFrom,
+		IsFork:                    req.Body.IsFork,
 		HasParent:                 req.Body.HasParent,
 		Attributes:                req.Body.Attributes,
 	}

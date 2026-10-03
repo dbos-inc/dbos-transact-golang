@@ -9,6 +9,7 @@ import (
 	"math"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ import (
 // workflowState holds the runtime state for a workflow execution
 type workflowState struct {
 	workflowID          string
+	ownerXID            string
 	stepID              int
 	isWithinStep        bool
 	isWithinTransaction bool
@@ -35,6 +37,7 @@ type workflowState struct {
 	assumedRole         string
 	authenticatedRoles  []string
 	workflowCtx         context.Context
+	deadline            time.Time
 }
 
 // nextStepID returns the next step ID and increments the counter
@@ -323,7 +326,7 @@ func (h *workflowHandle[R]) processOutcome(outcome workflowOutcome[R], startTime
 			CompletedAt:     completedTime,
 			StepName:        "DBOS.getResult",
 			Serialization:   ser.Name(),
-			ExecutorID:      GetExecutorID(h.dbosContext),
+			OwnerXID:        workflowState.ownerXID,
 		}
 		uncancellableCtx := context.WithoutCancel(h.dbosContext)
 		recordResultErr := sysdb.Retry(h.dbosContext, func() error {
@@ -436,7 +439,7 @@ func (h *workflowPollingHandle[R]) GetResult(opts ...GetResultOption) (R, error)
 			CompletedAt:     completedTime,
 			StepName:        "DBOS.getResult",
 			Serialization:   serialization,
-			ExecutorID:      GetExecutorID(h.dbosContext),
+			OwnerXID:        workflowState.ownerXID,
 		}
 		uncancellableCtx := context.WithoutCancel(h.dbosContext)
 		recordResultErr := sysdb.Retry(h.dbosContext, func() error {
@@ -779,8 +782,31 @@ type Workflow[P any, R any] func(ctx Context, input P) (R, error)
 type WorkflowFunc func(ctx Context, input any) (any, error)
 
 type activeWorkflowEntry struct {
+	workflowID        string
 	queueName         string
 	queuePartitionKey string
+	cancel            context.CancelCauseFunc
+}
+
+// executionKey identifies one execution
+type executionKey struct {
+	workflowID string
+	ownerXID   string
+}
+
+// activeExecutionsOf lists this executor's running executions of a workflow.
+func (c *dbosContext) activeExecutionsOf(workflowID string) []activeWorkflowEntry {
+	if c.activeExecutions == nil {
+		return nil
+	}
+	var entries []activeWorkflowEntry
+	c.activeExecutions.Range(func(_, value any) bool {
+		if entry, ok := value.(activeWorkflowEntry); ok && entry.workflowID == workflowID {
+			entries = append(entries, entry)
+		}
+		return true
+	})
+	return entries
 }
 
 // countActiveWorkflowsForQueue counts this executor's running workflows on a queue, across every partition.
@@ -796,11 +822,11 @@ func (c *dbosContext) countActiveWorkflowsForPartition(queueName, queuePartition
 }
 
 func (c *dbosContext) countActiveWorkflows(match func(activeWorkflowEntry) bool) int {
-	if c.activeWorkflowIDs == nil {
+	if c.activeExecutions == nil {
 		return 0
 	}
 	count := 0
-	c.activeWorkflowIDs.Range(func(_, value any) bool {
+	c.activeExecutions.Range(func(_, value any) bool {
 		if entry, ok := value.(activeWorkflowEntry); ok && match(entry) {
 			count++
 		}
@@ -822,9 +848,20 @@ const (
 	DeduplicationPolicyReturnExisting
 )
 
+// WorkflowIDReusePolicy controls how starting a workflow with an ID that already exists is handled.
+type WorkflowIDReusePolicy int
+
+const (
+	// WorkflowIDReusePolicyReturnExisting (default) returns a handle to the existing workflow.
+	WorkflowIDReusePolicyReturnExisting WorkflowIDReusePolicy = iota
+	// WorkflowIDReusePolicyReject rejects the start.
+	WorkflowIDReusePolicyReject
+)
+
 type workflowOptions struct {
 	WorkflowName        string
 	WorkflowID          string
+	WorkflowIDReuse     WorkflowIDReusePolicy
 	queue               Queue
 	ApplicationVersion  string
 	DeduplicationID     string
@@ -848,6 +885,13 @@ type WorkflowOption func(*workflowOptions)
 func WithWorkflowID(id string) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.WorkflowID = id
+	}
+}
+
+// WithWorkflowIDReusePolicy sets how a workflow ID that already exists is handled.
+func WithWorkflowIDReusePolicy(policy WorkflowIDReusePolicy) WorkflowOption {
+	return func(p *workflowOptions) {
+		p.WorkflowIDReuse = policy
 	}
 }
 
@@ -989,6 +1033,8 @@ func WithAuthenticatedRoles(roles ...string) WorkflowOption {
 // workflow that already completed, RunWorkflow does not re-execute it: it
 // returns a handle to the recorded execution and the recorded result, and the
 // new input is ignored. To re-execute with the same ID, use ForkWorkflow.
+// To fail with ErrWorkflowIDInUse instead when the ID already exists, pass
+// WithWorkflowIDReusePolicy(WorkflowIDReusePolicyReject).
 //
 // Example:
 //
@@ -1260,7 +1306,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 	// If this is a child workflow that has already been recorded in operations_output, return directly a polling handle
 	if isChildWorkflow {
-		childWorkflowID, err := sysdb.RetryWithResult(c, func() (*string, error) {
+		childRecord, err := sysdb.RetryWithResult(c, func() (*sysdb.ChildWorkflowRecord, error) {
 			return c.systemDB.CheckChildWorkflow(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.stepID, params.WorkflowName)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
@@ -1274,7 +1320,11 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			c.logger.Error("failed to check child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID)
 			return nil, models.NewWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("checking child workflow: %w", err))
 		}
-		if childWorkflowID != nil {
+		if childRecord != nil && childRecord.ErrStr != nil {
+			return nil, deserializeWorkflowError(childRecord.ErrStr)
+		}
+		if childRecord != nil && childRecord.ChildWorkflowID != nil {
+			childWorkflowID := childRecord.ChildWorkflowID
 			c.logger.Info("child workflow already recorded", "workflow_name", params.WorkflowName, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID, "child_workflow_id", *childWorkflowID)
 			return newWorkflowPollingHandle[any](uncancellableCtx, *childWorkflowID), nil
 		}
@@ -1310,8 +1360,12 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		}
 	}
 	// When enqueuing or delaying, we do not set a deadline. It'll be computed with the timeout during dequeue.
+	// However, we set the deadline if the workflow is a children that inherits its parent's.
 	if status == WorkflowStatusEnqueued || status == WorkflowStatusDelayed {
-		deadline = time.Time{}
+		inherited := isChildWorkflow && !parentWorkflowState.deadline.IsZero() && deadline.Equal(parentWorkflowState.deadline)
+		if !inherited {
+			deadline = time.Time{}
+		}
 	}
 
 	if params.Priority > uint(math.MaxInt) {
@@ -1377,7 +1431,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	var earlyReturnPollingHandle *workflowPollingHandle[any]
 	var insertStatusResult *sysdb.InsertWorkflowResult
 	returnExisting := params.DeduplicationPolicy == DeduplicationPolicyReturnExisting
-	ownerXID := uuid.New().String()
+	creatorXID := uuid.New().String() // Generated once for retries to recognize their own writes.
 
 	// Init status and record child workflow relationship in a single transaction
 	insertWorkflowStatusTx := func() error {
@@ -1389,12 +1443,16 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 		// Insert workflow status with transaction
 		insertInput := sysdb.InsertWorkflowStatusDBInput{
-			Status:   workflowStatus,
-			Tx:       tx,
-			OwnerXID: &ownerXID,
+			Status:         workflowStatus,
+			Tx:             tx,
+			CreatorXID:     &creatorXID,
+			RejectExisting: params.WorkflowIDReuse == WorkflowIDReusePolicyReject,
 		}
 		insertStatusResult, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, insertInput)
 		if err != nil {
+			if errors.Is(err, ErrWorkflowIDInUse) {
+				return err
+			}
 			// Silence dedup error under return-existing policy.
 			if !(returnExisting && errors.Is(err, ErrQueueDeduplicated)) {
 				c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
@@ -1408,6 +1466,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			// Get the step ID that was used for generating the child workflow ID
 			childInput := sysdb.RecordChildWorkflowDBInput{
 				ParentWorkflowID: parentWorkflowState.workflowID,
+				ParentOwnerXID:   parentWorkflowState.ownerXID,
 				ChildWorkflowID:  workflowID,
 				StepName:         params.WorkflowName,
 				StepID:           parentWorkflowState.stepID,
@@ -1421,20 +1480,14 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			}
 		}
 
-		var loaded bool
-		if c.activeWorkflowIDs != nil {
-			_, loaded = c.activeWorkflowIDs.Load(workflowID)
-		}
-
 		shouldSkip :=
 			len(queueName) > 0 || // We are enqueueing OR
 				insertStatusResult.Status == WorkflowStatusSuccess || // workflow is in a terminal state (success) OR
 				insertStatusResult.Status == WorkflowStatusError || // workflow is in a terminal state (error) OR
-				insertStatusResult.OwnerXID != ownerXID || // another execution is already owning the workflow OR
-				loaded // this executor is already running the workflow
+				insertStatusResult.CreatorXID != creatorXID // the row was already there (another execution created it)
 
 		if shouldSkip {
-			// Commit the transaction to update the number of attempts and/or enact the enqueue
+			// Commit the transaction to enact the enqueue and/or the child workflow record
 			if err := tx.Commit(uncancellableCtx); err != nil {
 				return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
 			}
@@ -1456,6 +1509,27 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			// Common path
 			break
 		}
+		// A rejected child start is checkpointed at the parent's step, so a replay returns it even if the ID has been freed since.
+		if isChildWorkflow && errors.Is(err, ErrWorkflowIDInUse) {
+			serialization := resolveEncoder(c).Name()
+			errStr := serializeWorkflowError(c.logger, err, serialization)
+			rejectionInput := sysdb.RecordOperationResultDBInput{
+				WorkflowID:    parentWorkflowState.workflowID,
+				StepID:        parentWorkflowState.stepID,
+				StepName:      params.WorkflowName,
+				ErrStr:        &errStr,
+				StartedAt:     childStartTime,
+				CompletedAt:   time.Now(),
+				Serialization: serialization,
+				OwnerXID:      parentWorkflowState.ownerXID,
+			}
+			if recErr := sysdb.Retry(c, func() error {
+				return c.systemDB.RecordOperationResult(uncancellableCtx, rejectionInput)
+			}, sysdb.WithRetrierLogger(c.logger)); recErr != nil {
+				return nil, models.NewWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording rejected child workflow: %w", recErr))
+			}
+			return nil, err
+		}
 		// Now handle the case where the insert failed because the deduplication ID is already held by another workflow.
 		// We must also handle the case were a parent workflow spawned a return-existing child, and record their parent-child relationship.
 		if !returnExisting || !errors.Is(err, ErrQueueDeduplicated) {
@@ -1475,6 +1549,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		if isChildWorkflow {
 			childInput := sysdb.RecordChildWorkflowDBInput{
 				ParentWorkflowID: parentWorkflowState.workflowID,
+				ParentOwnerXID:   parentWorkflowState.ownerXID,
 				ChildWorkflowID:  *existingID,
 				StepName:         params.WorkflowName,
 				StepID:           parentWorkflowState.stepID,
@@ -1493,6 +1568,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 	exec := workflowExecution{
 		workflowID:         workflowID,
+		ownerXID:           creatorXID,
 		timeout:            insertStatusResult.Timeout,
 		deadline:           insertStatusResult.WorkflowDeadline,
 		authenticatedUser:  params.AuthenticatedUser,
@@ -1513,6 +1589,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 // or the queue's claim, wrote and this phase reads back.
 type workflowExecution struct {
 	workflowID         string
+	ownerXID           string
 	queueName          string
 	queuePartitionKey  string
 	timeout            time.Duration
@@ -1536,38 +1613,46 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 	// Create workflow state to track step execution
 	wfState := &workflowState{
 		workflowID:         workflowID,
+		ownerXID:           exec.ownerXID,
 		stepID:             -1, // Steps are O-indexed
 		isPortableWorkflow: exec.isPortableWorkflow,
 		authenticatedUser:  exec.authenticatedUser,
 		assumedRole:        exec.assumedRole,
 		authenticatedRoles: exec.authenticatedRoles,
 	}
-	workflowCtx := WithValue(c, workflowStateKey, wfState)
-
 	// If the workflow has a timeout but no deadline, compute the deadline from the timeout.
 	// Else use the durable deadline.
-	durableDeadline := time.Time{}
 	if exec.timeout > 0 && exec.deadline.IsZero() {
-		durableDeadline = time.Now().Add(exec.timeout)
+		wfState.deadline = time.Now().Add(exec.timeout)
 	} else if !exec.deadline.IsZero() {
-		durableDeadline = exec.deadline
+		wfState.deadline = exec.deadline
 	}
 
-	if !durableDeadline.IsZero() {
-		workflowCtx, _ = WithTimeout(workflowCtx, time.Until(durableDeadline))
+	ctx := context.WithValue(c.ctx, workflowStateKey, wfState)
+	var cancelWorkflow context.CancelCauseFunc
+	if !wfState.deadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadlineCause(ctx, wfState.deadline, errDBOSContextTimeout)
+		_ = cancel
+		ctx, cancelWorkflow = context.WithCancelCause(ctx)
 	}
+	workflowCtx := c.clone(ctx)
 	// Register a cancel function that durably cancels the workflow in the DB as soon as
-	// the context is cancelled (durable deadline, user cancel, or parent cancellation).
+	// the context is manually cancelled. Timeouts cause durable cancellation through a
+	// separate batch process (see cancelTimedOutWorkflows).
+	// The cancel is fenced on this execution's token: once the workflow changed hands
+	// (recovered or resumed elsewhere), cancelling this context -- including a parent's
+	// context propagating to a child -- no longer reaches it. Use CancelWorkflow for that.
 	cancelFuncCompleted := make(chan struct{})
 	workflowCancelFunction := func() {
 		defer close(cancelFuncCompleted)
-		if errors.Is(context.Cause(workflowCtx), errShutdown) {
-			// Shutdown, not a cancellation request.
+		cause := context.Cause(workflowCtx)
+		if errors.Is(cause, errShutdown) || errors.Is(cause, context.DeadlineExceeded) {
 			return
 		}
 		c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
 		err := sysdb.Retry(c, func() error {
-			_, err := c.systemDB.CancelWorkflows(uncancellableCtx, sysdb.CancelWorkflowsDBInput{WorkflowIDs: []string{workflowID}})
+			_, err := c.systemDB.CancelWorkflows(uncancellableCtx, sysdb.CancelWorkflowsDBInput{WorkflowIDs: []string{workflowID}, OwnerXID: exec.ownerXID})
 			return err
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
@@ -1587,13 +1672,16 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 	// The row is known to have existed (this run inserted or read it), so a missing
 	// row means it was deleted: fail fast with a NonExistentWorkflow error rather
 	// than polling for a row that will never reappear.
-	// The park follows c's cancellation; a plain cancellation is reported as context.Canceled.
+	// The park can be cancelled by Shutdowns only, by using the root context, not the caller's.
+	// Note that a parked execution can return to the later much caller than the execution's context timout.
+	// That's because said timeout refers to the durable workflow, not its stateless executing vessel.
 	awaitExistingOutcome := func(cancelCause error) {
-		awaitOut, awaitErr := sysdb.RetryWithResult(c, func() (*sysdb.AwaitWorkflowResultOutput, error) {
-			return c.systemDB.AwaitWorkflowResult(c, workflowID, sysdb.DBRetryInterval, true)
+		parkCtx := c.clone(c.rootCtx)
+		awaitOut, awaitErr := sysdb.RetryWithResult(parkCtx, func() (*sysdb.AwaitWorkflowResultOutput, error) {
+			return c.systemDB.AwaitWorkflowResult(parkCtx, workflowID, sysdb.DBRetryInterval, true)
 		}, sysdb.WithRetrierLogger(c.logger))
-		if awaitErr != nil && errors.Is(c.Err(), context.Canceled) {
-			awaitErr = c.Err()
+		if awaitErr != nil && errors.Is(parkCtx.Err(), context.Canceled) {
+			awaitErr = parkCtx.Err()
 		}
 		err := awaitErr
 		if awaitErr == nil && awaitOut != nil && awaitOut.ErrStr != nil {
@@ -1623,34 +1711,26 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 		defer c.workflowsWg.Done()
 
 		removeActive := func() {}
-		if c.activeWorkflowIDs != nil {
-			entry := activeWorkflowEntry{queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey}
-			_, loaded := c.activeWorkflowIDs.LoadOrStore(workflowID, entry)
-			if loaded {
-				// Lost a start race: a concurrent start of this workflow
-				// activated itself between this run's active-ID
-				// check and here. The winner owns the active entry, so leave it alone,
-				// disarm the durable cancel, and await the winner's result.
-				stopFunc()
-				c.logger.Warn("Workflow is already executing on this executor. Waiting for the existing execution to complete", "workflow_id", workflowID)
-				awaitExistingOutcome(nil)
-				return
-			}
+		if c.activeExecutions != nil {
+			key := executionKey{workflowID: workflowID, ownerXID: exec.ownerXID}
+			c.activeExecutions.Store(key, activeWorkflowEntry{workflowID: workflowID, queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey, cancel: cancelWorkflow})
 			var removeOnce sync.Once
-			removeActive = func() { removeOnce.Do(func() { c.activeWorkflowIDs.Delete(workflowID) }) }
+			removeActive = func() { removeOnce.Do(func() { c.activeExecutions.Delete(key) }) }
 		}
 		defer removeActive()
 
 		var result any
 		var err error
 
-		result, err = fn(workflowCtx, input)
+		result, err = c.recoverPanic(workflowID, func() (any, error) { return fn(workflowCtx, input) })
 
 		// Handle DBOS ID conflict errors by waiting workflow result
 		if errors.Is(err, ErrConflictingWorkflowID) {
 			// This run lost the ID conflict: it does not own the workflow, so its
 			// context must no longer durably cancel it. Disarm the cancel function.
+			// An optimization, as the durable cancel checks the execution fencing token on this path.
 			stopFunc()
+			removeActive()
 			c.logger.Warn("Workflow ID conflict detected. Waiting for existing workflow to complete", "workflow_id", workflowID)
 			awaitExistingOutcome(nil)
 			return
@@ -1671,7 +1751,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 				// cancellation by reading the CANCELLED row (a status carries no cause)
 				// rather than from the context, and the run's own reason must not depend
 				// on which of the two noticed first.
-				awaitExistingOutcome(errors.Join(err, workflowCtx.Err()))
+				awaitExistingOutcome(errors.Join(err, context.Cause(workflowCtx)))
 				return
 			}
 			if workflowCtx.Err() != nil && isCancellationError(err) {
@@ -1710,6 +1790,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 					Status:     status,
 					ErrStr:     serializedErr,
 					Output:     encodedOutput,
+					OwnerXID:   exec.ownerXID,
 				})
 			}, sysdb.WithRetrierLogger(c.logger))
 			if recordErr != nil {
@@ -1719,9 +1800,9 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 				return
 			}
 			if !recorded {
-				// The row was not PENDING: this run no longer owns the workflow's
-				// outcome. It may have been cancelled, dead-lettered, completed by a
-				// concurrent execution, or handed back to the queue by a resume.
+				// The row was not PENDING under our fencing token: this run no longer owns the
+				// workflow's outcome. It may have been cancelled, dead-lettered, or handed
+				// to another execution by a resume or recovery.
 				// Park the execution and wait for the recorded outcome to become visible.
 				c.logger.Warn("Workflow outcome was not recorded: the workflow is no longer owned by this execution. Waiting for the recorded outcome", "workflow_id", workflowID)
 				awaitExistingOutcome(err)
@@ -1735,6 +1816,69 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 	return newWorkflowHandle(uncancellableCtx, workflowID, outcomeChan)
 }
 
+// recoverPanic runs fn on a goroutine DBOS owns, converting a panic into a
+// WorkflowPanic error returned to the caller instead of crashing the process.
+func (c *dbosContext) recoverPanic(workflowID string, fn func() (any, error)) (result any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("Workflow panicked", "workflow_id", workflowID, "panic", r, "stack", string(debug.Stack()))
+			result, err = nil, models.NewWorkflowPanicError(workflowID, r)
+		}
+	}()
+	return fn()
+}
+
+const (
+	_WORKFLOW_TIMEOUTS_MONITOR_INTERVAL   = 1 * time.Second
+	_WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE = 1000
+)
+
+// runWorkflowTimeoutsMonitor cancels this application's workflows past their deadline,
+// whichever executor runs them, and cancels the context of the ones running here.
+func (c *dbosContext) runWorkflowTimeoutsMonitor() {
+	ticker := time.NewTicker(_WORKFLOW_TIMEOUTS_MONITOR_INTERVAL)
+	defer ticker.Stop()
+	for {
+		c.cancelTimedOutWorkflows()
+		select {
+		case <-c.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *dbosContext) cancelTimedOutWorkflows() {
+	for {
+		cancelled, err := sysdb.RetryWithResult(c, func() ([]string, error) {
+			return c.systemDB.CancelTimedOutWorkflows(c, sysdb.CancelTimedOutWorkflowsDBInput{Limit: _WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE})
+		}, sysdb.WithRetrierLogger(c.logger))
+		if err != nil {
+			if c.Err() == nil {
+				c.logger.Warn("Failed to cancel timed-out workflows", "error", err)
+			}
+			return
+		}
+		timedOut := make(map[string]struct{}, len(cancelled))
+		for _, workflowID := range cancelled {
+			c.logger.Info("Workflow timed out", "workflow_id", workflowID)
+			timedOut[workflowID] = struct{}{}
+		}
+		if c.activeExecutions != nil {
+			c.activeExecutions.Range(func(_, value any) bool {
+				entry, ok := value.(activeWorkflowEntry)
+				if _, hit := timedOut[entry.workflowID]; ok && hit && entry.cancel != nil {
+					entry.cancel(errDBOSContextTimeout)
+				}
+				return true
+			})
+		}
+		if len(cancelled) < _WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE {
+			return
+		}
+	}
+}
+
 /******************************/
 /*********** ENQUEUE **********/
 /******************************/
@@ -1746,6 +1890,13 @@ type EnqueueOption func(*enqueueOptions)
 func WithEnqueueWorkflowID(id string) EnqueueOption {
 	return func(opts *enqueueOptions) {
 		opts.workflowID = id
+	}
+}
+
+// WithEnqueueWorkflowIDReusePolicy sets how a workflow ID that already exists is handled.
+func WithEnqueueWorkflowIDReusePolicy(policy WorkflowIDReusePolicy) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.workflowIDReuse = policy
 	}
 }
 
@@ -1864,6 +2015,7 @@ func WithEnqueueAttributes(attributes map[string]any) EnqueueOption {
 type enqueueOptions struct {
 	workflowName        string
 	workflowID          string
+	workflowIDReuse     WorkflowIDReusePolicy
 	applicationVersion  string
 	applicationName     string
 	deduplicationID     string
@@ -2056,17 +2208,18 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 
 	uncancellableCtx := WithoutCancel(c)
 	returnExisting := params.deduplicationPolicy == DeduplicationPolicyReturnExisting
+	creatorXID := uuid.New().String()
 
 	for {
 		var enqueuedID string
 		var err error
 		if isWithinWorkflow {
 			enqueuedID, err = runAsTxn(c, func(ctx context.Context, tx Tx) (string, error) {
-				return c.insertEnqueuedWorkflow(ctx, tx, status, queueName, params, returnExisting)
+				return c.insertEnqueuedWorkflow(ctx, tx, status, creatorXID, queueName, params, returnExisting)
 			}, WithStepName("DBOS.enqueue"), withChildWorkflowIDOutput())
 		} else if userTx != nil {
 			// The caller owns the transaction: no commit, no retry.
-			enqueuedID, err = c.insertEnqueuedWorkflow(uncancellableCtx, userTx, status, queueName, params, false)
+			enqueuedID, err = c.insertEnqueuedWorkflow(uncancellableCtx, userTx, status, creatorXID, queueName, params, false)
 		} else {
 			enqueuedID, err = func() (string, error) {
 				tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
@@ -2074,7 +2227,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 					return "", models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
 				}
 				defer tx.Rollback(uncancellableCtx)
-				enqueuedID, err := c.insertEnqueuedWorkflow(uncancellableCtx, tx, status, queueName, params, returnExisting)
+				enqueuedID, err := c.insertEnqueuedWorkflow(uncancellableCtx, tx, status, creatorXID, queueName, params, returnExisting)
 				if err != nil {
 					return enqueuedID, err
 				}
@@ -2092,7 +2245,9 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 				// The dedup slot was freed before the holder lookup; enqueue again
 				continue
 			}
-			c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
+			if !errors.Is(err, ErrWorkflowIDInUse) {
+				c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
+			}
 			return nil, err
 		}
 		return newWorkflowPollingHandle[any](uncancellableCtx, enqueuedID), nil
@@ -2101,10 +2256,12 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 
 // Insert the enqueued workflow and lookup any existing deduplicated workflow if
 // a serialization error is raised AND the policy is return existing.
-func (c *dbosContext) insertEnqueuedWorkflow(ctx context.Context, tx Tx, status WorkflowStatus, queueName string, params *enqueueOptions, returnExisting bool) (string, error) {
+func (c *dbosContext) insertEnqueuedWorkflow(ctx context.Context, tx Tx, status WorkflowStatus, creatorXID string, queueName string, params *enqueueOptions, returnExisting bool) (string, error) {
 	insertInput := sysdb.InsertWorkflowStatusDBInput{
-		Status: status,
-		Tx:     tx,
+		Status:         status,
+		Tx:             tx,
+		CreatorXID:     &creatorXID,
+		RejectExisting: params.workflowIDReuse == WorkflowIDReusePolicyReject,
 	}
 	if _, err := c.systemDB.InsertWorkflowStatus(ctx, insertInput); err != nil {
 		if returnExisting && errors.Is(err, ErrQueueDeduplicated) {
@@ -2137,6 +2294,7 @@ func (c *dbosContext) insertEnqueuedWorkflow(ctx context.Context, tx Tx, status 
 //   - WithEnqueueApplicationVersion: Application version override
 //   - WithEnqueueDeduplicationID: Deduplication identifier for idempotent enqueuing
 //   - WithEnqueueDeduplicationPolicy: How a colliding deduplication ID is handled
+//   - WithEnqueueWorkflowIDReusePolicy: How a workflow ID that already exists is handled
 //   - WithEnqueuePriority: Execution priority
 //   - WithEnqueueTimeout: Maximum execution time for the workflow
 //   - WithEnqueueDelay: Delay before the workflow becomes eligible for dequeue
@@ -2450,6 +2608,7 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 	}
 	stepState := workflowState{
 		workflowID:   wfState.workflowID,
+		ownerXID:     wfState.ownerXID,
 		stepID:       stepID,
 		isWithinStep: true,
 		workflowCtx:  wfState.workflowCtx,
@@ -2488,6 +2647,11 @@ func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptio
 	// terminal, returning the raw error (no wrapping). The predicate gates the
 	// NEXT retry and is not consulted once the budget is exhausted.
 	decide := func(err error, runs int) (bool, error) {
+		// Do not retry steps from workflows that have lost ownership (ErrConflictingWorkflowID)
+		// Or datasource steps that have already recorded their checkpoint (errCompletionRecorded)
+		if errors.Is(err, errCompletionRecorded) || errors.Is(err, ErrConflictingWorkflowID) {
+			return false, err
+		}
 		joinedErrors = errors.Join(joinedErrors, err)
 		if runs > stepOpts.maxRetries {
 			if stepOpts.maxRetries <= 0 {
@@ -2685,12 +2849,15 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 		CompletedAt:   stepCompletedTime,
 		Output:        encodedStepOutput,
 		Serialization: ser.Name(),
-		ExecutorID:    c.GetExecutorID(),
+		OwnerXID:      stepState.ownerXID,
 	}
 	recErr := sysdb.Retry(c, func() error {
 		return c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
 	}, sysdb.WithRetrierLogger(c.logger))
 	if recErr != nil {
+		if errors.Is(recErr, ErrConflictingWorkflowID) {
+			c.logger.Debug("step outcome discarded: the workflow is no longer owned by this execution", "workflow_id", stepState.workflowID, "step_name", stepOpts.stepName, "step_id", stepState.stepID)
+		}
 		return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, recErr)
 	}
 
@@ -2838,7 +3005,7 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 			Output:        encodedStepOutput,
 			Tx:            tx,
 			Serialization: serialization,
-			ExecutorID:    c.GetExecutorID(),
+			OwnerXID:      stepState.ownerXID,
 		}
 		if stepOpts.outputIsChildID {
 			if childID, ok := stepOutput.(string); ok {
@@ -2944,7 +3111,7 @@ func (c *dbosContext) Go(ctx Context, fn StepFunc, opts ...StepOption) (<-chan S
 	result := make(chan StepOutcome[any], 1)
 	go func() {
 		defer close(result)
-		res, err := ctx.RunAsStep(ctx, fn, opts...)
+		res, err := c.recoverPanic(wfState.workflowID, func() (any, error) { return ctx.RunAsStep(ctx, fn, opts...) })
 		result <- StepOutcome[any]{
 			Result: res,
 			Err:    err,
@@ -3604,6 +3771,7 @@ func (c *dbosContext) SetEvent(_ Context, key string, message any, opts ...SetEv
 				Serialization: evtSer.Name(),
 				WorkflowID:    wfState.workflowID,
 				StepID:        wfState.stepID,
+				OwnerXID:      wfState.ownerXID,
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err == nil {
@@ -3891,6 +4059,7 @@ func (c *dbosContext) WriteStream(_ Context, key string, value any, opts ...Writ
 				Serialization: ser.Name(),
 				WorkflowID:    wfState.workflowID,
 				StepID:        wfState.stepID,
+				OwnerXID:      wfState.ownerXID,
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err == nil {
@@ -4426,6 +4595,7 @@ func (c *dbosContext) Patch(_ Context, patchName string) (bool, error) {
 			WorkflowID: wfState.workflowID,
 			StepID:     wfState.stepID + 1, // We are checking if the upcoming step should use the patched code
 			PatchName:  prefixedPatchName,
+			OwnerXID:   wfState.ownerXID,
 		})
 	}, sysdb.WithRetrierLogger(c.logger))
 
@@ -5625,6 +5795,14 @@ func WithFilterWasForkedFrom(wasForkedFrom bool) ListWorkflowsOption {
 	}
 }
 
+// WithFilterIsFork filters workflows by whether they are themselves a fork of another
+// workflow (true) or not (false).
+func WithFilterIsFork(isFork bool) ListWorkflowsOption {
+	return func(p *models.ListWorkflowsInput) {
+		p.IsFork = &isFork
+	}
+}
+
 // WithFilterHasParent filters workflows by whether they have a parent workflow (true) or not (false).
 func WithFilterHasParent(hasParent bool) ListWorkflowsOption {
 	return func(p *models.ListWorkflowsInput) {
@@ -5714,6 +5892,7 @@ func (c *dbosContext) ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]Wo
 		DequeuedAfter:      params.DequeuedAfter,
 		DequeuedBefore:     params.DequeuedBefore,
 		WasForkedFrom:      params.WasForkedFrom,
+		IsFork:             params.IsFork,
 		HasParent:          params.HasParent,
 		Attributes:         params.Attributes,
 		ScheduleName:       params.ScheduleName,
@@ -5999,6 +6178,7 @@ func (c *dbosContext) GetWorkflowAggregates(_ Client, input GetWorkflowAggregate
 		ParentWorkflowID:          input.ParentWorkflowID,
 		ApplicationName:           input.ApplicationName,
 		WasForkedFrom:             input.WasForkedFrom,
+		IsFork:                    input.IsFork,
 		HasParent:                 input.HasParent,
 		Attributes:                input.Attributes,
 	}
@@ -6023,7 +6203,7 @@ func (c *dbosContext) GetWorkflowAggregates(_ Client, input GetWorkflowAggregate
 // At least one GroupBy* flag in the input must be true, or TimeBucketSize must be > 0.
 // Filter fields (Status, StartTime, EndTime, Name, ApplicationVersion, ExecutorID,
 // QueueName, WorkflowIDPrefix, WorkflowIDs, AuthenticatedUser, ForkedFrom,
-// ParentWorkflowID, WasForkedFrom, HasParent, Attributes) narrow which workflows are
+// ParentWorkflowID, WasForkedFrom, IsFork, HasParent, Attributes) narrow which workflows are
 // counted before grouping. Attributes filtering requires a Postgres-compatible system database.
 //
 // At least one Select* flag must be true. Returns one WorkflowAggregateRow per non-empty

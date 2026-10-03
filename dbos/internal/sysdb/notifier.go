@@ -74,19 +74,6 @@ func (n *notifyRegistry) subscribe(payload string) chan struct{} {
 	return ch
 }
 
-// subscribeExclusive registers the sole waiter for payload, returning false if one
-// already exists.
-func (n *notifyRegistry) subscribeExclusive(payload string) (chan struct{}, bool) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if len(n.subs[payload]) > 0 {
-		return nil, false
-	}
-	ch := make(chan struct{}, 1)
-	n.addLocked(payload, ch)
-	return ch, true
-}
-
 // unsubscribe removes a waiter; the payload entry is dropped once its last waiter leaves.
 func (n *notifyRegistry) unsubscribe(payload string, ch chan struct{}) {
 	n.mu.Lock()

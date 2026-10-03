@@ -11,6 +11,7 @@ import (
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+	"github.com/google/uuid"
 )
 
 const _DEFAULT_MAX_POLLING_INTERVAL = 120 * time.Second
@@ -865,12 +866,13 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 			rand.Shuffle(len(partitionKeys), func(i, j int) { partitionKeys[i], partitionKeys[j] = partitionKeys[j], partitionKeys[i] }) // #nosec G404 -- non-crypto shuffle; acceptable
 			limits := queue.resolveLimits()
 			running := ctx.countActiveWorkflowsForQueue(queue.Name)
+			ownerXID := uuid.NewString()
 			var dequeuedIDs []string
 			for _, partitionKey := range partitionKeys {
 				if limits.WorkerConcurrency != nil && running+len(dequeuedIDs) >= *limits.WorkerConcurrency {
 					break
 				}
-				ids, err := qr.dequeueWorkflows(ctx, queue, partitionKey, running+len(dequeuedIDs))
+				ids, err := qr.dequeueWorkflows(ctx, queue, partitionKey, running+len(dequeuedIDs), ownerXID)
 				if err != nil {
 					switch {
 					case !ctx.systemDB.IsContentionError(err):
@@ -888,7 +890,7 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 
 			if len(dequeuedIDs) > 0 {
 				queueLogger.Debug("Dequeued workflows from queue", "workflows", len(dequeuedIDs))
-				qr.startDequeuedWorkflows(ctx, queueLogger, dequeuedIDs)
+				qr.startDequeuedWorkflows(ctx, queueLogger, dequeuedIDs, ownerXID)
 			}
 		}
 
@@ -920,8 +922,8 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 
 // startDequeuedWorkflows reads the claimed workflows' statuses in one round trip and
 // starts each of them. The claim already wrote everything a status insert would
-// (PENDING, executor, deadline, attempts), so the dispatch writes nothing.
-func (qr *queueRunner) startDequeuedWorkflows(ctx *dbosContext, queueLogger *slog.Logger, workflowIDs []string) {
+// (PENDING, executor, deadline, attempts, owner), so the dispatch writes nothing.
+func (qr *queueRunner) startDequeuedWorkflows(ctx *dbosContext, queueLogger *slog.Logger, workflowIDs []string, ownerXID string) {
 	statuses, err := sysdb.RetryWithResult(ctx, func() ([]models.WorkflowStatus, error) {
 		return ctx.systemDB.ListWorkflows(ctx, sysdb.ListWorkflowsDBInput{WorkflowIDs: workflowIDs, LoadInput: true})
 	}, sysdb.WithRetrierLogger(queueLogger))
@@ -993,6 +995,7 @@ func (qr *queueRunner) startDequeuedWorkflows(ctx *dbosContext, queueLogger *slo
 		})
 		ctx.executeWorkflow(fn, status.Input, workflowExecution{
 			workflowID:         id,
+			ownerXID:           ownerXID,
 			queueName:          status.QueueName,
 			queuePartitionKey:  status.QueuePartitionKey,
 			timeout:            status.Timeout,
@@ -1006,7 +1009,7 @@ func (qr *queueRunner) startDequeuedWorkflows(ctx *dbosContext, queueLogger *slo
 }
 
 // dequeueWorkflows claims workflows from one partition, or from the whole queue when partitionKey is empty.
-func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, partitionKey string, localRunning int) ([]string, error) {
+func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, partitionKey string, localRunning int, ownerXID string) ([]string, error) {
 	partitionRunning := 0
 	if partitionKey != "" {
 		partitionRunning = ctx.countActiveWorkflowsForPartition(queue.Name, partitionKey)
@@ -1019,6 +1022,7 @@ func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, p
 			QueuePartitionKey:          partitionKey,
 			LocalRunningCount:          localRunning,
 			PartitionLocalRunningCount: partitionRunning,
+			OwnerXID:                   ownerXID,
 		})
 	}, sysdb.WithRetrierLogger(qr.logger))
 }
