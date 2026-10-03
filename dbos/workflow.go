@@ -3110,10 +3110,11 @@ type sendOptions struct {
 // SendOption is a functional option for configuring a Send call.
 type SendOption func(*sendOptions)
 
-// WithForks delivers the message to every workflow recursively forked from the
+// WithSendToForks delivers the message to every workflow recursively forked from the
 // destination (forks, forks of forks, and so on) that exists at send time.
+// The fork lookup and the insert run in the same transaction.
 // On SendBulk it applies to every message in the batch.
-func WithForks() SendOption {
+func WithSendToForks() SendOption {
 	return func(so *sendOptions) {
 		so.sendToForks = true
 	}
@@ -3237,63 +3238,14 @@ func sendOpName(stepName string) string {
 }
 
 // forkDescendants returns, for each root, every workflow recursively forked from
-// it (direct forks, forks of forks, and so on), excluding the root. Roots are
-// walked together, one query per level. Cycles and self-references are ignored.
-func (c *dbosContext) forkDescendants(roots []string) (map[string][]string, error) {
-	children := map[string][]string{}
-	seen := map[string]struct{}{}
-	frontier := make([]string, 0, len(roots))
-	for _, id := range roots {
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		frontier = append(frontier, id)
-	}
-	for len(frontier) > 0 {
-		forked, err := c.systemDB.ListWorkflows(c, sysdb.ListWorkflowsDBInput{
-			ForkedFrom: frontier,
-		})
-		if err != nil {
-			return nil, err
-		}
-		next := make([]string, 0)
-		for _, wf := range forked {
-			children[wf.ForkedFrom] = append(children[wf.ForkedFrom], wf.ID)
-			if _, ok := seen[wf.ID]; ok {
-				continue
-			}
-			seen[wf.ID] = struct{}{}
-			next = append(next, wf.ID)
-		}
-		frontier = next
-	}
-
-	out := make(map[string][]string, len(roots))
-	for _, root := range roots {
-		if _, ok := out[root]; ok {
-			continue
-		}
-		descendants := make([]string, 0)
-		stack := append([]string(nil), children[root]...)
-		local := map[string]struct{}{}
-		for len(stack) > 0 {
-			n := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if n == root {
-				continue
-			}
-			if _, ok := local[n]; ok {
-				continue
-			}
-			local[n] = struct{}{}
-			descendants = append(descendants, n)
-			stack = append(stack, children[n]...)
-		}
-		slices.Sort(descendants)
-		out[root] = descendants
-	}
-	return out, nil
+// it (direct forks, forks of forks, and so on), excluding the root. One recursive
+// CTE on tx, the same transaction as the send insert. Cycles and self-references
+// are ignored.
+func (c *dbosContext) forkDescendants(ctx context.Context, roots []string, tx Tx) (map[string][]string, error) {
+	return c.systemDB.ForkDescendants(ctx, sysdb.ForkDescendantsDBInput{
+		Roots: roots,
+		Tx:    tx,
+	})
 }
 
 func (c *dbosContext) sendMessages(messages []SendMessage, stepName string, options *sendOptions) error {
@@ -3324,28 +3276,12 @@ func (c *dbosContext) sendMessages(messages []SendMessage, stepName string, opti
 		sendSer = resolveEncoder(c)
 	}
 
-	// Resolve every destination's fork subtree in one walk, before the insert,
-	// so each message fans out to the forks that exist at send time.
-	var descendants map[string][]string
-	if options.sendToForks {
-		roots := make([]string, len(messages))
-		for i, m := range messages {
-			roots[i] = m.DestinationID
-		}
-		var err error
-		descendants, err = c.forkDescendants(roots)
-		if err != nil {
-			return fmt.Errorf("failed to get forked workflows: %w", err)
-		}
-	}
-
-	rows := make([]sysdb.WorkflowSendRow, 0)
+	rows := make([]sysdb.WorkflowSendRow, 0, len(messages))
 	for i, m := range messages {
 		encoded, err := sendSer.Encode(m.Message)
 		if err != nil {
 			return fmt.Errorf("failed to serialize message[%d]: %w", i, err)
 		}
-
 		rows = append(rows, sysdb.WorkflowSendRow{
 			DestinationID:  m.DestinationID,
 			Message:        encoded,
@@ -3353,36 +3289,79 @@ func (c *dbosContext) sendMessages(messages []SendMessage, stepName string, opti
 			Serialization:  sendSer.Name(),
 			IdempotencyKey: m.IdempotencyKey,
 		})
-		for _, id := range descendants[m.DestinationID] {
-			rows = append(rows, sysdb.WorkflowSendRow{
-				DestinationID:  id,
-				Message:        encoded,
-				Topic:          m.Topic,
-				Serialization:  sendSer.Name(),
-				IdempotencyKey: m.IdempotencyKey,
-			})
-		}
 	}
 
-	input := sysdb.WorkflowSendInput{Messages: rows}
+	// deliver inserts rows on tx. With send-to-forks, the destination's fork
+	// subtree is read on that same transaction first, so the insert reaches the
+	// forks that exist at send time and commits or rolls back with that read.
+	deliver := func(ctx context.Context, tx Tx) error {
+		expanded := rows
+		if options.sendToForks {
+			// One lookup per destination. Each message is still copied to those forks.
+			roots := make([]string, 0, len(rows))
+			seenRoot := make(map[string]struct{}, len(rows))
+			for _, row := range rows {
+				if _, ok := seenRoot[row.DestinationID]; ok {
+					continue
+				}
+				seenRoot[row.DestinationID] = struct{}{}
+				roots = append(roots, row.DestinationID)
+			}
+			descendants, err := c.forkDescendants(ctx, roots, tx)
+			if err != nil {
+				return fmt.Errorf("failed to get forked workflows: %w", err)
+			}
+			expanded = fanOutSendRows(rows, descendants)
+		}
+		return c.systemDB.Send(ctx, sysdb.WorkflowSendInput{Messages: expanded, Tx: tx})
+	}
 
-	var err error
 	if options.txSet {
 		// The caller owns the transaction: no commit, no retry.
-		input.Tx = userTx
-		err = c.systemDB.Send(WithoutCancel(c), input)
-	} else if isWithinWorkflow {
-		_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
-			input.Tx = tx
-			return nil, ctx.(*dbosContext).systemDB.Send(ctx, input)
-		}, WithStepName(stepName))
-	} else {
-		uncancellableCtx := WithoutCancel(c)
-		err = sysdb.Retry(c, func() error {
-			return c.systemDB.Send(uncancellableCtx, input)
-		}, sysdb.WithRetrierLogger(c.logger))
+		return deliver(WithoutCancel(c), userTx)
 	}
-	return err
+	if isWithinWorkflow {
+		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+			return nil, deliver(ctx, tx)
+		}, WithStepName(stepName))
+		return err
+	}
+
+	uncancellableCtx := WithoutCancel(c)
+	if options.sendToForks {
+		return sysdb.Retry(c, func() error {
+			tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to begin send transaction: %w", err)
+			}
+			defer tx.Rollback(uncancellableCtx)
+			if err := deliver(uncancellableCtx, tx); err != nil {
+				return err
+			}
+			if err := tx.Commit(uncancellableCtx); err != nil {
+				return fmt.Errorf("failed to commit send transaction: %w", err)
+			}
+			return nil
+		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
+	}
+	return sysdb.Retry(c, func() error {
+		return c.systemDB.Send(uncancellableCtx, sysdb.WorkflowSendInput{Messages: rows})
+	}, sysdb.WithRetrierLogger(c.logger))
+}
+
+// fanOutSendRows copies each row to every workflow forked from its destination.
+// rows is left unchanged.
+func fanOutSendRows(rows []sysdb.WorkflowSendRow, descendants map[string][]string) []sysdb.WorkflowSendRow {
+	out := make([]sysdb.WorkflowSendRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row)
+		for _, id := range descendants[row.DestinationID] {
+			fork := row
+			fork.DestinationID = id
+			out = append(out, fork)
+		}
+	}
+	return out
 }
 
 // Send sends a message to another workflow with type safety.
@@ -3404,7 +3383,7 @@ func Send[P any](ctx Client, destinationID string, message P, topic string, opts
 // The batch is atomic: if any destination does not exist, no message is sent.
 // Inside a workflow the batch is one durable step ("DBOS.sendBulk"); replay does not re-insert.
 //
-// WithPortableSend, WithSendTransaction, and WithForks apply to the whole batch.
+// WithPortableSend, WithSendTransaction, and WithSendToForks apply to the whole batch.
 // WithIdempotencyKey is per-message: set SendMessage.IdempotencyKey. Two messages in
 // the same call may not share an idempotency key. A call may carry at most
 // MaxSendBulkMessages messages.
