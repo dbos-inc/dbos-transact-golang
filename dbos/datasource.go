@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"runtime"
 	"sync"
@@ -41,7 +42,10 @@ type DataSource struct {
 	// no separate transaction_completion table to maintain.
 	sharesSystemDB bool
 
-	// Guard setup (dialect resolution + completion-table creation).
+	// Verify the schema on setup instead of migrating it.
+	skipMigrations bool
+
+	// Guard setup (dialect resolution + schema migration).
 	setupMu   sync.Mutex
 	setupDone bool
 }
@@ -50,8 +54,9 @@ type DataSource struct {
 func (ds *DataSource) Name() string { return ds.name }
 
 type dataSourceOptions struct {
-	name   string
-	schema string
+	name           string
+	schema         string
+	skipMigrations bool
 }
 
 // DataSourceOption configures a data source.
@@ -69,6 +74,12 @@ func WithDataSourceSchema(schema string) DataSourceOption {
 	return func(o *dataSourceOptions) { o.schema = schema }
 }
 
+// WithDataSourceSkipMigrations verifies the data source schema instead of
+// creating and migrating it.
+func WithDataSourceSkipMigrations() DataSourceOption {
+	return func(o *dataSourceOptions) { o.skipMigrations = true }
+}
+
 // Engine is the set of database engine types that can back a DataSource:
 // *pgxpool.Pool (Postgres/CockroachDB) or *sql.DB (SQLite). It is a generic
 // constraint, not an ordinary type, so NewDataSource rejects any other
@@ -83,7 +94,8 @@ type Engine interface {
 //
 // The returned handle is ready to use immediately: NewDataSource detects whether
 // the engine is the DBOS system database, resolves the dialect (CockroachDB), and
-// creates the transaction_completion table if it does not already exist.
+// migrates the data source schema, creating the transaction_completion table if
+// it does not already exist.
 //
 // On a Context created with NewContext, NewDataSource must be called before Launch.
 //
@@ -131,10 +143,11 @@ func NewDataSource[E Engine](ctx Client, engine E, opts ...DataSourceOption) (*D
 	}
 
 	ds := &DataSource{
-		name:    options.name,
-		pool:    pool,
-		dialect: dialect,
-		schema:  options.schema,
+		name:           options.name,
+		pool:           pool,
+		dialect:        dialect,
+		schema:         options.schema,
+		skipMigrations: options.skipMigrations,
 	}
 
 	// A data source whose pool is the very same engine as this context's system
@@ -153,17 +166,24 @@ func NewDataSource[E Engine](ctx Client, engine E, opts ...DataSourceOption) (*D
 	return ds, nil
 }
 
-// setup resolves the dialect and ensures the transaction_completion table exists.
+// setup resolves the dialect and migrates the data source schema, or verifies
+// it under WithDataSourceSkipMigrations.
 func (ds *DataSource) setup(c *dbosContext) error {
 	ds.setupMu.Lock()
 	defer ds.setupMu.Unlock()
 	if ds.setupDone {
 		return nil
 	}
-	if err := ds.resolveDialect(c); err != nil {
+	dialect, err := resolvePoolDialect(c, ds.pool, ds.dialect, c.logger)
+	if err != nil {
 		return err
 	}
-	if err := ds.ensureCompletionTable(c); err != nil {
+	ds.dialect = dialect
+	if ds.skipMigrations {
+		if err := verifyDataSource(c, ds.pool, ds.dialect, ds.schema, ds.name); err != nil {
+			return err
+		}
+	} else if err := ds.migrateSchema(c); err != nil {
 		return err
 	}
 	ds.setupDone = true
@@ -178,112 +198,42 @@ func (ds *DataSource) qualifiedCompletionTable() string {
 	return ds.dialect.SchemaPrefix(ds.schema) + transactionCompletionTable
 }
 
-// completionTableStatements returns the DDL that creates the durability table
-// (and, for Postgres, its schema).
-func (ds *DataSource) completionTableStatements() []string {
-	table := ds.qualifiedCompletionTable()
-	if ds.dialect.Name() == DialectSQLite {
-		return []string{fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-	workflow_id TEXT NOT NULL,
-	step_id INTEGER NOT NULL,
-	output TEXT,
-	error TEXT,
-	serialization TEXT,
-	created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
-	PRIMARY KEY (workflow_id, step_id)
-)`, table)}
-	}
-	return []string{
-		fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s`, pgx.Identifier{ds.schema}.Sanitize()),
-		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-	workflow_id TEXT NOT NULL,
-	step_id INT4 NOT NULL,
-	output TEXT,
-	error TEXT,
-	serialization TEXT,
-	created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM now())*1000)::bigint,
-	PRIMARY KEY (workflow_id, step_id)
-)`, table),
-	}
-}
-
-// resolveDialect refines a Postgres data source to the CockroachDB dialect when
-// the underlying pool is actually CRDB. The two are wire-compatible and share
-// postgresDialect for everything a data source needs, so this only keeps the
-// dialect Name accurate (for logs) and future-proofs any later divergence.
-// No-op for *sql.DB (SQLite), whose dialect is already final.
-func (ds *DataSource) resolveDialect(c *dbosContext) error {
-	pgxPool := PgxPool(ds.pool)
+// resolvePoolDialect refines a Postgres dialect to CockroachDB when the pool is
+// actually CRDB. The two are wire-compatible and share postgresDialect for
+// everything a data source needs, so this only keeps the dialect Name accurate
+// (for logs) and future-proofs any later divergence. No-op for *sql.DB
+// (SQLite), whose dialect is already final.
+func resolvePoolDialect(ctx context.Context, pool Pool, dialect Dialect, logger *slog.Logger) (Dialect, error) {
+	pgxPool := PgxPool(pool)
 	if pgxPool == nil {
-		return nil
+		return dialect, nil
 	}
-	crdb, err := sysdb.RetryWithResult(c, func() (bool, error) {
-		conn, err := pgxPool.Acquire(c)
+	crdb, err := sysdb.RetryWithResult(ctx, func() (bool, error) {
+		conn, err := pgxPool.Acquire(ctx)
 		if err != nil {
 			return false, err
 		}
 		defer conn.Release()
 		return sysdb.IsCockroachDB(conn.Conn()), nil
-	}, sysdb.WithRetrierLogger(c.logger))
+	}, sysdb.WithRetrierLogger(logger))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if crdb {
-		ds.dialect = sysdb.CockroachDialect{}
-		c.logger.Debug("Detected CockroachDB data source", "datasource", ds.name)
+		return sysdb.CockroachDialect{}, nil
 	}
-	return nil
+	return dialect, nil
 }
 
-// completionTableInstalled reports whether the transaction_completion table
-// already exists in the user's database. When it does, ensureCompletionTable
-// skips all DDL — so a least-privilege role with only DML rights works against a
-// table that was pre-created (e.g. in the application's own migrations).
-func (ds *DataSource) completionTableInstalled(c *dbosContext) (bool, error) {
-	return sysdb.RetryWithResult(c, func() (bool, error) {
-		if ds.dialect.Name() == DialectSQLite {
-			var name string
-			err := ds.pool.QueryRow(c,
-				`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`,
-				transactionCompletionTable).Scan(&name)
-			if errors.Is(err, ErrNoRows) {
-				return false, nil
-			}
-			return err == nil, err
-		}
-		var exists bool
-		err := ds.pool.QueryRow(c,
-			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`,
-			ds.schema, transactionCompletionTable).Scan(&exists)
-		return exists, err
-	}, sysdb.WithRetrierLogger(c.logger))
-}
-
-// ensureCompletionTable creates the transaction_completion table in the user's
-// database when it is not already present. It pre-checks for the table first, so
-// a role with only DML privileges works against a pre-provisioned table; only a
-// missing table triggers the CREATE SCHEMA / CREATE TABLE DDL.
-// A failed create returns an actionable error pointing the user at their own database migrations.
-func (ds *DataSource) ensureCompletionTable(c *dbosContext) error {
-	installed, err := ds.completionTableInstalled(c)
-	if err != nil {
-		return fmt.Errorf("checking for the %s table: %w", ds.qualifiedCompletionTable(), err)
-	}
-	if installed {
-		c.logger.Debug("transaction_completion table already present; skipping creation", "datasource", ds.name)
-		return nil
-	}
-	for _, stmt := range ds.completionTableStatements() {
-		query := stmt
-		if err := sysdb.Retry(c, func() error {
-			_, execErr := ds.pool.Exec(c, query)
-			return execErr
-		}, sysdb.WithRetrierLogger(c.logger)); err != nil {
-			return fmt.Errorf("the %s table does not exist and could not be created: %w; "+
-				"create it ahead of time in your application's database migrations "+
-				"or ensure the connecting role has CREATE privileges on the database and schema",
-				ds.qualifiedCompletionTable(), err)
-		}
+// migrateSchema migrates the data source schema, which creates the
+// transaction_completion table (and, for Postgres, its schema) when missing.
+// A schema already at the current version needs no DDL, so a role with only
+// DML privileges works against a schema migrated ahead of time.
+func (ds *DataSource) migrateSchema(c *dbosContext) error {
+	if err := migrateDataSource(c, ds.pool, ds.dialect, ds.schema, c.logger); err != nil {
+		return fmt.Errorf("migrating the data source schema: %w; "+
+			"migrate it ahead of time with a privileged role (dbos.MigrateDataSource) "+
+			"or ensure the connecting role has CREATE privileges on the database and schema", err)
 	}
 	return nil
 }
