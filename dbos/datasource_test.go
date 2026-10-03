@@ -84,6 +84,16 @@ func (u *userBackend) dropCompletionTable(t *testing.T) {
 	}
 }
 
+// migrate runs MigrateDataSource over this backend's engine.
+func (u *userBackend) migrate(t *testing.T, opts ...MigrateOption) error {
+	t.Helper()
+	opts = append(opts, WithMigrateSchema(u.schema))
+	if db := SQLDB(u.pool); db != nil {
+		return MigrateDataSource(context.Background(), db, opts...)
+	}
+	return MigrateDataSource(context.Background(), PgxPool(u.pool), opts...)
+}
+
 // versionTable returns the schema-qualified data source version table name.
 func (u *userBackend) versionTable() string {
 	return u.dialect.SchemaPrefix(u.schema) + dataSourceMigrationsTable
@@ -367,18 +377,15 @@ func TestNewDataSourceNoDDLPrivileges(t *testing.T) {
 
 		mustExec := func(q string) { _, e := admin.Exec(bg, q); require.NoError(t, e) }
 		mustExec(fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema))
-		require.NoError(t, migrateDataSource(bg, sysdb.NewPgxPool(admin), sysdb.PostgresDialect{}, schema, nil))
+		require.NoError(t, MigrateDataSource(bg, admin, WithMigrateSchema(schema), WithMigrateApplicationRole(role)))
 		mustExec(fmt.Sprintf(`CREATE TABLE %q.kv (k TEXT PRIMARY KEY, v TEXT)`, schema))
-		mustExec(fmt.Sprintf(`GRANT USAGE ON SCHEMA %q TO %s`, schema, role))
-		mustExec(fmt.Sprintf(`GRANT SELECT, INSERT ON %q.transaction_completion TO %s`, schema, role))
-		mustExec(fmt.Sprintf(`GRANT SELECT ON %q.%s TO %s`, schema, dataSourceMigrationsTable, role))
 		mustExec(fmt.Sprintf(`GRANT SELECT, INSERT, UPDATE ON %q.kv TO %s`, schema, role))
 		t.Cleanup(func() {
 			_, _ = admin.Exec(context.Background(), fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema))
 		})
 
-		// The schema is at the current version, so no DDL is attempted.
-		ds, err := NewDataSource(ctx, limited, WithDataSourceSchema(schema))
+		// The schema holds only the granted permissions and is verified, never migrated.
+		ds, err := NewDataSource(ctx, limited, WithDataSourceSchema(schema), WithDataSourceSkipMigrations())
 		require.NoError(t, err)
 		require.NotNil(t, ds)
 
@@ -495,6 +502,63 @@ func TestDataSourceMigrations(t *testing.T) {
 		// The server killed the frozen session, rolling back its migration.
 		_, err = frozen.Exec(bg, `SELECT 1`)
 		require.Error(t, err)
+	})
+
+	t.Run("SkipMigrationsRejectsUnmigrated", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ub.dropCompletionTable(t)
+
+		var err error
+		if db := SQLDB(ub.pool); db != nil {
+			_, err = NewDataSource(ctx, db, WithDataSourceSkipMigrations())
+		} else {
+			_, err = NewDataSource(ctx, PgxPool(ub.pool), WithDataSourceSkipMigrations())
+		}
+		require.Error(t, err)
+		latest := len(dataSourceMigrations(ub.dialect, ub.schema))
+		require.Contains(t, err.Error(), fmt.Sprintf("is at transaction schema version 0, but this version of DBOS requires %d", latest))
+		require.Contains(t, err.Error(), "MigrateDataSource")
+		// Verification creates nothing.
+		require.False(t, ub.completionTableExists(t))
+		require.Equal(t, int64(0), ub.schemaVersion(t))
+	})
+
+	// MigrateDataSource prepares the schema that WithDataSourceSkipMigrations
+	// then accepts, as does a schema ahead of this build.
+	t.Run("SkipMigrationsAcceptsMigrated", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ub.dropCompletionTable(t)
+		bg := context.Background()
+
+		require.NoError(t, ub.migrate(t))
+		require.Equal(t, int64(len(dataSourceMigrations(ub.dialect, ub.schema))), ub.schemaVersion(t))
+		require.NoError(t, ub.migrate(t), "already migrated: a no-op")
+
+		ds := ub.register(t, ctx, "app", WithDataSourceSkipMigrations())
+		require.NotNil(t, ds)
+
+		_, err := ub.pool.Exec(bg, fmt.Sprintf(`UPDATE %s SET version = 999`, ub.versionTable()))
+		require.NoError(t, err)
+		ub.register(t, ctx, "ahead", WithDataSourceSkipMigrations())
+	})
+
+	t.Run("MigrateRejectsRoleOnSqlite", func(t *testing.T) {
+		if !useSqliteBackend() {
+			t.Skip("sqlite only")
+		}
+		ub := openUserBackend(t)
+		err := ub.migrate(t, WithMigrateApplicationRole("app"))
+		require.ErrorContains(t, err, "not supported for SQLite")
+	})
+
+	t.Run("PermissionStatementsQuote", func(t *testing.T) {
+		stmts := DataSourcePermissionStatements("F8nny_sCHem@-n@m3", "my-app-role")
+		require.Len(t, stmts, 3)
+		require.Equal(t, `GRANT USAGE ON SCHEMA "F8nny_sCHem@-n@m3" TO "my-app-role"`, stmts[0])
+		require.Equal(t, `GRANT SELECT, INSERT, DELETE ON "F8nny_sCHem@-n@m3".transaction_completion TO "my-app-role"`, stmts[1])
+		require.Equal(t, `GRANT SELECT ON "F8nny_sCHem@-n@m3".dbos_transaction_completion_migrations TO "my-app-role"`, stmts[2])
 	})
 }
 

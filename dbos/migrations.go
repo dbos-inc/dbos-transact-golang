@@ -27,9 +27,9 @@ func WithMigrateSchema(schema string) MigrateOption {
 	return func(o *migrateOptions) { o.schema = schema }
 }
 
-// WithMigrateApplicationRole grants role access to the system schema once it is
-// migrated, so an application whose role cannot run DDL can launch with
-// Config.SkipMigrations. Postgres only.
+// WithMigrateApplicationRole grants role access to the migrated schema, so an
+// application whose role cannot run DDL can launch with Config.SkipMigrations
+// (or create its data source with WithDataSourceSkipMigrations). Postgres only.
 func WithMigrateApplicationRole(role string) MigrateOption {
 	return func(o *migrateOptions) { o.applicationRole = role }
 }

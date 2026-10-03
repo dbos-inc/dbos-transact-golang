@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"runtime"
 	"sync"
@@ -41,6 +42,9 @@ type DataSource struct {
 	// no separate transaction_completion table to maintain.
 	sharesSystemDB bool
 
+	// Verify the schema on setup instead of migrating it.
+	skipMigrations bool
+
 	// Guard setup (dialect resolution + schema migration).
 	setupMu   sync.Mutex
 	setupDone bool
@@ -50,8 +54,9 @@ type DataSource struct {
 func (ds *DataSource) Name() string { return ds.name }
 
 type dataSourceOptions struct {
-	name   string
-	schema string
+	name           string
+	schema         string
+	skipMigrations bool
 }
 
 // DataSourceOption configures a data source.
@@ -67,6 +72,12 @@ func WithDataSourceName(name string) DataSourceOption {
 // table (default "dbos"). Ignored by SQLite, which has no schemas.
 func WithDataSourceSchema(schema string) DataSourceOption {
 	return func(o *dataSourceOptions) { o.schema = schema }
+}
+
+// WithDataSourceSkipMigrations verifies the data source schema instead of
+// creating and migrating it.
+func WithDataSourceSkipMigrations() DataSourceOption {
+	return func(o *dataSourceOptions) { o.skipMigrations = true }
 }
 
 // Engine is the set of database engine types that can back a DataSource:
@@ -132,10 +143,11 @@ func NewDataSource[E Engine](ctx Client, engine E, opts ...DataSourceOption) (*D
 	}
 
 	ds := &DataSource{
-		name:    options.name,
-		pool:    pool,
-		dialect: dialect,
-		schema:  options.schema,
+		name:           options.name,
+		pool:           pool,
+		dialect:        dialect,
+		schema:         options.schema,
+		skipMigrations: options.skipMigrations,
 	}
 
 	// A data source whose pool is the very same engine as this context's system
@@ -154,17 +166,24 @@ func NewDataSource[E Engine](ctx Client, engine E, opts ...DataSourceOption) (*D
 	return ds, nil
 }
 
-// setup resolves the dialect and migrates the data source schema.
+// setup resolves the dialect and migrates the data source schema, or verifies
+// it under WithDataSourceSkipMigrations.
 func (ds *DataSource) setup(c *dbosContext) error {
 	ds.setupMu.Lock()
 	defer ds.setupMu.Unlock()
 	if ds.setupDone {
 		return nil
 	}
-	if err := ds.resolveDialect(c); err != nil {
+	dialect, err := resolvePoolDialect(c, ds.pool, ds.dialect, c.logger)
+	if err != nil {
 		return err
 	}
-	if err := ds.migrateSchema(c); err != nil {
+	ds.dialect = dialect
+	if ds.skipMigrations {
+		if err := verifyDataSource(c, ds.pool, ds.dialect, ds.schema, ds.name); err != nil {
+			return err
+		}
+	} else if err := ds.migrateSchema(c); err != nil {
 		return err
 	}
 	ds.setupDone = true
@@ -179,32 +198,31 @@ func (ds *DataSource) qualifiedCompletionTable() string {
 	return ds.dialect.SchemaPrefix(ds.schema) + transactionCompletionTable
 }
 
-// resolveDialect refines a Postgres data source to the CockroachDB dialect when
-// the underlying pool is actually CRDB. The two are wire-compatible and share
-// postgresDialect for everything a data source needs, so this only keeps the
-// dialect Name accurate (for logs) and future-proofs any later divergence.
-// No-op for *sql.DB (SQLite), whose dialect is already final.
-func (ds *DataSource) resolveDialect(c *dbosContext) error {
-	pgxPool := PgxPool(ds.pool)
+// resolvePoolDialect refines a Postgres dialect to CockroachDB when the pool is
+// actually CRDB. The two are wire-compatible and share postgresDialect for
+// everything a data source needs, so this only keeps the dialect Name accurate
+// (for logs) and future-proofs any later divergence. No-op for *sql.DB
+// (SQLite), whose dialect is already final.
+func resolvePoolDialect(ctx context.Context, pool Pool, dialect Dialect, logger *slog.Logger) (Dialect, error) {
+	pgxPool := PgxPool(pool)
 	if pgxPool == nil {
-		return nil
+		return dialect, nil
 	}
-	crdb, err := sysdb.RetryWithResult(c, func() (bool, error) {
-		conn, err := pgxPool.Acquire(c)
+	crdb, err := sysdb.RetryWithResult(ctx, func() (bool, error) {
+		conn, err := pgxPool.Acquire(ctx)
 		if err != nil {
 			return false, err
 		}
 		defer conn.Release()
 		return sysdb.IsCockroachDB(conn.Conn()), nil
-	}, sysdb.WithRetrierLogger(c.logger))
+	}, sysdb.WithRetrierLogger(logger))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if crdb {
-		ds.dialect = sysdb.CockroachDialect{}
-		c.logger.Debug("Detected CockroachDB data source", "datasource", ds.name)
+		return sysdb.CockroachDialect{}, nil
 	}
-	return nil
+	return dialect, nil
 }
 
 // migrateSchema migrates the data source schema, which creates the
@@ -214,7 +232,7 @@ func (ds *DataSource) resolveDialect(c *dbosContext) error {
 func (ds *DataSource) migrateSchema(c *dbosContext) error {
 	if err := migrateDataSource(c, ds.pool, ds.dialect, ds.schema, c.logger); err != nil {
 		return fmt.Errorf("migrating the data source schema: %w; "+
-			"migrate it ahead of time with a privileged role "+
+			"migrate it ahead of time with a privileged role (dbos.MigrateDataSource) "+
 			"or ensure the connecting role has CREATE privileges on the database and schema", err)
 	}
 	return nil
