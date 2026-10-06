@@ -3404,17 +3404,6 @@ func sendOpName(stepName string) string {
 	return "Send"
 }
 
-// forkDescendants returns, for each root, every workflow recursively forked from
-// it (direct forks, forks of forks, and so on), excluding the root. One recursive
-// CTE on tx, the same transaction as the send insert. Cycles and self-references
-// are ignored.
-func (c *dbosContext) forkDescendants(ctx context.Context, roots []string, tx Tx) (map[string][]string, error) {
-	return c.systemDB.ForkDescendants(ctx, sysdb.ForkDescendantsDBInput{
-		Roots: roots,
-		Tx:    tx,
-	})
-}
-
 func (c *dbosContext) sendMessages(messages []SendMessage, stepName string, options *sendOptions) error {
 	isWithinWorkflow := false
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
@@ -3474,7 +3463,7 @@ func (c *dbosContext) sendMessages(messages []SendMessage, stepName string, opti
 				seenRoot[row.DestinationID] = struct{}{}
 				roots = append(roots, row.DestinationID)
 			}
-			descendants, err := c.forkDescendants(ctx, roots, tx)
+			descendants, err := c.systemDB.ForkDescendants(ctx, sysdb.ForkDescendantsDBInput{Roots: roots, Tx: tx})
 			if err != nil {
 				return fmt.Errorf("failed to get forked workflows: %w", err)
 			}
