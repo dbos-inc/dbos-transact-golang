@@ -44,9 +44,6 @@ type SystemDatabase interface {
 	// Workflows
 	InsertWorkflowStatus(ctx context.Context, input InsertWorkflowStatusDBInput) (*InsertWorkflowResult, error)
 	ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) ([]models.WorkflowStatus, error)
-	// ForkDescendants returns, for each root, every workflow recursively forked
-	// from it, excluding the root. One query, on input.Tx.
-	ForkDescendants(ctx context.Context, input ForkDescendantsDBInput) (map[string][]string, error)
 	UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowOutcomeDBInput) (bool, error)
 	SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration, failIfMissing bool) (*AwaitWorkflowResultOutput, error)
@@ -1997,18 +1994,11 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 	return workflows, nil
 }
 
-// ForkDescendantsDBInput is the set of workflows whose fork subtrees to read.
-// Tx is the send transaction, so the read commits or rolls back with the insert.
-type ForkDescendantsDBInput struct {
-	Roots []string
-	Tx    Tx
-}
-
-// ForkDescendants lists every workflow recursively forked from Roots, excluding
-// the roots themselves.
-func (s *SysDB) ForkDescendants(ctx context.Context, input ForkDescendantsDBInput) (map[string][]string, error) {
-	out := make(map[string][]string, len(input.Roots))
-	for _, root := range input.Roots {
+// forkDescendants lists every workflow recursively forked from each of the
+// given roots, excluding the roots themselves.
+func (s *SysDB) forkDescendants(ctx context.Context, exec Querier, rootIDs []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(rootIDs))
+	for _, root := range rootIDs {
 		if _, ok := out[root]; ok {
 			continue
 		}
@@ -2016,9 +2006,6 @@ func (s *SysDB) ForkDescendants(ctx context.Context, input ForkDescendantsDBInpu
 	}
 	if len(out) == 0 {
 		return out, nil
-	}
-	if input.Tx == nil {
-		return nil, errors.New("fork descendants must run on the send transaction")
 	}
 
 	roots := make([]string, 0, len(out))
@@ -2044,7 +2031,7 @@ func (s *SysDB) ForkDescendants(ctx context.Context, input ForkDescendantsDBInpu
 		SELECT root, id FROM fork_tree WHERE id <> root ORDER BY root, id`,
 		schemaPrefix, rootMatch, schemaPrefix)
 
-	rows, err := input.Tx.Query(ctx, query, rootsParam)
+	rows, err := exec.Query(ctx, query, rootsParam)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list fork descendants: %w", err)
 	}
@@ -4429,8 +4416,9 @@ type WorkflowSendRow struct {
 }
 
 type WorkflowSendInput struct {
-	Messages []WorkflowSendRow
-	Tx       Tx
+	Messages    []WorkflowSendRow
+	Tx          Tx
+	SendToForks bool
 }
 
 // Send inserts one or more notifications. SQLite chunks them in one transaction.
@@ -4444,6 +4432,31 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		if _, ok := m.Message.(*string); !ok {
 			return fmt.Errorf("message[%d] must be a pointer to a string", i)
 		}
+	}
+
+	if input.SendToForks {
+		var exec Querier = s.pool
+		if input.Tx != nil {
+			exec = input.Tx
+		}
+		roots := make([]string, 0, len(input.Messages))
+		for _, m := range input.Messages {
+			roots = append(roots, m.DestinationID)
+		}
+		descendants, err := s.forkDescendants(ctx, exec, roots)
+		if err != nil {
+			return err
+		}
+		expanded := make([]WorkflowSendRow, 0, len(input.Messages))
+		for _, m := range input.Messages {
+			expanded = append(expanded, m)
+			for _, id := range descendants[m.DestinationID] {
+				fork := m
+				fork.DestinationID = id
+				expanded = append(expanded, fork)
+			}
+		}
+		input.Messages = expanded
 	}
 
 	// PG and CockroachDB support array parameters, so we can insert all notifications in one query.
