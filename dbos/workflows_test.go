@@ -6051,6 +6051,268 @@ func TestSendBulk(t *testing.T) {
 	})
 }
 
+// notificationPayloads returns the decoded string messages sent to workflowID.
+func notificationPayloads(t *testing.T, ctx Context, workflowID string) []string {
+	t.Helper()
+	rows, err := ctx.(*dbosContext).systemDB.GetAllNotifications(context.Background(), workflowID)
+	require.NoError(t, err)
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		raw, err := base64.StdEncoding.DecodeString(row.Message)
+		require.NoError(t, err)
+		var msg string
+		require.NoError(t, json.Unmarshal(raw, &msg))
+		out = append(out, msg)
+	}
+	return out
+}
+
+// TestSendToForks verifies WithSendToForks on Send and SendBulk delivers each message
+// to the destination and every workflow recursively forked from it, and only
+// that subtree.
+func TestSendToForks(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	forkable := func(ctx Context, _ string) (string, error) {
+		return "ok", nil
+	}
+	sendToForksWorkflow := func(ctx Context, destinationID string) (string, error) {
+		if err := Send(ctx, destinationID, "once", "send-forks-recovery", WithSendToForks()); err != nil {
+			return "", err
+		}
+		return "sent", nil
+	}
+	sendBulkToForksWorkflow := func(ctx Context, destinations []string) (string, error) {
+		messages := make([]SendMessage, len(destinations))
+		for i, id := range destinations {
+			messages[i] = SendMessage{DestinationID: id, Message: "bulk-" + id, Topic: "send-forks-bulk-wf"}
+		}
+		if err := SendBulk(ctx, messages, WithSendToForks()); err != nil {
+			return "", err
+		}
+		return "sent", nil
+	}
+	RegisterWorkflow(dbosCtx, forkable)
+	RegisterWorkflow(dbosCtx, sendToForksWorkflow, WithWorkflowName("send-to-forks-workflow"))
+	RegisterWorkflow(dbosCtx, sendBulkToForksWorkflow, WithWorkflowName("send-bulk-to-forks-workflow"))
+	require.NoError(t, Launch(dbosCtx))
+
+	runRoot := func(t *testing.T) string {
+		t.Helper()
+		h, err := RunWorkflow(dbosCtx, forkable, "")
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+		return h.GetWorkflowID()
+	}
+	forkFrom := func(t *testing.T, id string) string {
+		t.Helper()
+		h, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: id})
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+		status, err := h.GetStatus()
+		require.NoError(t, err)
+		require.Equal(t, id, status.ForkedFrom)
+		return h.GetWorkflowID()
+	}
+
+	// root, its fork, and a fork of that fork.
+	type forkTree struct {
+		root, fork, forkFork string
+	}
+	grow := func(t *testing.T) forkTree {
+		t.Helper()
+		root := runRoot(t)
+		f := forkFrom(t, root)
+		return forkTree{root: root, fork: f, forkFork: forkFrom(t, f)}
+	}
+	assertMessages := func(t *testing.T, id string, want ...string) {
+		t.Helper()
+		require.ElementsMatch(t, want, notificationPayloads(t, dbosCtx, id))
+	}
+	assertOneMessageUUID := func(t *testing.T, key, id string) {
+		t.Helper()
+		n := rawQueryInt(t, dbosCtx, `SELECT COUNT(*) FROM %snotifications WHERE message_uuid = $1`, key+"::"+id)
+		require.Equal(t, 1, n, "idempotency key should address %s once", id)
+	}
+
+	t.Run("Send", func(t *testing.T) {
+		a := grow(t)
+		// An unrelated workflow and its fork must not receive the message.
+		c := runRoot(t)
+		cFork := forkFrom(t, c)
+
+		key := "send-fork-key"
+		require.NoError(t, Send(dbosCtx, a.root, "to-a", "send-forks", WithSendToForks(), WithIdempotencyKey(key)))
+
+		assertMessages(t, a.root, "to-a")
+		assertMessages(t, a.fork, "to-a")
+		assertMessages(t, a.forkFork, "to-a")
+		assertMessages(t, c)
+		assertMessages(t, cFork)
+		for _, id := range []string{a.root, a.fork, a.forkFork} {
+			assertOneMessageUUID(t, key, id)
+		}
+
+		// The same key is one message per recipient, including the forks.
+		require.NoError(t, Send(dbosCtx, a.root, "again", "send-forks", WithSendToForks(), WithIdempotencyKey(key)))
+		assertMessages(t, a.root, "to-a")
+		assertMessages(t, a.fork, "to-a")
+		assertMessages(t, a.forkFork, "to-a")
+	})
+
+	t.Run("SendSkipsForksWithoutOption", func(t *testing.T) {
+		d := grow(t)
+		require.NoError(t, Send(dbosCtx, d.root, "only-root", "send-noforks"))
+		assertMessages(t, d.root, "only-root")
+		assertMessages(t, d.fork)
+		assertMessages(t, d.forkFork)
+	})
+
+	t.Run("SendBulk", func(t *testing.T) {
+		a := grow(t)
+		b := runRoot(t)
+		bFork := forkFrom(t, b)
+		c := runRoot(t)
+		cFork := forkFrom(t, c)
+
+		key := "bulk-fork-key"
+		require.NoError(t, SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: a.root, Message: "to-a", Topic: "bulk-forks", IdempotencyKey: key},
+			{DestinationID: b, Message: "to-b", Topic: "bulk-forks"},
+		}, WithSendToForks()))
+
+		// Each destination reaches only its own fork subtree.
+		assertMessages(t, a.root, "to-a")
+		assertMessages(t, a.fork, "to-a")
+		assertMessages(t, a.forkFork, "to-a")
+		assertMessages(t, b, "to-b")
+		assertMessages(t, bFork, "to-b")
+		assertMessages(t, c)
+		assertMessages(t, cFork)
+		for _, id := range []string{a.root, a.fork, a.forkFork} {
+			assertOneMessageUUID(t, key, id)
+		}
+
+		before := rawQueryInt(t, dbosCtx, `SELECT COUNT(*) FROM %snotifications`)
+		require.NoError(t, SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: a.root, Message: "x", Topic: "bulk-forks", IdempotencyKey: key},
+		}, WithSendToForks()))
+		after := rawQueryInt(t, dbosCtx, `SELECT COUNT(*) FROM %snotifications`)
+		require.Equal(t, before, after, "resending with the same key must not insert again")
+		assertMessages(t, a.root, "to-a")
+		assertMessages(t, a.forkFork, "to-a")
+	})
+
+	t.Run("RecoveryDoesNotResend", func(t *testing.T) {
+		a := grow(t)
+		sendH, err := RunWorkflow(dbosCtx, sendToForksWorkflow, a.root)
+		require.NoError(t, err)
+		got, err := sendH.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "sent", got)
+
+		assertMessages(t, a.root, "once")
+		assertMessages(t, a.fork, "once")
+		assertMessages(t, a.forkFork, "once")
+
+		setWorkflowStatusPending(t, dbosCtx, sendH.GetWorkflowID())
+		recovered, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err)
+		var recoveredSend WorkflowHandle[any]
+		for _, handle := range recovered {
+			if handle.GetWorkflowID() == sendH.GetWorkflowID() {
+				recoveredSend = handle
+				break
+			}
+		}
+		require.NotNil(t, recoveredSend, "expected recovered send workflow")
+		_, err = recoveredSend.GetResult()
+		require.NoError(t, err)
+
+		assertMessages(t, a.root, "once")
+		assertMessages(t, a.fork, "once")
+		assertMessages(t, a.forkFork, "once")
+	})
+
+	t.Run("SendBulkWithinWorkflow", func(t *testing.T) {
+		a := grow(t)
+		b := runRoot(t)
+		bFork := forkFrom(t, b)
+		c := runRoot(t)
+		cFork := forkFrom(t, c)
+
+		h, err := RunWorkflow(dbosCtx, sendBulkToForksWorkflow, []string{a.root, b})
+		require.NoError(t, err)
+		got, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "sent", got)
+
+		assertMessages(t, a.root, "bulk-"+a.root)
+		assertMessages(t, a.fork, "bulk-"+a.root)
+		assertMessages(t, a.forkFork, "bulk-"+a.root)
+		assertMessages(t, b, "bulk-"+b)
+		assertMessages(t, bFork, "bulk-"+b)
+		assertMessages(t, c)
+		assertMessages(t, cFork)
+
+		// The whole batch, fan-out included, is one recorded step.
+		steps, err := GetWorkflowSteps(dbosCtx, h.GetWorkflowID())
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		require.Equal(t, sendBulkStepName, steps[0].StepName)
+	})
+
+	t.Run("SendTransactionRollsBack", func(t *testing.T) {
+		a := grow(t)
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+		tx, err := sysDB.Pool().BeginTx(context.Background(), TxOptions{})
+		require.NoError(t, err)
+		defer tx.Rollback(context.Background())
+
+		require.NoError(t, Send(dbosCtx, a.root, "rolled-back", "send-forks-tx", WithSendToForks(), WithSendTransaction(tx)))
+
+		// The destination and its forks are written on the caller's transaction.
+		q := sysDB.Dialect().RewriteQuery(fmt.Sprintf(
+			`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid IN ($1, $2, $3)`,
+			sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
+		var n int
+		require.NoError(t, tx.QueryRow(context.Background(), q, a.root, a.fork, a.forkFork).Scan(&n))
+		require.Equal(t, 3, n, "send transaction should see one row per recipient")
+
+		require.NoError(t, tx.Rollback(context.Background()))
+		assertMessages(t, a.root)
+		assertMessages(t, a.fork)
+		assertMessages(t, a.forkFork)
+	})
+
+	t.Run("ForkCycle", func(t *testing.T) {
+		// Fork a -> b, delete a, then fork b back as a: a.forked_from = b and
+		// b.forked_from = a. The lookup must terminate and reach both.
+		a := runRoot(t)
+		b := forkFrom(t, a)
+		require.NoError(t, DeleteWorkflows(dbosCtx, []string{a}))
+		h, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: b, ForkedWorkflowID: a})
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+		status, err := h.GetStatus()
+		require.NoError(t, err)
+		require.Equal(t, b, status.ForkedFrom)
+
+		done := make(chan error, 1)
+		go func() { done <- Send(dbosCtx, a, "cycle", "send-forks-cycle", WithSendToForks()) }()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("send to a fork cycle did not return")
+		}
+		assertMessages(t, a, "cycle")
+		assertMessages(t, b, "cycle")
+	})
+}
+
 var (
 	setEventStart                 = NewEvent()
 	setSecondEventSignal          = NewEvent()

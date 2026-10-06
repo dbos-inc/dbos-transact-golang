@@ -1994,6 +1994,62 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 	return workflows, nil
 }
 
+// forkDescendants lists every workflow recursively forked from each of the
+// given roots, excluding the roots themselves.
+func (s *SysDB) forkDescendants(ctx context.Context, exec Querier, rootIDs []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(rootIDs))
+	for _, root := range rootIDs {
+		if _, ok := out[root]; ok {
+			continue
+		}
+		out[root] = []string{}
+	}
+	if len(out) == 0 {
+		return out, nil
+	}
+
+	roots := make([]string, 0, len(out))
+	for root := range out {
+		roots = append(roots, root)
+	}
+	rootsParam, err := encodeArrayParam(s.dialect, roots)
+	if err != nil {
+		return nil, fmt.Errorf("fork descendants: %w", err)
+	}
+
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+	rootMatch := dialectAnyClause(s.dialect, "forked_from", 1)
+	query := s.RenderSQL(`WITH RECURSIVE fork_tree(root, id) AS (
+			SELECT forked_from, workflow_uuid
+			FROM %sworkflow_status
+			WHERE %s
+			UNION
+			SELECT t.root, w.workflow_uuid
+			FROM %sworkflow_status w
+			INNER JOIN fork_tree t ON w.forked_from = t.id
+		)
+		SELECT root, id FROM fork_tree WHERE id <> root ORDER BY root, id`,
+		schemaPrefix, rootMatch, schemaPrefix)
+
+	rows, err := exec.Query(ctx, query, rootsParam)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list fork descendants: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var root, id string
+		if err := rows.Scan(&root, &id); err != nil {
+			return nil, fmt.Errorf("failed to scan fork descendant: %w", err)
+		}
+		out[root] = append(out[root], id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating fork descendants: %w", err)
+	}
+	return out, nil
+}
+
 type UpdateWorkflowOutcomeDBInput struct {
 	WorkflowID string
 	Status     models.WorkflowStatusType
@@ -4360,11 +4416,13 @@ type WorkflowSendRow struct {
 }
 
 type WorkflowSendInput struct {
-	Messages []WorkflowSendRow
-	Tx       Tx
+	Messages    []WorkflowSendRow
+	Tx          Tx
+	SendToForks bool
 }
 
-// Send inserts one or more notifications. SQLite chunks them in one transaction.
+// Send inserts one or more notifications. SQLite chunks them in one transaction;
+// with SendToForks the fork lookup and the insert share one as well.
 // Can be called both within a workflow (as a step) or outside a workflow (directly).
 // When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution.
 func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
@@ -4377,17 +4435,12 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		}
 	}
 
-	// PG and CockroachDB support array parameters, so we can insert all notifications in one query.
-	if s.dialect.SupportsArrayParameters() {
-		var exec Querier = s.pool
-		if input.Tx != nil {
-			exec = input.Tx
-		}
-		return s.insertNotificationsArrays(ctx, exec, input.Messages)
-	}
-
+	// Without a caller transaction, open one when the fork lookup must see the
+	// same rows as the insert, or when SQLite inserts the batch in several chunks.
+	// PG and CockroachDB insert every row in one array-parameter query.
 	tx := input.Tx
-	if tx == nil && len(input.Messages) > _SEND_CHUNK_SIZE {
+	chunked := !s.dialect.SupportsArrayParameters() && len(input.Messages) > _SEND_CHUNK_SIZE
+	if tx == nil && (input.SendToForks || chunked) {
 		var err error
 		tx, err = s.pool.BeginTx(ctx, TxOptions{})
 		if err != nil {
@@ -4401,10 +4454,23 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		exec = tx
 	}
 
-	for start := 0; start < len(input.Messages); start += _SEND_CHUNK_SIZE {
-		end := min(start+_SEND_CHUNK_SIZE, len(input.Messages))
-		if err := s.insertNotificationChunk(ctx, exec, input.Messages[start:end]); err != nil {
+	if input.SendToForks {
+		var err error
+		if input.Messages, err = s.expandToForks(ctx, exec, input.Messages); err != nil {
 			return err
+		}
+	}
+
+	if s.dialect.SupportsArrayParameters() {
+		if err := s.insertNotificationsArrays(ctx, exec, input.Messages); err != nil {
+			return err
+		}
+	} else {
+		for start := 0; start < len(input.Messages); start += _SEND_CHUNK_SIZE {
+			end := min(start+_SEND_CHUNK_SIZE, len(input.Messages))
+			if err := s.insertNotificationChunk(ctx, exec, input.Messages[start:end]); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -4414,6 +4480,29 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		}
 	}
 	return nil
+}
+
+// expandToForks returns msgs with, after each message, one copy per workflow
+// recursively forked from its destination. The copies share the Message pointer.
+func (s *SysDB) expandToForks(ctx context.Context, exec Querier, msgs []WorkflowSendRow) ([]WorkflowSendRow, error) {
+	roots := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		roots = append(roots, m.DestinationID)
+	}
+	descendants, err := s.forkDescendants(ctx, exec, roots)
+	if err != nil {
+		return nil, err
+	}
+	expanded := make([]WorkflowSendRow, 0, len(msgs))
+	for _, m := range msgs {
+		expanded = append(expanded, m)
+		for _, id := range descendants[m.DestinationID] {
+			fork := m
+			fork.DestinationID = id
+			expanded = append(expanded, fork)
+		}
+	}
+	return expanded, nil
 }
 
 func notificationKey(m WorkflowSendRow) (topic, messageUUID string) {

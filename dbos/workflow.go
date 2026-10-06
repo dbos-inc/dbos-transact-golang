@@ -3271,10 +3271,21 @@ type sendOptions struct {
 	idempotencyKey        string
 	tx                    any
 	txSet                 bool
+	sendToForks           bool
 }
 
 // SendOption is a functional option for configuring a Send call.
 type SendOption func(*sendOptions)
+
+// WithSendToForks delivers the message to every workflow recursively forked from the
+// destination (forks, forks of forks, and so on) that is visible when the send looks
+// them up. With that option, the number of rows inserted may exceed
+// MaxSendBulkMessages.
+func WithSendToForks() SendOption {
+	return func(so *sendOptions) {
+		so.sendToForks = true
+	}
+}
 
 // WithPortableSend configures Send to use the portable JSON serializer,
 // enabling cross-language interoperability regardless of the workflow's serializer.
@@ -3320,7 +3331,7 @@ func WithSendTransaction(tx any) SendOption {
 	}
 }
 
-// MaxSendBulkMessages is the most messages one SendBulk call accepts.
+// MaxSendBulkMessages is the most messages one SendBulk call accepts. WithSendToForks may exceed this limit.
 const MaxSendBulkMessages = 10_000
 
 const (
@@ -3435,7 +3446,7 @@ func (c *dbosContext) sendMessages(messages []SendMessage, stepName string, opti
 			IdempotencyKey: m.IdempotencyKey,
 		}
 	}
-	input := sysdb.WorkflowSendInput{Messages: rows}
+	input := sysdb.WorkflowSendInput{Messages: rows, SendToForks: options.sendToForks}
 
 	var err error
 	if options.txSet {
@@ -3475,9 +3486,11 @@ func Send[P any](ctx Client, destinationID string, message P, topic string, opts
 // The batch is atomic: if any destination does not exist, no message is sent.
 // Inside a workflow the batch is one durable step ("DBOS.sendBulk"); replay does not re-insert.
 //
-// WithPortableSend and WithSendTransaction apply to the whole batch. WithIdempotencyKey
-// is per-message: set SendMessage.IdempotencyKey. Two messages in the same call may not
-// share an idempotency key. A call may carry at most MaxSendBulkMessages messages.
+// WithPortableSend, WithSendTransaction, and WithSendToForks apply to the whole batch.
+// WithIdempotencyKey is per-message: set SendMessage.IdempotencyKey. Two messages in
+// the same call may not share an idempotency key. A call may carry at most
+// MaxSendBulkMessages messages; with WithSendToForks the rows inserted may exceed
+// that, since each message is also delivered to the destination's forks.
 //
 // Example:
 //
