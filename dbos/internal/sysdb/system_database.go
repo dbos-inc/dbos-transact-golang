@@ -2005,8 +2005,7 @@ type ForkDescendantsDBInput struct {
 }
 
 // ForkDescendants lists every workflow recursively forked from Roots, excluding
-// the roots themselves. One recursive CTE. Cycles and self-references are omitted.
-// Each slice is sorted.
+// the roots themselves.
 func (s *SysDB) ForkDescendants(ctx context.Context, input ForkDescendantsDBInput) (map[string][]string, error) {
 	out := make(map[string][]string, len(input.Roots))
 	for _, root := range input.Roots {
@@ -2033,38 +2032,17 @@ func (s *SysDB) ForkDescendants(ctx context.Context, input ForkDescendantsDBInpu
 
 	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
 	rootMatch := dialectAnyClause(s.dialect, "forked_from", 1)
-	var query string
-	if s.dialect.SupportsArrayParameters() {
-		query = s.RenderSQL(`WITH RECURSIVE fork_tree AS (
-			SELECT workflow_uuid AS id, forked_from AS root,
-			       ARRAY[forked_from, workflow_uuid]::text[] AS path
+	query := s.RenderSQL(`WITH RECURSIVE fork_tree(root, id) AS (
+			SELECT forked_from, workflow_uuid
 			FROM %sworkflow_status
-			WHERE %s AND workflow_uuid <> forked_from
-			UNION ALL
-			SELECT w.workflow_uuid, t.root, t.path || w.workflow_uuid
+			WHERE %s
+			UNION
+			SELECT t.root, w.workflow_uuid
 			FROM %sworkflow_status w
 			INNER JOIN fork_tree t ON w.forked_from = t.id
-			WHERE w.workflow_uuid <> w.forked_from
-			  AND NOT (w.workflow_uuid = ANY(t.path))
 		)
 		SELECT root, id FROM fork_tree WHERE id <> root ORDER BY root, id`,
-			schemaPrefix, rootMatch, schemaPrefix)
-	} else {
-		query = s.RenderSQL(`WITH RECURSIVE fork_tree AS (
-			SELECT workflow_uuid AS id, forked_from AS root,
-			       json_array(forked_from, workflow_uuid) AS path
-			FROM %sworkflow_status
-			WHERE %s AND workflow_uuid <> forked_from
-			UNION ALL
-			SELECT w.workflow_uuid, t.root, json_insert(t.path, '$[#]', w.workflow_uuid)
-			FROM %sworkflow_status w
-			INNER JOIN fork_tree t ON w.forked_from = t.id
-			WHERE w.workflow_uuid <> w.forked_from
-			  AND NOT EXISTS (SELECT 1 FROM json_each(t.path) AS seen WHERE seen.value = w.workflow_uuid)
-		)
-		SELECT root, id FROM fork_tree WHERE id <> root ORDER BY root, id`,
-			schemaPrefix, rootMatch, schemaPrefix)
-	}
+		schemaPrefix, rootMatch, schemaPrefix)
 
 	rows, err := input.Tx.Query(ctx, query, rootsParam)
 	if err != nil {
