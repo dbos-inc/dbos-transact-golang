@@ -4421,7 +4421,8 @@ type WorkflowSendInput struct {
 	SendToForks bool
 }
 
-// Send inserts one or more notifications. SQLite chunks them in one transaction.
+// Send inserts one or more notifications. SQLite chunks them in one transaction;
+// with SendToForks the fork lookup and the insert share one as well.
 // Can be called both within a workflow (as a step) or outside a workflow (directly).
 // When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution.
 func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
@@ -4434,42 +4435,12 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		}
 	}
 
-	if input.SendToForks {
-		var exec Querier = s.pool
-		if input.Tx != nil {
-			exec = input.Tx
-		}
-		roots := make([]string, 0, len(input.Messages))
-		for _, m := range input.Messages {
-			roots = append(roots, m.DestinationID)
-		}
-		descendants, err := s.forkDescendants(ctx, exec, roots)
-		if err != nil {
-			return err
-		}
-		expanded := make([]WorkflowSendRow, 0, len(input.Messages))
-		for _, m := range input.Messages {
-			expanded = append(expanded, m)
-			for _, id := range descendants[m.DestinationID] {
-				fork := m // shallow copies, point at the same Message
-				fork.DestinationID = id
-				expanded = append(expanded, fork)
-			}
-		}
-		input.Messages = expanded
-	}
-
-	// PG and CockroachDB support array parameters, so we can insert all notifications in one query.
-	if s.dialect.SupportsArrayParameters() {
-		var exec Querier = s.pool
-		if input.Tx != nil {
-			exec = input.Tx
-		}
-		return s.insertNotificationsArrays(ctx, exec, input.Messages)
-	}
-
+	// Without a caller transaction, open one when the fork lookup must see the
+	// same rows as the insert, or when SQLite inserts the batch in several chunks.
+	// PG and CockroachDB insert every row in one array-parameter query.
 	tx := input.Tx
-	if tx == nil && len(input.Messages) > _SEND_CHUNK_SIZE {
+	chunked := !s.dialect.SupportsArrayParameters() && len(input.Messages) > _SEND_CHUNK_SIZE
+	if tx == nil && (input.SendToForks || chunked) {
 		var err error
 		tx, err = s.pool.BeginTx(ctx, TxOptions{})
 		if err != nil {
@@ -4483,10 +4454,23 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		exec = tx
 	}
 
-	for start := 0; start < len(input.Messages); start += _SEND_CHUNK_SIZE {
-		end := min(start+_SEND_CHUNK_SIZE, len(input.Messages))
-		if err := s.insertNotificationChunk(ctx, exec, input.Messages[start:end]); err != nil {
+	if input.SendToForks {
+		var err error
+		if input.Messages, err = s.expandToForks(ctx, exec, input.Messages); err != nil {
 			return err
+		}
+	}
+
+	if s.dialect.SupportsArrayParameters() {
+		if err := s.insertNotificationsArrays(ctx, exec, input.Messages); err != nil {
+			return err
+		}
+	} else {
+		for start := 0; start < len(input.Messages); start += _SEND_CHUNK_SIZE {
+			end := min(start+_SEND_CHUNK_SIZE, len(input.Messages))
+			if err := s.insertNotificationChunk(ctx, exec, input.Messages[start:end]); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -4496,6 +4480,29 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		}
 	}
 	return nil
+}
+
+// expandToForks returns msgs with, after each message, one copy per workflow
+// recursively forked from its destination. The copies share the Message pointer.
+func (s *SysDB) expandToForks(ctx context.Context, exec Querier, msgs []WorkflowSendRow) ([]WorkflowSendRow, error) {
+	roots := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		roots = append(roots, m.DestinationID)
+	}
+	descendants, err := s.forkDescendants(ctx, exec, roots)
+	if err != nil {
+		return nil, err
+	}
+	expanded := make([]WorkflowSendRow, 0, len(msgs))
+	for _, m := range msgs {
+		expanded = append(expanded, m)
+		for _, id := range descendants[m.DestinationID] {
+			fork := m
+			fork.DestinationID = id
+			expanded = append(expanded, fork)
+		}
+	}
+	return expanded, nil
 }
 
 func notificationKey(m WorkflowSendRow) (topic, messageUUID string) {
