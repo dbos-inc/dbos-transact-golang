@@ -6081,8 +6081,19 @@ func TestSendToForks(t *testing.T) {
 		}
 		return "sent", nil
 	}
+	sendBulkToForksWorkflow := func(ctx Context, destinations []string) (string, error) {
+		messages := make([]SendMessage, len(destinations))
+		for i, id := range destinations {
+			messages[i] = SendMessage{DestinationID: id, Message: "bulk-" + id, Topic: "send-forks-bulk-wf"}
+		}
+		if err := SendBulk(ctx, messages, WithSendToForks()); err != nil {
+			return "", err
+		}
+		return "sent", nil
+	}
 	RegisterWorkflow(dbosCtx, forkable)
 	RegisterWorkflow(dbosCtx, sendToForksWorkflow, WithWorkflowName("send-to-forks-workflow"))
+	RegisterWorkflow(dbosCtx, sendBulkToForksWorkflow, WithWorkflowName("send-bulk-to-forks-workflow"))
 	require.NoError(t, Launch(dbosCtx))
 
 	runRoot := func(t *testing.T) string {
@@ -6224,6 +6235,34 @@ func TestSendToForks(t *testing.T) {
 		assertMessages(t, a.forkFork, "once")
 	})
 
+	t.Run("SendBulkWithinWorkflow", func(t *testing.T) {
+		a := grow(t)
+		b := runRoot(t)
+		bFork := forkFrom(t, b)
+		c := runRoot(t)
+		cFork := forkFrom(t, c)
+
+		h, err := RunWorkflow(dbosCtx, sendBulkToForksWorkflow, []string{a.root, b})
+		require.NoError(t, err)
+		got, err := h.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "sent", got)
+
+		assertMessages(t, a.root, "bulk-"+a.root)
+		assertMessages(t, a.fork, "bulk-"+a.root)
+		assertMessages(t, a.forkFork, "bulk-"+a.root)
+		assertMessages(t, b, "bulk-"+b)
+		assertMessages(t, bFork, "bulk-"+b)
+		assertMessages(t, c)
+		assertMessages(t, cFork)
+
+		// The whole batch, fan-out included, is one recorded step.
+		steps, err := GetWorkflowSteps(dbosCtx, h.GetWorkflowID())
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		require.Equal(t, sendBulkStepName, steps[0].StepName)
+	})
+
 	t.Run("SendTransactionRollsBack", func(t *testing.T) {
 		a := grow(t)
 		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
@@ -6245,6 +6284,32 @@ func TestSendToForks(t *testing.T) {
 		assertMessages(t, a.root)
 		assertMessages(t, a.fork)
 		assertMessages(t, a.forkFork)
+	})
+
+	t.Run("ForkCycle", func(t *testing.T) {
+		// Fork a -> b, delete a, then fork b back as a: a.forked_from = b and
+		// b.forked_from = a. The lookup must terminate and reach both.
+		a := runRoot(t)
+		b := forkFrom(t, a)
+		require.NoError(t, DeleteWorkflows(dbosCtx, []string{a}))
+		h, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{OriginalWorkflowID: b, ForkedWorkflowID: a})
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.NoError(t, err)
+		status, err := h.GetStatus()
+		require.NoError(t, err)
+		require.Equal(t, b, status.ForkedFrom)
+
+		done := make(chan error, 1)
+		go func() { done <- Send(dbosCtx, a, "cycle", "send-forks-cycle", WithSendToForks()) }()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("send to a fork cycle did not return")
+		}
+		assertMessages(t, a, "cycle")
+		assertMessages(t, b, "cycle")
 	})
 }
 
