@@ -79,6 +79,10 @@ func workflow(ctx dbos.Context, i int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	_, err = ctx.GetAuthenticatedUser()
+	if err != nil {
+		return 0, err
+	}
 
 	// Test workflow management
 	_, err = dbos.RetrieveWorkflow[int](ctx, workflowID)
@@ -321,6 +325,7 @@ func TestMocks(t *testing.T) {
 	// ID retrieval methods
 	mockCtx.On("GetWorkflowID").Return("test-workflow-id", nil)
 	mockCtx.On("GetStepID").Return(1, nil)
+	mockCtx.On("GetAuthenticatedUser").Return("test-user", nil)
 
 	// Workflow management
 	mockGenericHandle := mocks.NewMockWorkflowHandle[any](t)

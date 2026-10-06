@@ -2607,11 +2607,12 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 		stepID = wfState.nextStepID()
 	}
 	stepState := workflowState{
-		workflowID:   wfState.workflowID,
-		ownerXID:     wfState.ownerXID,
-		stepID:       stepID,
-		isWithinStep: true,
-		workflowCtx:  wfState.workflowCtx,
+		workflowID:        wfState.workflowID,
+		ownerXID:          wfState.ownerXID,
+		stepID:            stepID,
+		isWithinStep:      true,
+		authenticatedUser: wfState.authenticatedUser,
+		workflowCtx:       wfState.workflowCtx,
 	}
 	return &preparedStep{WorkflowID: wfState.workflowID, StepOpts: stepOpts, StepState: &stepState, IsWithinStep: false}, nil
 }
@@ -4652,6 +4653,14 @@ func (c *dbosContext) GetStepID() (int, error) {
 	return wfState.stepID, nil
 }
 
+func (c *dbosContext) GetAuthenticatedUser() (string, error) {
+	wfState, ok := c.Value(workflowStateKey).(*workflowState)
+	if !ok || wfState == nil {
+		return "", errors.New("not within a DBOS workflow context")
+	}
+	return wfState.authenticatedUser, nil
+}
+
 // GetWorkflowID retrieves the workflow ID from the context if called within a DBOS workflow.
 // Returns an error if not called from within a workflow context.
 //
@@ -4686,6 +4695,27 @@ func GetStepID(ctx Context) (int, error) {
 		return -1, errors.New("ctx cannot be nil")
 	}
 	return ctx.GetStepID()
+}
+
+// GetAuthenticatedUser retrieves the authenticated user of the current workflow, as set with
+// WithAuthenticatedUser (or WithEnqueueAuthenticatedUser) or inherited from the parent workflow.
+// It can be called from a workflow or from one of its steps.
+// Returns an empty string if the workflow has no authenticated user, and an error if not called
+// from within a workflow context.
+//
+// Example:
+//
+//	user, err := dbos.GetAuthenticatedUser(ctx)
+//	if err != nil {
+//	    log.Printf("Not within a workflow context")
+//	} else {
+//	    log.Printf("Workflow running on behalf of: %s", user)
+//	}
+func GetAuthenticatedUser(ctx Context) (string, error) {
+	if ctx == nil {
+		return "", errors.New("ctx cannot be nil")
+	}
+	return ctx.GetAuthenticatedUser()
 }
 
 func (c *dbosContext) RetrieveWorkflow(_ Client, workflowID string) (WorkflowHandle[any], error) {

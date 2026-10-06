@@ -9427,6 +9427,90 @@ func TestAuthPropagation(t *testing.T) {
 	})
 }
 
+// authenticatedUserSnapshot holds what GetAuthenticatedUser returns in a workflow and in one of its steps.
+type authenticatedUserSnapshot struct {
+	Workflow string
+	Step     string
+}
+
+// getAuthenticatedUserWorkflow reads its authenticated user from the workflow context and from a step context.
+func getAuthenticatedUserWorkflow(ctx Context, _ string) (authenticatedUserSnapshot, error) {
+	workflowUser, err := GetAuthenticatedUser(ctx)
+	if err != nil {
+		return authenticatedUserSnapshot{}, err
+	}
+	stepUser, err := RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+		dbosStepCtx, ok := stepCtx.(Context)
+		if !ok {
+			return "", fmt.Errorf("expected step context to be a dbos.Context, got %T", stepCtx)
+		}
+		return GetAuthenticatedUser(dbosStepCtx)
+	})
+	if err != nil {
+		return authenticatedUserSnapshot{}, err
+	}
+	return authenticatedUserSnapshot{Workflow: workflowUser, Step: stepUser}, nil
+}
+
+// getAuthenticatedUserParentWorkflow spawns getAuthenticatedUserWorkflow without passing any auth opts.
+func getAuthenticatedUserParentWorkflow(ctx Context, _ string) (authenticatedUserSnapshot, error) {
+	handle, err := RunWorkflow(ctx, getAuthenticatedUserWorkflow, "")
+	if err != nil {
+		return authenticatedUserSnapshot{}, err
+	}
+	return handle.GetResult()
+}
+
+func TestGetAuthenticatedUser(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	RegisterWorkflow(dbosCtx, getAuthenticatedUserWorkflow)
+	RegisterWorkflow(dbosCtx, getAuthenticatedUserParentWorkflow)
+	queue, err := RegisterQueue(dbosCtx, "get-authenticated-user-queue")
+	require.NoError(t, err, "failed to register queue")
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	t.Run("InWorkflowAndStep", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, getAuthenticatedUserWorkflow, "", WithAuthenticatedUser("alice@example.com"))
+		require.NoError(t, err)
+		users, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "alice@example.com", users.Workflow)
+		assert.Equal(t, "alice@example.com", users.Step)
+	})
+
+	t.Run("InheritedFromParent", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, getAuthenticatedUserParentWorkflow, "", WithAuthenticatedUser("alice@example.com"))
+		require.NoError(t, err)
+		users, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "alice@example.com", users.Workflow)
+		assert.Equal(t, "alice@example.com", users.Step)
+	})
+
+	t.Run("InEnqueuedWorkflow", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, getAuthenticatedUserWorkflow, "", WithQueue(queue), WithAuthenticatedUser("alice@example.com"))
+		require.NoError(t, err)
+		users, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, "alice@example.com", users.Workflow)
+		assert.Equal(t, "alice@example.com", users.Step)
+	})
+
+	t.Run("EmptyWhenNotSet", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, getAuthenticatedUserWorkflow, "")
+		require.NoError(t, err)
+		users, err := handle.GetResult()
+		require.NoError(t, err)
+		assert.Empty(t, users.Workflow)
+		assert.Empty(t, users.Step)
+	})
+
+	t.Run("ErrorsOutsideWorkflow", func(t *testing.T) {
+		_, err := GetAuthenticatedUser(dbosCtx)
+		require.Error(t, err)
+	})
+}
+
 func TestWorkflowHandles(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	RegisterWorkflow(dbosCtx, slowWorkflow)
