@@ -4451,7 +4451,7 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		for _, m := range input.Messages {
 			expanded = append(expanded, m)
 			for _, id := range descendants[m.DestinationID] {
-				fork := m
+				fork := m // shallow copies, point at the same Message
 				fork.DestinationID = id
 				expanded = append(expanded, fork)
 			}
