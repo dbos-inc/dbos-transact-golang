@@ -468,7 +468,7 @@ func TestDataSourceMigrations(t *testing.T) {
 		const migrators = 8
 		errs := make(chan error, migrators)
 		for range migrators {
-			go func() { errs <- migrateDataSource(context.Background(), ub.pool, ub.dialect, ub.schema, nil) }()
+			go func() { errs <- migrateDataSource(context.Background(), ub.pool, sysdb.CockroachDialect{}, ub.schema, nil) }()
 		}
 		for range migrators {
 			require.NoError(t, <-errs)

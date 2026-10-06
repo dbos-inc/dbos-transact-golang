@@ -9,7 +9,9 @@ import (
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -96,7 +98,21 @@ func migrateDataSource(ctx context.Context, pool Pool, dialect Dialect, schema s
 			return err
 		}
 		return tx.Commit(ctx)
-	}, sysdb.WithRetrierLogger(logger), sysdb.WithRetryCondition(dialect.IsRetryableTransaction))
+	}, sysdb.WithRetrierLogger(logger), sysdb.WithRetryCondition(dialect.IsRetryableTransaction, isDataSourceMigrationRace))
+}
+
+// Matches the errors an unserialized migrator (CockroachDB has no advisory locks)
+// gets when a peer creates the same schema objects first.
+func isDataSourceMigrationRace(err error, _ *slog.Logger) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case pgerrcode.DuplicateSchema, pgerrcode.DuplicateTable, pgerrcode.UniqueViolation:
+		return true
+	}
+	return false
 }
 
 // migrateDataSourceTx runs the migration inside tx, whose commit releases the lock.
@@ -119,7 +135,7 @@ func migrateDataSourceTx(ctx context.Context, tx Querier, dialect Dialect, schem
 			return fmt.Errorf("failed to create the %s table: %w", versionTable, err)
 		}
 	} else {
-		// CockroachDB has no advisory locks, so it migrates unserialized. It's optimistic concurrency model should resolve it for us.
+		// CockroachDB has no advisory locks, so it migrates unserialized.
 		if dialect.Name() != DialectCockroach {
 			// Set a timeout so we don't create a deadlock by holding the advisory lock indefinitely.
 			if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL idle_in_transaction_session_timeout = '%s'`, dataSourceMigrationIdleTimeout)); err != nil {
