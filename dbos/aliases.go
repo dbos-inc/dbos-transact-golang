@@ -43,6 +43,9 @@ type (
 	// RateLimiter configures rate limiting for workflow queue execution: at
 	// most Limit workflows start within each Period.
 	RateLimiter = models.RateLimiter
+
+	// QueueConfig is a queue's persisted configuration: the columns of the queues table.
+	QueueConfig = models.QueueConfig
 )
 
 const (

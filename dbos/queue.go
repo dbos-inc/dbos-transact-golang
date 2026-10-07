@@ -113,6 +113,7 @@ type Queue interface {
 	GetPartitionQueue() bool
 	GetPollingInterval() time.Duration
 	GetApplicationName() string
+	Config() QueueConfig
 
 	SetGlobalConcurrency(ctx Client, value *int) error
 	SetWorkerConcurrency(ctx Client, value *int) error
@@ -145,6 +146,7 @@ func (q *workflowQueue) GetPartitionQueue() bool  { return q.PartitionQueue }
 func (q *workflowQueue) GetPollingInterval() time.Duration { return q.basePollingInterval }
 
 func (q *workflowQueue) GetApplicationName() string { return q.ApplicationName }
+func (q *workflowQueue) Config() QueueConfig        { return q.toConfig() }
 
 // SetGlobalConcurrency updates the queue's global concurrency limit. Pass nil to clear it.
 func (q *workflowQueue) SetGlobalConcurrency(ctx Client, value *int) error {
