@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,11 +10,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
-	"github.com/jackc/pgx/v5"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/spf13/cobra"
 )
 
@@ -60,28 +56,12 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
-
-	migrateCtx, err := dbos.NewContext(ctx, dbos.Config{
-		DatabaseURL:    dbURL,
-		DatabaseSchema: schema,
-		AppName:        "dbos-cli",
-		Logger:         initLogger(slog.LevelError),
-	})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := dbos.Shutdown(migrateCtx, 30*time.Second); err != nil {
-			logger.Debug("Failed to shut down migration context", "error", err)
-		}
-	}()
-
-	// Grant permissions to application role if specified
+	opts := []dbos.MigrateOption{dbos.WithMigrateSchema(dbSchema), dbos.WithMigrateLogger(initLogger(slog.LevelError))}
 	if applicationRole != "" {
-		if err := grantDBOSSchemaPermissions(dbURL, applicationRole, dbSchema); err != nil {
-			return err
-		}
+		opts = append(opts, dbos.WithMigrateApplicationRole(applicationRole))
+	}
+	if err := dbos.Migrate(context.Background(), dbURL, opts...); err != nil {
+		return err
 	}
 
 	// Run custom migration commands from config if present
@@ -125,7 +105,7 @@ func runMigratePrint(schemaName string, printMigrationsSet bool) error {
 			return errors.New("Role names containing quotes are not supported")
 		}
 		fmt.Printf("-- Permissions on DBOS schema %s for role %s\n", schemaName, applicationRole)
-		for _, query := range grantQueries(applicationRole, schemaName) {
+		for _, query := range dbos.PermissionStatements(schemaName, applicationRole) {
 			fmt.Printf("%s;\n", query)
 		}
 		return nil
@@ -174,42 +154,5 @@ func printDBOSMigrations(schemaName, value string) error {
 	for _, stmt := range statements {
 		fmt.Println(stmt)
 	}
-	return nil
-}
-
-func grantQueries(roleName, schemaName string) []string {
-	schemaSQL := pgx.Identifier{schemaName}.Sanitize()
-	roleSQL := pgx.Identifier{roleName}.Sanitize()
-
-	return []string{
-		fmt.Sprintf(`GRANT USAGE ON SCHEMA %s TO %s`, schemaSQL, roleSQL),
-		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA %s TO %s`, schemaSQL, roleSQL),
-		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %s TO %s`, schemaSQL, roleSQL),
-		fmt.Sprintf(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %s TO %s`, schemaSQL, roleSQL),
-		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT ALL ON TABLES TO %s`, schemaSQL, roleSQL),
-		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT ALL ON SEQUENCES TO %s`, schemaSQL, roleSQL),
-		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT EXECUTE ON FUNCTIONS TO %s`, schemaSQL, roleSQL),
-	}
-}
-
-func grantDBOSSchemaPermissions(databaseURL, roleName, schemaName string) error {
-	logger.Info("Granting permissions for schema", "role", roleName, "schema", schemaName)
-
-	db, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		return fmt.Errorf("failed to connect to database: %w", err)
-	}
-	defer db.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	for _, query := range grantQueries(roleName, schemaName) {
-		logger.Debug("Executing grant query", "query", query)
-		if _, err := db.ExecContext(ctx, query); err != nil {
-			return fmt.Errorf("failed to execute grant: %w", err)
-		}
-	}
-
 	return nil
 }

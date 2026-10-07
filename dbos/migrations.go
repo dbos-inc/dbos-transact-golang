@@ -1,13 +1,126 @@
 package dbos
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 )
+
+type migrateOptions struct {
+	schema          string
+	applicationRole string
+	logger          *slog.Logger
+}
+
+// MigrateOption configures Migrate.
+type MigrateOption func(*migrateOptions)
+
+// WithMigrateSchema sets the schema holding the DBOS system tables (default "dbos").
+func WithMigrateSchema(schema string) MigrateOption {
+	return func(o *migrateOptions) { o.schema = schema }
+}
+
+// WithMigrateApplicationRole grants role access to the migrated schema, so an
+// application whose role cannot run DDL can launch with Config.SkipMigrations
+// (or create its data source with WithDataSourceSkipMigrations). Postgres only.
+func WithMigrateApplicationRole(role string) MigrateOption {
+	return func(o *migrateOptions) { o.applicationRole = role }
+}
+
+// WithMigrateLogger sets the logger Migrate reports progress to (default slog.Default()).
+func WithMigrateLogger(logger *slog.Logger) MigrateOption {
+	return func(o *migrateOptions) { o.logger = logger }
+}
+
+// Migrate creates or migrates the DBOS system database at databaseURL without
+// launching DBOS, typically with a privileged role. Pair it with
+// Config.SkipMigrations for application processes whose role cannot run DDL.
+//
+// Example:
+//
+//	err := dbos.Migrate(ctx, adminURL, dbos.WithMigrateApplicationRole("app_user"))
+func Migrate(ctx context.Context, databaseURL string, opts ...MigrateOption) error {
+	if databaseURL == "" {
+		return errors.New("database URL cannot be empty")
+	}
+	options := migrateOptions{schema: _DEFAULT_SYSTEM_DB_SCHEMA, logger: slog.Default()}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	if options.schema == "" {
+		options.schema = _DEFAULT_SYSTEM_DB_SCHEMA
+	}
+	if options.logger == nil {
+		options.logger = slog.Default()
+	}
+	dialect, err := sysdb.DetectDialect(databaseURL)
+	if err != nil {
+		return err
+	}
+	if options.applicationRole != "" && dialect == DialectSQLite {
+		return errors.New("an application role is not supported for SQLite")
+	}
+
+	// A system database handle creates the database and runs the migrations;
+	// it is never launched, so no listener or notifier starts.
+	systemDB, err := sysdb.NewSystemDatabase(ctx, sysdb.NewSystemDatabaseInput{
+		DatabaseURL:            databaseURL,
+		DatabaseSchema:         options.schema,
+		Logger:                 options.logger,
+		IdleTransactionTimeout: sysdb.DefaultIdleTransactionTimeout,
+	})
+	if err != nil {
+		return err
+	}
+	systemDB.Shutdown(ctx, 30*time.Second)
+
+	if options.applicationRole == "" {
+		return nil
+	}
+	return grantSystemSchemaPermissions(ctx, databaseURL, options.schema, options.applicationRole, options.logger)
+}
+
+// PermissionStatements returns the SQL granting roleName access to every
+// current and future object in the system schema, as executed by Migrate for
+// WithMigrateApplicationRole.
+func PermissionStatements(schemaName, roleName string) []string {
+	if schemaName == "" {
+		schemaName = _DEFAULT_SYSTEM_DB_SCHEMA
+	}
+	schemaSQL := pgx.Identifier{schemaName}.Sanitize()
+	roleSQL := pgx.Identifier{roleName}.Sanitize()
+	return []string{
+		fmt.Sprintf(`GRANT USAGE ON SCHEMA %s TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA %s TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %s TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %s TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT ALL ON TABLES TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT ALL ON SEQUENCES TO %s`, schemaSQL, roleSQL),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT EXECUTE ON FUNCTIONS TO %s`, schemaSQL, roleSQL),
+	}
+}
+
+func grantSystemSchemaPermissions(ctx context.Context, databaseURL, schemaName, roleName string, logger *slog.Logger) error {
+	logger.Info("Granting permissions on the system schema", "schema", schemaName, "role", roleName)
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		return fmt.Errorf("failed to connect to the system database: %w", err)
+	}
+	defer conn.Close(ctx)
+	for _, stmt := range PermissionStatements(schemaName, roleName) {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to grant permissions to role %s: %w", roleName, err)
+		}
+	}
+	return nil
+}
 
 // MigrationStatements returns the SQL the system database migrations execute
 // against a PostgreSQL database for the given schema, as an ordered list of
