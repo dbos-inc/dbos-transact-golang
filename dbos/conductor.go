@@ -1053,8 +1053,7 @@ func (c *conductor) handleListStepsRequest(data []byte, requestID string) error 
 		stepsList := make([]workflowStepsConductorResponseBody, len(steps))
 		for i, step := range steps {
 			if c.metadataOnlyMode {
-				// A step's error carries whatever the step put in it; load_output only
-				// gates the output column.
+				// nil the error in metadata only mode
 				step.Error = nil
 			}
 			stepsList[i] = formatWorkflowStepsResponseBody(step)
@@ -1851,10 +1850,8 @@ func (c *conductor) handleGetStepAggregatesRequest(data []byte, requestID string
 	return c.sendResponse(resp, string(getStepAggregatesMessage))
 }
 
-// errorText renders the error message Conductor may see for a failed command. Error
-// strings can carry workflow data (a failed step's error, a row that would not decode),
-// so in metadata-only mode only the error's kind reaches Conductor. Callers log the full
-// error themselves.
+// errorText renders the error message Conductor may see for a failed command.
+// In metadata-only mode only the error's kind reaches Conductor.
 func (c *conductor) errorText(context string, err error) string {
 	if !c.metadataOnlyMode {
 		return fmt.Sprintf("%s: %v", context, err)
