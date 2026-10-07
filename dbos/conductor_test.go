@@ -1651,3 +1651,251 @@ func TestConductorListStepsPagination(t *testing.T) {
 		require.Equal(t, []int{3, 4}, listSteps(t, "p4", `,"offset":3`))
 	})
 }
+
+// conductorMetadataOnlyWorkflow produces every kind of workflow data Conductor can ask for.
+func conductorMetadataOnlyWorkflow(ctx Context, in string) (string, error) {
+	if err := SetEvent(ctx, "event", in); err != nil {
+		return "", err
+	}
+	if err := WriteStream(ctx, "stream", in); err != nil {
+		return "", err
+	}
+	return RunAsStep(ctx, func(_ context.Context) (string, error) {
+		return in + "-output", nil
+	})
+}
+
+// conductorMetadataOnlyFailingWorkflow fails in a step, so both the step and the
+// workflow record an error that carries the input.
+func conductorMetadataOnlyFailingWorkflow(ctx Context, in string) (string, error) {
+	return RunAsStep(ctx, func(_ context.Context) (string, error) {
+		return "", fmt.Errorf("%s", in)
+	})
+}
+
+// TestConductorMetadataOnlyMode verifies that in metadata-only mode the executor never
+// sends workflow data to Conductor, even when Conductor asks for it, while metadata keeps
+// flowing. The same requests run with the mode off to pin the baseline.
+func TestConductorMetadataOnlyMode(t *testing.T) {
+	for _, metadataOnly := range []bool{true, false} {
+		t.Run(fmt.Sprintf("metadata_only=%t", metadataOnly), func(t *testing.T) {
+			dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+			RegisterWorkflow(dbosCtx, conductorMetadataOnlyWorkflow)
+			RegisterWorkflow(dbosCtx, conductorMetadataOnlyFailingWorkflow)
+			RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
+			queue, err := RegisterQueue(dbosCtx, "metadata-only-queue")
+			require.NoError(t, err)
+			require.NoError(t, dbosCtx.Launch())
+
+			h, err := RunWorkflow(dbosCtx, conductorMetadataOnlyWorkflow, "secret", WithQueue(queue))
+			require.NoError(t, err)
+			out, err := h.GetResult()
+			require.NoError(t, err)
+			require.Equal(t, "secret-output", out)
+			failing, err := RunWorkflow(dbosCtx, conductorMetadataOnlyFailingWorkflow, "secret")
+			require.NoError(t, err)
+			_, err = failing.GetResult()
+			require.Error(t, err)
+			wfID, failedID := h.GetWorkflowID(), failing.GetWorkflowID()
+			require.NoError(t, Send(dbosCtx, wfID, "secret", "topic"))
+			const scheduleName = "metadata-only-schedule"
+			require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
+				ScheduleName: scheduleName,
+				Schedule:     "0 0 0 1 1 *",
+				Workflow:     testWorkflowForSchedule,
+				Context:      "secret",
+			}))
+
+			mockServer := newMockWebSocketServer()
+			t.Cleanup(mockServer.shutdown)
+			cond, err := newConductor(dbosCtx.(*dbosContext), conductorConfig{
+				url:              mockServer.getURL(),
+				apiKey:           "test-key",
+				appName:          "test-app",
+				metadataOnlyMode: metadataOnly,
+			})
+			require.NoError(t, err)
+			cond.pingInterval = 100 * time.Millisecond
+			cond.pingTimeout = 200 * time.Millisecond
+			cond.reconnectWait = 100 * time.Millisecond
+			cond.launch()
+			t.Cleanup(func() { cond.shutdown(2 * time.Second) })
+			require.True(t, mockServer.waitForConnection(5*time.Second))
+
+			// roundTrip dispatches a command as Conductor would and decodes the executor's
+			// response to it into resp.
+			roundTrip := func(t *testing.T, request string, resp any) {
+				t.Helper()
+				var want baseMessage
+				require.NoError(t, json.Unmarshal([]byte(request), &want))
+				require.NoError(t, mockServer.sendTextMessage([]byte(request)))
+				deadline := time.After(5 * time.Second)
+				for {
+					select {
+					case raw := <-mockServer.messages:
+						var base baseMessage
+						if err := json.Unmarshal(raw, &base); err == nil && base.RequestID == want.RequestID {
+							require.NoError(t, json.Unmarshal(raw, resp))
+							return
+						}
+					case <-deadline:
+						t.Fatalf("timed out waiting for the response to %s", want.RequestID)
+					}
+				}
+			}
+
+			// Metadata always flows; data flows only when metadata-only mode is off.
+			sendsData := !metadataOnly
+
+			// Conductor explicitly asks for data; metadata-only mode must override it.
+			t.Run("list_workflows", func(t *testing.T) {
+				var resp listWorkflowsConductorResponse
+				roundTrip(t, fmt.Sprintf(`{"type":"list_workflows","request_id":"list-workflows","body":{"workflow_uuids":[%q,%q],"load_input":true,"load_output":true}}`, wfID, failedID), &resp)
+				require.Nil(t, resp.ErrorMessage)
+				require.Len(t, resp.Output, 2)
+				for _, wf := range resp.Output {
+					require.NotNil(t, wf.Status)
+					require.Equal(t, sendsData, wf.Input != nil, wf.WorkflowUUID)
+					switch wf.WorkflowUUID {
+					case wfID:
+						require.Equal(t, string(WorkflowStatusSuccess), *wf.Status)
+						require.Equal(t, sendsData, wf.Output != nil)
+					case failedID:
+						require.Equal(t, string(WorkflowStatusError), *wf.Status)
+						require.Equal(t, sendsData, wf.Error != nil)
+					default:
+						t.Fatalf("unexpected workflow %s", wf.WorkflowUUID)
+					}
+				}
+			})
+
+			t.Run("list_queued_workflows", func(t *testing.T) {
+				var resp listWorkflowsConductorResponse
+				roundTrip(t, `{"type":"list_queued_workflows","request_id":"list-queued-workflows","body":{"status":["SUCCESS"],"load_input":true,"load_output":true}}`, &resp)
+				require.Nil(t, resp.ErrorMessage)
+				require.Len(t, resp.Output, 1)
+				require.Equal(t, wfID, resp.Output[0].WorkflowUUID)
+				require.Equal(t, sendsData, resp.Output[0].Input != nil)
+				require.Nil(t, resp.Output[0].Output, "queued listings never load output")
+			})
+
+			t.Run("get_workflow", func(t *testing.T) {
+				var resp getWorkflowConductorResponse
+				roundTrip(t, fmt.Sprintf(`{"type":"get_workflow","request_id":"get-workflow","workflow_id":%q,"load_input":true,"load_output":true}`, wfID), &resp)
+				require.Nil(t, resp.ErrorMessage)
+				require.NotNil(t, resp.Output)
+				require.Equal(t, wfID, resp.Output.WorkflowUUID)
+				require.Equal(t, sendsData, resp.Output.Input != nil)
+				require.Equal(t, sendsData, resp.Output.Output != nil)
+
+				roundTrip(t, fmt.Sprintf(`{"type":"get_workflow","request_id":"get-failed-workflow","workflow_id":%q,"load_input":true,"load_output":true}`, failedID), &resp)
+				require.Nil(t, resp.ErrorMessage)
+				require.NotNil(t, resp.Output)
+				require.Equal(t, failedID, resp.Output.WorkflowUUID)
+				require.Equal(t, sendsData, resp.Output.Input != nil)
+				require.Equal(t, sendsData, resp.Output.Error != nil)
+			})
+
+			t.Run("list_steps", func(t *testing.T) {
+				var resp listStepsConductorResponse
+				roundTrip(t, fmt.Sprintf(`{"type":"list_steps","request_id":"list-steps","workflow_id":%q,"load_output":true}`, wfID), &resp)
+				require.Nil(t, resp.ErrorMessage)
+				require.NotNil(t, resp.Output)
+				require.NotEmpty(t, *resp.Output)
+				var anyOutput bool
+				for _, step := range *resp.Output {
+					require.NotEmpty(t, step.FunctionName)
+					anyOutput = anyOutput || step.Output != nil
+				}
+				require.Equal(t, sendsData, anyOutput)
+
+				roundTrip(t, fmt.Sprintf(`{"type":"list_steps","request_id":"list-failed-steps","workflow_id":%q,"load_output":true}`, failedID), &resp)
+				require.Nil(t, resp.ErrorMessage)
+				require.NotNil(t, resp.Output)
+				require.Len(t, *resp.Output, 1)
+				require.Equal(t, sendsData, (*resp.Output)[0].Error != nil, "a step's error is workflow data")
+			})
+
+			t.Run("schedules", func(t *testing.T) {
+				var listed listSchedulesConductorResponse
+				roundTrip(t, `{"type":"list_schedules","request_id":"list-schedules","body":{"load_context":true}}`, &listed)
+				require.Nil(t, listed.ErrorMessage)
+				require.Len(t, listed.Output, 1)
+				require.Equal(t, scheduleName, listed.Output[0].ScheduleName)
+				require.Equal(t, sendsData, listed.Output[0].Context != nil)
+
+				var got getScheduleConductorResponse
+				roundTrip(t, fmt.Sprintf(`{"type":"get_schedule","request_id":"get-schedule","schedule_name":%q,"load_context":true}`, scheduleName), &got)
+				require.Nil(t, got.ErrorMessage)
+				require.NotNil(t, got.Output)
+				require.Equal(t, scheduleName, got.Output.ScheduleName)
+				require.Equal(t, sendsData, got.Output.Context != nil)
+			})
+
+			// Commands that only move data are refused outright.
+			t.Run("data_commands", func(t *testing.T) {
+				requests := map[messageType]string{
+					getWorkflowEventsMessage:    fmt.Sprintf(`{"type":"get_workflow_events","request_id":"events","workflow_id":%q}`, wfID),
+					getWorkflowNotificationsMsg: fmt.Sprintf(`{"type":"get_workflow_notifications","request_id":"notifications","workflow_id":%q}`, wfID),
+					getWorkflowStreamsMessage:   fmt.Sprintf(`{"type":"get_workflow_streams","request_id":"streams","workflow_id":%q}`, wfID),
+					exportWorkflowMessage:       fmt.Sprintf(`{"type":"export_workflow","request_id":"export","workflow_id":%q,"export_children":false}`, wfID),
+					importWorkflowMessage:       `{"type":"import_workflow","request_id":"import","serialized_workflow":"not-a-workflow"}`,
+				}
+				for msgType, request := range requests {
+					var resp baseResponse
+					roundTrip(t, request, &resp)
+					require.Equal(t, msgType, resp.Type)
+					refused := fmt.Sprintf("%s is not allowed in conductor metadata-only mode", msgType)
+					if metadataOnly {
+						require.NotNil(t, resp.ErrorMessage, msgType)
+						require.Equal(t, refused, *resp.ErrorMessage)
+					} else if resp.ErrorMessage != nil {
+						require.NotEqual(t, refused, *resp.ErrorMessage)
+					}
+				}
+
+				var events getWorkflowEventsConductorResponse
+				roundTrip(t, fmt.Sprintf(`{"type":"get_workflow_events","request_id":"events-again","workflow_id":%q}`, wfID), &events)
+				if metadataOnly {
+					require.Empty(t, events.Events)
+				} else {
+					require.Nil(t, events.ErrorMessage)
+					require.Equal(t, []eventOutput{{Key: "event", Value: `"secret"`}}, events.Events)
+				}
+			})
+
+			// Error strings can carry data, so only the error's kind reaches Conductor.
+			t.Run("error_messages", func(t *testing.T) {
+				var resp forkWorkflowConductorResponse
+				roundTrip(t, `{"type":"fork_workflow","request_id":"fork","body":{"workflow_id":"does-not-exist","start_step":0}}`, &resp)
+				require.Nil(t, resp.NewWorkflowID)
+				require.NotNil(t, resp.ErrorMessage)
+				if metadataOnly {
+					require.Equal(t, "failed to fork workflow: NonExistentWorkflow (details withheld in metadata-only mode)", *resp.ErrorMessage)
+				} else {
+					require.Contains(t, *resp.ErrorMessage, "does-not-exist")
+				}
+			})
+		})
+	}
+}
+
+// TestConductorMetadataOnlyModeConfig verifies the Config flag reaches the conductor.
+func TestConductorMetadataOnlyModeConfig(t *testing.T) {
+	mockServer := newMockWebSocketServer()
+	t.Cleanup(mockServer.shutdown)
+	for _, metadataOnly := range []bool{true, false} {
+		ctx, err := NewContext(context.Background(), Config{
+			AppName:                   "test-app",
+			DatabaseURL:               backendDatabaseURL(t),
+			ConductorAPIKey:           "test-key",
+			ConductorURL:              mockServer.getURL(),
+			ConductorMetadataOnlyMode: metadataOnly,
+		})
+		require.NoError(t, err)
+		dbosCtx := ctx.(*dbosContext)
+		require.NotNil(t, dbosCtx.conductor)
+		require.Equal(t, metadataOnly, dbosCtx.conductor.metadataOnlyMode)
+		require.NoError(t, dbosCtx.Shutdown(dbosCtx, 5*time.Second))
+	}
+}

@@ -54,6 +54,7 @@ type Config struct {
 	ConductorURL                   string          // DBOS conductor service URL (optional)
 	ConductorAPIKey                string          // DBOS conductor API key (optional)
 	ConductorExecutorMetadata      map[string]any  // Metadata associated with this executor that may be used to identify it on the Conductor dashboard. Must be JSON-serializable.
+	ConductorMetadataOnlyMode      bool            // Send only workflow metadata to Conductor, never workflow data
 	ApplicationVersion             string          // Application version (optional, overridden by DBOS__APPVERSION env var)
 	ExecutorID                     string          // Executor ID (optional, overridden by DBOS__VMID env var)
 	EnablePatching                 bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
@@ -104,6 +105,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ConductorURL:                   inputConfig.ConductorURL,
 		ConductorAPIKey:                inputConfig.ConductorAPIKey,
 		ConductorExecutorMetadata:      inputConfig.ConductorExecutorMetadata,
+		ConductorMetadataOnlyMode:      inputConfig.ConductorMetadataOnlyMode,
 		ApplicationVersion:             inputConfig.ApplicationVersion,
 		ExecutorID:                     inputConfig.ExecutorID,
 		SystemDBPool:                   inputConfig.SystemDBPool,
@@ -721,6 +723,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 				apiKey:           cloudConductorKey,
 				appName:          cloudAppName,
 				executorMetadata: config.ConductorExecutorMetadata,
+				metadataOnlyMode: config.ConductorMetadataOnlyMode,
 			}
 		}
 	} else if config.ConductorAPIKey != "" {
@@ -737,6 +740,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 			apiKey:           config.ConductorAPIKey,
 			appName:          config.AppName,
 			executorMetadata: config.ConductorExecutorMetadata,
+			metadataOnlyMode: config.ConductorMetadataOnlyMode,
 		}
 	}
 
