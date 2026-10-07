@@ -273,6 +273,7 @@ type Context interface {
 	DeprecatePatch(_ Context, patchName string) error                                                       // Deprecate a patch
 	GetWorkflowID() (string, error)                                                                         // Get the current workflow ID (only available within workflows)
 	GetStepID() (int, error)                                                                                // Get the current step ID (only available within workflows)
+	GetAuthenticatedUser() (string, error)                                                                  // Get the authenticated user of the current workflow, empty if none (only available within workflows)
 
 	// Registration
 	ListRegisteredWorkflows(_ Context) []WorkflowRegistryEntry // List workflows registered in this process
