@@ -40,6 +40,17 @@ type conductorConfig struct {
 	apiKey           string
 	appName          string
 	executorMetadata map[string]any
+	metadataOnlyMode bool
+}
+
+// dataMessageTypes are the commands that exist only to move workflow data, refused in
+// metadata-only mode.
+var dataMessageTypes = map[messageType]struct{}{
+	getWorkflowEventsMessage:    {},
+	getWorkflowNotificationsMsg: {},
+	getWorkflowStreamsMessage:   {},
+	exportWorkflowMessage:       {},
+	importWorkflowMessage:       {},
 }
 
 // conductor manages the WebSocket connection to the DBOS conductor service
@@ -62,6 +73,11 @@ type conductor struct {
 
 	// User-defined metadata for this executor
 	executorMetadata map[string]any
+
+	// metadataOnlyMode keeps workflow data (inputs, outputs, errors, step outputs,
+	// events, messages, streams, schedule context) off the wire regardless of what
+	// Conductor asks for.
+	metadataOnlyMode bool
 
 	// pingCancel cancels the ping goroutine context
 	pingCancel context.CancelFunc
@@ -103,6 +119,7 @@ func newConductor(dbosCtx *dbosContext, config conductorConfig) (*conductor, err
 		reconnectWait:    _INITIAL_RECONNECT_WAIT,
 		logger:           dbosCtx.logger.With("service", "conductor"),
 		executorMetadata: config.executorMetadata,
+		metadataOnlyMode: config.metadataOnlyMode,
 		retentionSem:     make(chan struct{}, 1),
 	}
 
@@ -374,6 +391,11 @@ func (c *conductor) handleMessage(data []byte) error {
 	}
 	c.logger.Debug("Received message", "type", base.Type, "request_id", base.RequestID)
 
+	if _, isData := dataMessageTypes[base.Type]; isData && c.metadataOnlyMode {
+		c.logger.Warn("Refusing command in metadata-only mode", "type", base.Type, "request_id", base.RequestID)
+		return c.sendErrorResponse(base.RequestID, base.Type, fmt.Sprintf("%s is not allowed in conductor metadata-only mode", base.Type))
+	}
+
 	switch base.Type {
 	case executorInfo:
 		return c.handleExecutorInfoRequest(data, base.RequestID)
@@ -443,7 +465,7 @@ func (c *conductor) handleMessage(data []byte) error {
 		return c.handleGetQueueRequest(data, base.RequestID)
 	default:
 		c.logger.Warn("Unknown message type", "type", base.Type)
-		return c.handleUnknownMessageType(base.RequestID, base.Type, "Unknown message type")
+		return c.sendErrorResponse(base.RequestID, base.Type, "Unknown message type")
 	}
 }
 
@@ -493,7 +515,7 @@ func (c *conductor) handleRecoveryRequest(data []byte, requestID string) error {
 	_, err := recoverPendingWorkflows(c.dbosCtx, req.ExecutorIDs)
 	if err != nil {
 		c.logger.Error("Failed to recover pending workflows", "executor_ids", req.ExecutorIDs, "error", err)
-		errStr := fmt.Sprintf("failed to recover pending workflows: %v", err)
+		errStr := c.errorText("failed to recover pending workflows", err)
 		errorMsg = &errStr
 		success = false
 	} else {
@@ -536,7 +558,7 @@ func (c *conductor) handleCancelWorkflowRequest(data []byte, requestID string) e
 
 	if err := c.dbosCtx.CancelWorkflows(c.dbosCtx, workflowIDs, opts...); err != nil {
 		c.logger.Error("Failed to cancel workflows", "workflow_ids", workflowIDs, "error", err)
-		errStr := fmt.Sprintf("failed to cancel workflows: %v", err)
+		errStr := c.errorText("failed to cancel workflows", err)
 		errorMsg = &errStr
 		success = false
 	} else {
@@ -579,7 +601,7 @@ func (c *conductor) handleResumeWorkflowRequest(data []byte, requestID string) e
 	_, err := c.dbosCtx.ResumeWorkflows(c.dbosCtx, workflowIDs, resumeOpts...)
 	if err != nil {
 		c.logger.Error("Failed to resume workflows", "workflow_ids", workflowIDs, "error", err)
-		errStr := fmt.Sprintf("failed to resume workflows: %v", err)
+		errStr := c.errorText("failed to resume workflows", err)
 		errorMsg = &errStr
 		success = false
 	} else {
@@ -701,7 +723,7 @@ func (c *conductor) handleGetMetricsRequest(data []byte, requestID string) error
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("Failed to get metrics", "error", err)
-			errStr := fmt.Sprintf("Exception encountered when getting metrics: %v", err)
+			errStr := c.errorText("Exception encountered when getting metrics", err)
 			errorMsg = &errStr
 		}
 	} else {
@@ -733,8 +755,8 @@ func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	c.logger.Debug("Handling list workflows request", "request", req)
 
 	var opts []ListWorkflowsOption
-	opts = append(opts, WithFilterLoadInput(req.Body.LoadInput))
-	opts = append(opts, WithFilterLoadOutput(req.Body.LoadOutput))
+	opts = append(opts, WithFilterLoadInput(req.Body.LoadInput && !c.metadataOnlyMode))
+	opts = append(opts, WithFilterLoadOutput(req.Body.LoadOutput && !c.metadataOnlyMode))
 	if req.Body.SortDesc {
 		opts = append(opts, WithFilterSortDesc())
 	}
@@ -821,7 +843,7 @@ func (c *conductor) handleListWorkflowsRequest(data []byte, requestID string) er
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	if err != nil {
 		c.logger.Error("Failed to list workflows", "error", err)
-		errorMsg := fmt.Sprintf("failed to list workflows: %v", err)
+		errorMsg := c.errorText("failed to list workflows", err)
 		response := listWorkflowsConductorResponse{
 			baseResponse: baseResponse{
 				baseMessage: baseMessage{
@@ -863,7 +885,7 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 
 	// Build functional options for ListWorkflows
 	var opts []ListWorkflowsOption
-	opts = append(opts, WithFilterLoadInput(req.Body.LoadInput))
+	opts = append(opts, WithFilterLoadInput(req.Body.LoadInput && !c.metadataOnlyMode))
 	opts = append(opts, WithFilterLoadOutput(false)) // Don't load output for queued workflows
 	opts = append(opts, WithFilterQueuesOnly())      // Only include workflows that are in queues
 	if len(req.Body.WorkflowUUIDs) > 0 {
@@ -959,7 +981,7 @@ func (c *conductor) handleListQueuedWorkflowsRequest(data []byte, requestID stri
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx, opts...)
 	if err != nil {
 		c.logger.Error("Failed to list queued workflows", "error", err)
-		errorMsg := fmt.Sprintf("failed to list queued workflows: %v", err)
+		errorMsg := c.errorText("failed to list queued workflows", err)
 		response := listWorkflowsConductorResponse{
 			baseResponse: baseResponse{
 				baseMessage: baseMessage{
@@ -1001,7 +1023,7 @@ func (c *conductor) handleListStepsRequest(data []byte, requestID string) error 
 	c.logger.Debug("Handling list steps request", "request", req)
 
 	// Get workflow steps using the public GetWorkflowSteps method
-	stepOpts := []GetWorkflowStepsOption{WithStepsLoadOutput(req.LoadOutput)}
+	stepOpts := []GetWorkflowStepsOption{WithStepsLoadOutput(req.LoadOutput && !c.metadataOnlyMode)}
 	if req.Limit != nil {
 		stepOpts = append(stepOpts, WithStepsLimit(*req.Limit))
 	}
@@ -1011,7 +1033,7 @@ func (c *conductor) handleListStepsRequest(data []byte, requestID string) error 
 	steps, err := GetWorkflowSteps(c.dbosCtx, req.WorkflowID, stepOpts...)
 	if err != nil {
 		c.logger.Error("Failed to list workflow steps", "workflow_id", req.WorkflowID, "error", err)
-		errorMsg := fmt.Sprintf("failed to list workflow steps: %v", err)
+		errorMsg := c.errorText("failed to list workflow steps", err)
 		response := listStepsConductorResponse{
 			baseResponse: baseResponse{
 				baseMessage: baseMessage{
@@ -1030,6 +1052,11 @@ func (c *conductor) handleListStepsRequest(data []byte, requestID string) error 
 	if steps != nil {
 		stepsList := make([]workflowStepsConductorResponseBody, len(steps))
 		for i, step := range steps {
+			if c.metadataOnlyMode {
+				// A step's error carries whatever the step put in it; load_output only
+				// gates the output column.
+				step.Error = nil
+			}
 			stepsList[i] = formatWorkflowStepsResponseBody(step)
 		}
 		formattedSteps = &stepsList
@@ -1058,11 +1085,11 @@ func (c *conductor) handleGetWorkflowRequest(data []byte, requestID string) erro
 
 	workflows, err := c.dbosCtx.ListWorkflows(c.dbosCtx,
 		WithFilterWorkflowIDs(req.WorkflowID),
-		WithFilterLoadInput(req.LoadInput),
-		WithFilterLoadOutput(req.LoadOutput))
+		WithFilterLoadInput(req.LoadInput && !c.metadataOnlyMode),
+		WithFilterLoadOutput(req.LoadOutput && !c.metadataOnlyMode))
 	if err != nil {
 		c.logger.Error("Failed to get workflow", "workflow_id", req.WorkflowID, "error", err)
-		errorMsg := fmt.Sprintf("failed to get workflow: %v", err)
+		errorMsg := c.errorText("failed to get workflow", err)
 		response := getWorkflowConductorResponse{
 			baseResponse: baseResponse{
 				baseMessage: baseMessage{
@@ -1136,7 +1163,7 @@ func (c *conductor) handleForkWorkflowRequest(data []byte, requestID string) err
 
 	if err != nil {
 		c.logger.Error("Failed to fork workflow", "original_workflow_id", req.Body.WorkflowID, "error", err)
-		errStr := fmt.Sprintf("failed to fork workflow: %v", err)
+		errStr := c.errorText("failed to fork workflow", err)
 		errorMsg = &errStr
 	} else {
 		workflowID := handle.GetWorkflowID()
@@ -1191,7 +1218,7 @@ func (c *conductor) handleRewindWorkflowRequest(data []byte, requestID string) e
 
 	if _, err := c.dbosCtx.RewindWorkflow(c.dbosCtx, req.Body.WorkflowID, opts...); err != nil {
 		c.logger.Error("Failed to rewind workflow", "workflow_id", req.Body.WorkflowID, "error", err)
-		errStr := fmt.Sprintf("failed to rewind workflow: %v", err)
+		errStr := c.errorText("failed to rewind workflow", err)
 		errorMsg = &errStr
 		success = false
 	} else {
@@ -1241,7 +1268,7 @@ func (c *conductor) handleForkFromFailureRequest(data []byte, requestID string) 
 	var errorMsg *string
 	if err != nil {
 		c.logger.Error("Failed to fork workflows from failure", "workflow_ids", req.Body.WorkflowIDs, "error", err)
-		errStr := fmt.Sprintf("failed to fork workflows from failure: %v", err)
+		errStr := c.errorText("failed to fork workflows from failure", err)
 		errorMsg = &errStr
 	} else {
 		c.logger.Info("Successfully forked workflows from failure", "original_workflow_ids", req.Body.WorkflowIDs, "forked_workflow_ids", forkedIDs)
@@ -1280,7 +1307,7 @@ func (c *conductor) handleExistPendingWorkflowsRequest(data []byte, requestID st
 	var errorMsg *string
 	if err != nil {
 		c.logger.Error("Failed to check for pending workflows", "executor_id", req.ExecutorID, "application_version", req.ApplicationVersion, "error", err)
-		errStr := fmt.Sprintf("failed to check for pending workflows: %v", err)
+		errStr := c.errorText("failed to check for pending workflows", err)
 		errorMsg = &errStr
 	}
 
@@ -1314,8 +1341,12 @@ func (c *conductor) handleAlertRequest(data []byte, requestID string) error {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					errStr := fmt.Sprintf("panic in alert handler: %v", r)
-					c.logger.Error(errStr)
+					err, ok := r.(error)
+					if !ok {
+						err = fmt.Errorf("%v", r)
+					}
+					c.logger.Error("Panic in alert handler", "error", err)
+					errStr := c.errorText("panic in alert handler", err)
 					errorMsg = &errStr
 					success = false
 				}
@@ -1340,7 +1371,8 @@ func (c *conductor) handleAlertRequest(data []byte, requestID string) error {
 	return c.sendResponse(response, string(alertMessage))
 }
 
-func (c *conductor) handleUnknownMessageType(requestID string, msgType messageType, errorMsg string) error {
+// sendErrorResponse answers a command with nothing but an error message.
+func (c *conductor) sendErrorResponse(requestID string, msgType messageType, errorMsg string) error {
 	response := baseResponse{
 		baseMessage: baseMessage{
 			Type:      msgType,
@@ -1349,7 +1381,7 @@ func (c *conductor) handleUnknownMessageType(requestID string, msgType messageTy
 		ErrorMessage: &errorMsg,
 	}
 
-	return c.sendResponse(response, "unknown message type response")
+	return c.sendResponse(response, "error response")
 }
 
 func (c *conductor) handleExportWorkflowRequest(data []byte, requestID string) error {
@@ -1368,12 +1400,12 @@ func (c *conductor) handleExportWorkflowRequest(data []byte, requestID string) e
 	}, sysdb.WithRetrierLogger(c.logger))
 	if err != nil {
 		c.logger.Error("Failed to export workflow", "workflow_id", req.WorkflowID, "error", err)
-		errStr := fmt.Sprintf("Exception encountered when exporting workflow %s: %v", req.WorkflowID, err)
+		errStr := c.errorText(fmt.Sprintf("Exception encountered when exporting workflow %s", req.WorkflowID), err)
 		errorMsg = &errStr
 	} else {
 		jsonData, err := json.Marshal(exported)
 		if err != nil {
-			errStr := fmt.Sprintf("Failed to marshal exported workflow: %v", err)
+			errStr := c.errorText("Failed to marshal exported workflow", err)
 			errorMsg = &errStr
 		} else {
 			var buf bytes.Buffer
@@ -1382,10 +1414,10 @@ func (c *conductor) handleExportWorkflowRequest(data []byte, requestID string) e
 				if closeErr := gz.Close(); closeErr != nil {
 					err = errors.Join(err, fmt.Errorf("failed to close gzip writer: %w", closeErr))
 				}
-				errStr := fmt.Sprintf("Failed to gzip exported workflow: %v", err)
+				errStr := c.errorText("Failed to gzip exported workflow", err)
 				errorMsg = &errStr
 			} else if err := gz.Close(); err != nil {
-				errStr := fmt.Sprintf("Failed to close gzip writer: %v", err)
+				errStr := c.errorText("Failed to close gzip writer", err)
 				errorMsg = &errStr
 			} else {
 				encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
@@ -1421,13 +1453,13 @@ func (c *conductor) handleImportWorkflowRequest(data []byte, requestID string) e
 
 	compressed, err := base64.StdEncoding.DecodeString(req.SerializedWorkflow)
 	if err != nil {
-		errStr := fmt.Sprintf("Failed to base64 decode serialized workflow: %v", err)
+		errStr := c.errorText("Failed to base64 decode serialized workflow", err)
 		errorMsg = &errStr
 		success = false
 	} else {
 		gz, err := gzip.NewReader(bytes.NewReader(compressed))
 		if err != nil {
-			errStr := fmt.Sprintf("Failed to create gzip reader: %v", err)
+			errStr := c.errorText("Failed to create gzip reader", err)
 			errorMsg = &errStr
 			success = false
 		} else {
@@ -1436,13 +1468,13 @@ func (c *conductor) handleImportWorkflowRequest(data []byte, requestID string) e
 				err = closeErr
 			}
 			if err != nil {
-				errStr := fmt.Sprintf("Failed to decompress workflow data: %v", err)
+				errStr := c.errorText("Failed to decompress workflow data", err)
 				errorMsg = &errStr
 				success = false
 			} else {
 				var workflows []ExportedWorkflow
 				if err := json.Unmarshal(jsonData, &workflows); err != nil {
-					errStr := fmt.Sprintf("Failed to unmarshal workflow data: %v", err)
+					errStr := c.errorText("Failed to unmarshal workflow data", err)
 					errorMsg = &errStr
 					success = false
 				} else {
@@ -1450,7 +1482,7 @@ func (c *conductor) handleImportWorkflowRequest(data []byte, requestID string) e
 						return c.dbosCtx.systemDB.ImportWorkflow(c.dbosCtx, workflows)
 					}, sysdb.WithRetrierLogger(c.logger))
 					if err != nil {
-						errStr := fmt.Sprintf("Exception encountered when importing workflow: %v", err)
+						errStr := c.errorText("Exception encountered when importing workflow", err)
 						errorMsg = &errStr
 						success = false
 					}
@@ -1496,7 +1528,7 @@ func (c *conductor) handleDeleteWorkflowRequest(data []byte, requestID string) e
 	}, sysdb.WithRetrierLogger(c.logger))
 	if err != nil {
 		c.logger.Error("Failed to delete workflows", "workflow_ids", workflowIDs, "error", err)
-		errStr := fmt.Sprintf("failed to delete workflows: %v", err)
+		errStr := c.errorText("failed to delete workflows", err)
 		errorMsg = &errStr
 		success = false
 	} else {
@@ -1554,7 +1586,7 @@ func (c *conductor) handleGetWorkflowEventsRequest(data []byte, requestID string
 	records, err := c.dbosCtx.systemDB.GetAllEvents(c.dbosCtx, req.WorkflowID)
 	if err != nil {
 		c.logger.Error("Failed to get workflow events", "workflow_id", req.WorkflowID, "error", err)
-		errStr := fmt.Sprintf("failed to get workflow events: %v", err)
+		errStr := c.errorText("failed to get workflow events", err)
 		resp.ErrorMessage = &errStr
 		return c.sendResponse(resp, string(getWorkflowEventsMessage))
 	}
@@ -1564,7 +1596,7 @@ func (c *conductor) handleGetWorkflowEventsRequest(data []byte, requestID string
 		value, err := c.decodeStoredValueForConductor(r.Value, r.Serialization)
 		if err != nil {
 			c.logger.Error("Failed to decode workflow event", "workflow_id", req.WorkflowID, "key", r.Key, "error", err)
-			errStr := fmt.Sprintf("failed to decode event %q: %v", r.Key, err)
+			errStr := c.errorText(fmt.Sprintf("failed to decode event %q", r.Key), err)
 			resp.ErrorMessage = &errStr
 			resp.Events = nil
 			return c.sendResponse(resp, string(getWorkflowEventsMessage))
@@ -1592,7 +1624,7 @@ func (c *conductor) handleGetWorkflowNotificationsRequest(data []byte, requestID
 	records, err := c.dbosCtx.systemDB.GetAllNotifications(c.dbosCtx, req.WorkflowID)
 	if err != nil {
 		c.logger.Error("Failed to get workflow notifications", "workflow_id", req.WorkflowID, "error", err)
-		errStr := fmt.Sprintf("failed to get workflow notifications: %v", err)
+		errStr := c.errorText("failed to get workflow notifications", err)
 		resp.ErrorMessage = &errStr
 		return c.sendResponse(resp, string(getWorkflowNotificationsMsg))
 	}
@@ -1602,7 +1634,7 @@ func (c *conductor) handleGetWorkflowNotificationsRequest(data []byte, requestID
 		msg, err := c.decodeStoredValueForConductor(r.Message, r.Serialization)
 		if err != nil {
 			c.logger.Error("Failed to decode notification message", "workflow_id", req.WorkflowID, "error", err)
-			errStr := fmt.Sprintf("failed to decode notification: %v", err)
+			errStr := c.errorText("failed to decode notification", err)
 			resp.ErrorMessage = &errStr
 			resp.Notifications = nil
 			return c.sendResponse(resp, string(getWorkflowNotificationsMsg))
@@ -1635,7 +1667,7 @@ func (c *conductor) handleGetWorkflowStreamsRequest(data []byte, requestID strin
 	records, err := c.dbosCtx.systemDB.GetAllStreamEntries(c.dbosCtx, req.WorkflowID)
 	if err != nil {
 		c.logger.Error("Failed to get workflow streams", "workflow_id", req.WorkflowID, "error", err)
-		errStr := fmt.Sprintf("failed to get workflow streams: %v", err)
+		errStr := c.errorText("failed to get workflow streams", err)
 		resp.ErrorMessage = &errStr
 		return c.sendResponse(resp, string(getWorkflowStreamsMessage))
 	}
@@ -1647,7 +1679,7 @@ func (c *conductor) handleGetWorkflowStreamsRequest(data []byte, requestID strin
 		value, err := c.decodeStoredValueForConductor(r.Value, r.Serialization)
 		if err != nil {
 			c.logger.Error("Failed to decode stream value", "workflow_id", req.WorkflowID, "key", r.Key, "error", err)
-			errStr := fmt.Sprintf("failed to decode stream %q: %v", r.Key, err)
+			errStr := c.errorText(fmt.Sprintf("failed to decode stream %q", r.Key), err)
 			resp.ErrorMessage = &errStr
 			resp.Streams = nil
 			return c.sendResponse(resp, string(getWorkflowStreamsMessage))
@@ -1750,7 +1782,7 @@ func (c *conductor) handleGetWorkflowAggregatesRequest(data []byte, requestID st
 	rows, err := c.dbosCtx.GetWorkflowAggregates(c.dbosCtx, input)
 	if err != nil {
 		c.logger.Error("Failed to get workflow aggregates", "error", err)
-		errStr := fmt.Sprintf("failed to get workflow aggregates: %v", err)
+		errStr := c.errorText("failed to get workflow aggregates", err)
 		resp.ErrorMessage = &errStr
 		return c.sendResponse(resp, string(getWorkflowAggregatesMessage))
 	}
@@ -1810,13 +1842,40 @@ func (c *conductor) handleGetStepAggregatesRequest(data []byte, requestID string
 	rows, err := c.dbosCtx.GetStepAggregates(c.dbosCtx, input)
 	if err != nil {
 		c.logger.Error("Failed to get step aggregates", "error", err)
-		errStr := fmt.Sprintf("Exception encountered when getting step aggregates: %v", err)
+		errStr := c.errorText("Exception encountered when getting step aggregates", err)
 		resp.ErrorMessage = &errStr
 		return c.sendResponse(resp, string(getStepAggregatesMessage))
 	}
 
 	resp.Output = rows
 	return c.sendResponse(resp, string(getStepAggregatesMessage))
+}
+
+// errorText renders the error message Conductor may see for a failed command. Error
+// strings can carry workflow data (a failed step's error, a row that would not decode),
+// so in metadata-only mode only the error's kind reaches Conductor. Callers log the full
+// error themselves.
+func (c *conductor) errorText(context string, err error) string {
+	if !c.metadataOnlyMode {
+		return fmt.Sprintf("%s: %v", context, err)
+	}
+	return fmt.Sprintf("%s: %s (details withheld in metadata-only mode)", context, errorKind(err))
+}
+
+// errorKind names an error without its message: the symbolic code of a DBOS error,
+// otherwise the dynamic type of the innermost wrapped error.
+func errorKind(err error) string {
+	var dbosErr *Error
+	if errors.As(err, &dbosErr) {
+		return dbosErr.Code.String()
+	}
+	for {
+		next := errors.Unwrap(err)
+		if next == nil {
+			return fmt.Sprintf("%T", err)
+		}
+		err = next
+	}
 }
 
 func (c *conductor) sendResponse(response any, responseType string) error {
@@ -1893,9 +1952,9 @@ func (c *conductor) handleListSchedulesRequest(data []byte, requestID string) er
 		return fmt.Errorf("failed to parse list schedules request: %w", err)
 	}
 
-	loadContext := true
+	loadContext := !c.metadataOnlyMode
 	if req.Body.LoadContext != nil {
-		loadContext = *req.Body.LoadContext
+		loadContext = *req.Body.LoadContext && !c.metadataOnlyMode
 	}
 
 	var opts []ListSchedulesOption
@@ -1921,7 +1980,7 @@ func (c *conductor) handleListSchedulesRequest(data []byte, requestID string) er
 	var errorMsg *string
 	if err != nil {
 		c.logger.Error("Failed to list schedules", "error", err)
-		msg := fmt.Sprintf("failed to list schedules: %v", err)
+		msg := c.errorText("failed to list schedules", err)
 		errorMsg = &msg
 	} else {
 		output = make([]scheduleConductorOutput, len(schedules))
@@ -1947,9 +2006,9 @@ func (c *conductor) handleGetScheduleRequest(data []byte, requestID string) erro
 		return fmt.Errorf("failed to parse get schedule request: %w", err)
 	}
 
-	loadContext := true
+	loadContext := !c.metadataOnlyMode
 	if req.LoadContext != nil {
-		loadContext = *req.LoadContext
+		loadContext = *req.LoadContext && !c.metadataOnlyMode
 	}
 
 	schedule, err := c.dbosCtx.GetSchedule(c.dbosCtx, req.ScheduleName)
@@ -1957,7 +2016,7 @@ func (c *conductor) handleGetScheduleRequest(data []byte, requestID string) erro
 	var output *scheduleConductorOutput
 	if err != nil && !errors.Is(err, ErrScheduleNotFound) {
 		c.logger.Error("Failed to get schedule", "schedule_name", req.ScheduleName, "error", err)
-		msg := fmt.Sprintf("failed to get schedule '%s': %v", req.ScheduleName, err)
+		msg := c.errorText(fmt.Sprintf("failed to get schedule '%s'", req.ScheduleName), err)
 		errorMsg = &msg
 	} else if err == nil {
 		o := toScheduleConductorOutput(schedule, loadContext)
@@ -1985,7 +2044,7 @@ func (c *conductor) handlePauseScheduleRequest(data []byte, requestID string) er
 	var errorMsg *string
 	if err := c.dbosCtx.PauseSchedule(c.dbosCtx, req.ScheduleName); err != nil {
 		c.logger.Error("Failed to pause schedule", "schedule_name", req.ScheduleName, "error", err)
-		msg := fmt.Sprintf("failed to pause schedule '%s': %v", req.ScheduleName, err)
+		msg := c.errorText(fmt.Sprintf("failed to pause schedule '%s'", req.ScheduleName), err)
 		errorMsg = &msg
 		success = false
 	}
@@ -2011,7 +2070,7 @@ func (c *conductor) handleResumeScheduleRequest(data []byte, requestID string) e
 	var errorMsg *string
 	if err := c.dbosCtx.ResumeSchedule(c.dbosCtx, req.ScheduleName); err != nil {
 		c.logger.Error("Failed to resume schedule", "schedule_name", req.ScheduleName, "error", err)
-		msg := fmt.Sprintf("failed to resume schedule '%s': %v", req.ScheduleName, err)
+		msg := c.errorText(fmt.Sprintf("failed to resume schedule '%s'", req.ScheduleName), err)
 		errorMsg = &msg
 		success = false
 	}
@@ -2041,7 +2100,7 @@ func (c *conductor) handleBackfillScheduleRequest(data []byte, requestID string)
 		start, err = time.Parse(time.RFC3339, req.Start)
 	}
 	if err != nil {
-		msg := fmt.Sprintf("failed to parse start time '%s': %v", req.Start, err)
+		msg := c.errorText(fmt.Sprintf("failed to parse start time '%s'", req.Start), err)
 		errorMsg = &msg
 	} else {
 		end, errEnd := time.Parse(time.RFC3339Nano, req.End)
@@ -2049,7 +2108,7 @@ func (c *conductor) handleBackfillScheduleRequest(data []byte, requestID string)
 			end, errEnd = time.Parse(time.RFC3339, req.End)
 		}
 		if errEnd != nil {
-			msg := fmt.Sprintf("failed to parse end time '%s': %v", req.End, errEnd)
+			msg := c.errorText(fmt.Sprintf("failed to parse end time '%s'", req.End), errEnd)
 			errorMsg = &msg
 		} else {
 			ids, errBf := c.dbosCtx.systemDB.BackfillSchedule(c.dbosCtx, sysdb.BackfillScheduleDBInput{
@@ -2058,7 +2117,7 @@ func (c *conductor) handleBackfillScheduleRequest(data []byte, requestID string)
 				EndTime:      end,
 			})
 			if errBf != nil {
-				msg := fmt.Sprintf("failed to backfill schedule '%s': %v", req.ScheduleName, errBf)
+				msg := c.errorText(fmt.Sprintf("failed to backfill schedule '%s'", req.ScheduleName), errBf)
 				errorMsg = &msg
 			} else {
 				workflowIDs = ids
@@ -2091,7 +2150,7 @@ func (c *conductor) handleTriggerScheduleRequest(data []byte, requestID string) 
 	id, err := c.dbosCtx.systemDB.TriggerSchedule(c.dbosCtx, req.ScheduleName)
 	if err != nil {
 		c.logger.Error("Failed to trigger schedule", "schedule_name", req.ScheduleName, "error", err)
-		msg := fmt.Sprintf("failed to trigger schedule '%s': %v", req.ScheduleName, err)
+		msg := c.errorText(fmt.Sprintf("failed to trigger schedule '%s'", req.ScheduleName), err)
 		errorMsg = &msg
 	} else {
 		workflowID = &id
@@ -2121,7 +2180,7 @@ func (c *conductor) handleListApplicationVersionsRequest(data []byte, requestID 
 	}, sysdb.WithRetrierLogger(c.logger))
 	if err != nil {
 		c.logger.Error("Failed to list application versions", "error", err)
-		msg := fmt.Sprintf("failed to list application versions: %v", err)
+		msg := c.errorText("failed to list application versions", err)
 		errorMsg = &msg
 	} else {
 		for _, v := range versions {
@@ -2152,7 +2211,7 @@ func (c *conductor) handleSetLatestApplicationVersionRequest(data []byte, reques
 		return c.dbosCtx.systemDB.UpdateApplicationVersionTimestamp(c.dbosCtx, req.VersionName, time.Now().UnixMilli(), c.dbosCtx.requestedOwner(""))
 	}, sysdb.WithRetrierLogger(c.logger)); err != nil {
 		c.logger.Error("Failed to set latest application version", "version_name", req.VersionName, "error", err)
-		msg := fmt.Sprintf("failed to set latest application version '%s': %v", req.VersionName, err)
+		msg := c.errorText(fmt.Sprintf("failed to set latest application version '%s'", req.VersionName), err)
 		errorMsg = &msg
 		success = false
 	}
@@ -2183,7 +2242,7 @@ func (c *conductor) handleListQueuesRequest(data []byte, requestID string) error
 	var errorMsg *string
 	if err != nil {
 		c.logger.Error("Failed to list queues", "error", err)
-		msg := fmt.Sprintf("failed to list queues: %v", err)
+		msg := c.errorText("failed to list queues", err)
 		errorMsg = &msg
 	} else {
 		output = make([]queueConductorOutput, len(queues))
@@ -2214,7 +2273,7 @@ func (c *conductor) handleGetQueueRequest(data []byte, requestID string) error {
 	var output *queueConductorOutput
 	if err != nil && !errors.Is(err, ErrQueueNotFound) {
 		c.logger.Error("Failed to get queue", "queue_name", req.Name, "error", err)
-		msg := fmt.Sprintf("failed to get queue '%s': %v", req.Name, err)
+		msg := c.errorText(fmt.Sprintf("failed to get queue '%s'", req.Name), err)
 		errorMsg = &msg
 	} else if queue != nil {
 		o := toQueueConductorOutput(queue)
