@@ -267,50 +267,6 @@ func TestApplicationNameForkInherits(t *testing.T) {
 	assert.Equal(t, "app-a", *stepOwners[0])
 }
 
-// TestGarbageCollectionIsSystemWide verifies one application's round collects every application's rows.
-func TestGarbageCollectionIsSystemWide(t *testing.T) {
-	ctxA := setupDBOS(t, setupDBOSOptions{dropDB: true, appName: "app-a"})
-	ctxB := setupDBOS(t, setupDBOSOptions{appName: "app-b"})
-
-	simple := func(ctx Context, input string) (string, error) { return input, nil }
-	RegisterWorkflow(ctxA, simple, WithWorkflowName("gc-workflow"))
-	RegisterWorkflow(ctxB, simple, WithWorkflowName("gc-workflow"))
-	require.NoError(t, Launch(ctxA))
-	require.NoError(t, Launch(ctxB))
-
-	// Three app-a rows against a batch size of two: one bounded batch, then the tail.
-	for range 3 {
-		handleA, err := RunWorkflow(ctxA, simple, "a")
-		require.NoError(t, err)
-		_, err = handleA.GetResult()
-		require.NoError(t, err)
-	}
-	handleB, err := RunWorkflow(ctxB, simple, "b")
-	require.NoError(t, err)
-	_, err = handleB.GetResult()
-	require.NoError(t, err)
-
-	batchSize := 2
-	cutoff := time.Now().Add(time.Hour).UnixMilli()
-	gcInput := sysdb.GarbageCollectWorkflowsInput{CutoffEpochTimestampMs: &cutoff, BatchSize: &batchSize}
-
-	require.NoError(t, ctxB.(*dbosContext).systemDB.GarbageCollectWorkflows(ctxB, gcInput))
-	assert.Equal(t, 0, ownedRowCount(t, ctxA, "app-a"))
-	assert.Equal(t, 0, ownedRowCount(t, ctxA, "app-b"))
-}
-
-// ownedRowCount counts the workflow_status rows an application owns.
-func ownedRowCount(t *testing.T, ctx Context, appName string) int {
-	t.Helper()
-	sdb := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
-	query := sdb.Dialect().RewriteQuery(fmt.Sprintf(
-		`SELECT COUNT(*) FROM %sworkflow_status WHERE application_name = $1`,
-		sdb.Dialect().SchemaPrefix(sdb.Schema())))
-	var count int
-	require.NoError(t, sdb.Pool().QueryRow(context.Background(), query, appName).Scan(&count))
-	return count
-}
-
 // TestApplicationVersionIncludesAppName verifies same-binary peers under
 // different names get distinct computed versions.
 func TestApplicationVersionIncludesAppName(t *testing.T) {

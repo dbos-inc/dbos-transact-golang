@@ -39,14 +39,12 @@ func RuntimeOf(ctx dbos.Context) (Runtime, error) {
 // The system database.
 type (
 	SystemDatabase = sysdb.SystemDatabase // The interface
-	Dialect        = sysdb.Dialect        // The SQL dialect of the system database
 
 	// These are internal types, not importable from outside the OSS package
 	// We alias them publicly for the commercial package to use
-	GarbageCollectWorkflowsInput = sysdb.GarbageCollectWorkflowsInput
-	DeleteWorkflowsInput         = sysdb.DeleteWorkflowsDBInput
-	BackfillScheduleInput        = sysdb.BackfillScheduleDBInput
-	GetWorkflowChildrenInput     = sysdb.GetWorkflowChildrenDBInput
+	DeleteWorkflowsInput     = sysdb.DeleteWorkflowsDBInput
+	BackfillScheduleInput    = sysdb.BackfillScheduleDBInput
+	GetWorkflowChildrenInput = sysdb.GetWorkflowChildrenDBInput
 
 	Tx        = sysdb.Tx        // A transaction on the system database pool
 	TxOptions = sysdb.TxOptions // Options for Pool().BeginTx
@@ -65,4 +63,9 @@ func RetryWithResult[T any](ctx context.Context, fn func() (T, error), options .
 
 func WithRetrierLogger(logger *slog.Logger) RetryOption {
 	return sysdb.WithRetrierLogger(logger)
+}
+
+// WithRetryCondition adds error predicates under which a retried operation is replayed.
+func WithRetryCondition(fns ...func(error, *slog.Logger) bool) RetryOption {
+	return sysdb.WithRetryCondition(fns...)
 }

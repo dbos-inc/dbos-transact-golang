@@ -114,8 +114,8 @@ type SystemDatabase interface {
 	UpdateQueueConfig(ctx context.Context, name string, mutate func(*models.QueueConfig) error) (*models.QueueConfig, error)
 	DeleteQueue(ctx context.Context, name string) error
 
-	// Garbage collection
-	GarbageCollectWorkflows(ctx context.Context, input GarbageCollectWorkflowsInput) error
+	// Maintenance
+	VacuumTables(ctx context.Context, tables []string) // VACUUM ANALYZE the named system tables, on Postgres only
 
 	// Schedules
 	CreateSchedule(ctx context.Context, input CreateScheduleDBInput) error
