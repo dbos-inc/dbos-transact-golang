@@ -39,19 +39,17 @@ func RuntimeOf(ctx dbos.Context) (Runtime, error) {
 // The system database.
 type (
 	SystemDatabase = sysdb.SystemDatabase // The interface
-	SysDB = sysdb.SysDB // It's concrete implementation. For methods not publicly exposed to the interface, like RenderSQL.
+	Dialect        = sysdb.Dialect        // The SQL dialect of the system database
 
 	ForkFromInput                = sysdb.ForkFromDBInput
 	GarbageCollectWorkflowsInput = sysdb.GarbageCollectWorkflowsInput
 	DeleteWorkflowsInput         = sysdb.DeleteWorkflowsDBInput
 	BackfillScheduleInput        = sysdb.BackfillScheduleDBInput
 
-	MetricData         = sysdb.MetricData
 	EventRecord        = sysdb.EventRecord
 	NotificationRecord = sysdb.NotificationRecord
 	StreamEntry        = sysdb.StreamEntry
 )
-
 
 // Retry are not part of the SystemDatabase interface today
 type RetryOption = sysdb.RetryOption

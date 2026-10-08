@@ -34,6 +34,9 @@ type SystemDatabase interface {
 	Launch(ctx context.Context)
 	Pool() Pool
 	Dialect() Dialect
+	Schema() string                              // The schema the system tables live in
+	RenderSQL(format string, args ...any) string // Sprintf a pg-style query and rewrite it for the dialect
+	ObservabilityNames(names []string) []string  // nil scopes to this application; empty spans every application
 	// IsContentionError reports whether err is a lock/serialization contention
 	// error for the active backend. See Dialect.IsContentionError.
 	IsContentionError(err error) bool
@@ -121,9 +124,6 @@ type SystemDatabase interface {
 	// Garbage collection
 	GarbageCollectWorkflows(ctx context.Context, input GarbageCollectWorkflowsInput) error
 
-	// Metrics
-	GetMetrics(ctx context.Context, startTime string, endTime string, applicationNames []string) ([]MetricData, error)
-
 	// Schedules
 	CreateSchedule(ctx context.Context, input CreateScheduleDBInput) error
 	UpsertSchedule(ctx context.Context, input UpsertScheduleDBInput) error
@@ -185,9 +185,9 @@ func (s *SysDB) owner() *string {
 	return &name
 }
 
-// call observabilityNames with a nil parameter to get this system database's own application.
+// Call ObservabilityNames with a nil parameter to get this system database's own application.
 // pass an empty string or an empty slice to match all applications.
-func (s *SysDB) observabilityNames(names []string) []string {
+func (s *SysDB) ObservabilityNames(names []string) []string {
 	if names != nil || s.appName == "" {
 		return names
 	}
@@ -1723,7 +1723,7 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 	// ID-keyed reads shouldn't be defaulted to this application.
 	appNames := input.ApplicationName
 	if appNames == nil && len(input.WorkflowIDs) == 0 {
-		appNames = s.observabilityNames(nil)
+		appNames = s.ObservabilityNames(nil)
 	}
 	qb.addWhereClaimedBy("application_name", appNames)
 	if !input.CompletedAfter.IsZero() {
@@ -3856,7 +3856,7 @@ func (s *SysDB) GetWorkflowAggregates(ctx context.Context, input GetWorkflowAggr
 	if !input.DequeuedBefore.IsZero() {
 		qb.addWhereLessEqual("started_at_epoch_ms", input.DequeuedBefore.UnixMilli())
 	}
-	qb.addWhereClaimedBy("application_name", s.observabilityNames(input.ApplicationName))
+	qb.addWhereClaimedBy("application_name", s.ObservabilityNames(input.ApplicationName))
 
 	// Build select aggregates. MAX/MIN ignore NULLs, so workflows missing a
 	// started_at_epoch_ms or completed_at drop out of the queue-wait / latency maxima.
@@ -4070,7 +4070,7 @@ func (s *SysDB) GetStepAggregates(ctx context.Context, input GetStepAggregatesDB
 	if !input.CompletedBefore.IsZero() {
 		qb.addWhereLessEqual("completed_at_epoch_ms", input.CompletedBefore.UnixMilli())
 	}
-	qb.addWhereClaimedBy("application_name", s.observabilityNames(input.ApplicationName))
+	qb.addWhereClaimedBy("application_name", s.ObservabilityNames(input.ApplicationName))
 
 	// Build SELECT clause: group expressions aliased to "g0", "g1", ... so position is stable.
 	selectParts := make([]string, 0, len(groups)+len(selects))
@@ -5793,7 +5793,7 @@ func (s *SysDB) getQueueRow(ctx context.Context, db Querier, name string) (*mode
 func (s *SysDB) ListQueues(ctx context.Context, applicationNames []string) ([]models.QueueConfig, error) {
 	query := s.RenderSQL(`SELECT `+_QUEUE_SELECT_COLUMNS+` FROM %squeues`, s.dialect.SchemaPrefix(s.schema))
 	var args []any
-	if names := s.observabilityNames(applicationNames); len(names) > 0 {
+	if names := s.ObservabilityNames(applicationNames); len(names) > 0 {
 		encoded, err := encodeArrayParam(s.dialect, names)
 		if err != nil {
 			return nil, fmt.Errorf("list queues: %w", err)
@@ -5962,138 +5962,6 @@ func (s *SysDB) UpdateQueueConfig(ctx context.Context, name string, mutate func(
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return q, nil
-}
-
-/*******************************/
-/******* METRICS ********/
-/*******************************/
-
-type MetricData struct {
-	MetricName string  `json:"metric_name"` // step name or workflow name
-	MetricType string  `json:"metric_type"` // workflow_count, step_count, etc
-	Value      float64 `json:"value"`
-}
-
-func (s *SysDB) GetMetrics(ctx context.Context, startTime, endTime string, applicationNames []string) ([]MetricData, error) {
-	// Parse ISO timestamp strings to time.Time
-	startTimeParsed, err := time.Parse(time.RFC3339, startTime)
-	if err != nil {
-		return nil, fmt.Errorf("invalid start_time format: %w", err)
-	}
-	endTimeParsed, err := time.Parse(time.RFC3339, endTime)
-	if err != nil {
-		return nil, fmt.Errorf("invalid end_time format: %w", err)
-	}
-
-	// Convert to epoch milliseconds
-	startEpochMs := startTimeParsed.UnixMilli()
-	endEpochMs := endTimeParsed.UnixMilli()
-
-	var metrics []MetricData
-
-	// Query workflow metrics
-	workflowMetrics, err := s.getMetricWorkflowCount(ctx, startEpochMs, endEpochMs, applicationNames)
-	if err != nil {
-		return nil, err
-	}
-	metrics = append(metrics, workflowMetrics...)
-
-	// Query step metrics
-	stepMetrics, err := s.getMetricStepCount(ctx, startEpochMs, endEpochMs, applicationNames)
-	if err != nil {
-		return nil, err
-	}
-	metrics = append(metrics, stepMetrics...)
-
-	return metrics, nil
-}
-
-func (s *SysDB) getMetricWorkflowCount(ctx context.Context, startEpochMs, endEpochMs int64, applicationNames []string) ([]MetricData, error) {
-	appNameClause := ""
-	args := []any{startEpochMs, endEpochMs}
-	if names := s.observabilityNames(applicationNames); len(names) > 0 {
-		encoded, err := encodeArrayParam(s.dialect, names)
-		if err != nil {
-			return nil, fmt.Errorf("workflow metrics: %w", err)
-		}
-		args = append(args, encoded)
-		appNameClause = " AND (" + dialectAnyClause(s.dialect, "application_name", len(args)) + " OR application_name IS NULL)"
-	}
-	workflowQuery := s.RenderSQL(`
-		SELECT name, COUNT(workflow_uuid) as count
-		FROM %sworkflow_status
-		WHERE created_at >= $1 AND created_at < $2`+appNameClause+`
-		GROUP BY name
-	`, s.dialect.SchemaPrefix(s.schema))
-
-	rows, err := s.pool.Query(ctx, workflowQuery, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query workflow metrics: %w", err)
-	}
-	defer rows.Close()
-
-	var metrics []MetricData
-	for rows.Next() {
-		var workflowName string
-		var workflowCount int64
-		if err := rows.Scan(&workflowName, &workflowCount); err != nil {
-			return nil, fmt.Errorf("failed to scan workflow metric: %w", err)
-		}
-		metrics = append(metrics, MetricData{
-			MetricType: "workflow_count",
-			MetricName: workflowName,
-			Value:      float64(workflowCount),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating workflow metrics: %w", err)
-	}
-
-	return metrics, nil
-}
-
-func (s *SysDB) getMetricStepCount(ctx context.Context, startEpochMs, endEpochMs int64, applicationNames []string) ([]MetricData, error) {
-	appNameClause := ""
-	args := []any{startEpochMs, endEpochMs}
-	if names := s.observabilityNames(applicationNames); len(names) > 0 {
-		encoded, err := encodeArrayParam(s.dialect, names)
-		if err != nil {
-			return nil, fmt.Errorf("step metrics: %w", err)
-		}
-		args = append(args, encoded)
-		appNameClause = " AND (" + dialectAnyClause(s.dialect, "application_name", len(args)) + " OR application_name IS NULL)"
-	}
-	stepQuery := s.RenderSQL(`
-		SELECT function_name, COUNT(*) as count
-		FROM %soperation_outputs
-		WHERE completed_at_epoch_ms >= $1 AND completed_at_epoch_ms < $2`+appNameClause+`
-		GROUP BY function_name
-	`, s.dialect.SchemaPrefix(s.schema))
-
-	rows, err := s.pool.Query(ctx, stepQuery, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query step metrics: %w", err)
-	}
-	defer rows.Close()
-
-	var metrics []MetricData
-	for rows.Next() {
-		var stepName string
-		var stepCount int64
-		if err := rows.Scan(&stepName, &stepCount); err != nil {
-			return nil, fmt.Errorf("failed to scan step metric: %w", err)
-		}
-		metrics = append(metrics, MetricData{
-			MetricType: "step_count",
-			MetricName: stepName,
-			Value:      float64(stepCount),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating step metrics: %w", err)
-	}
-
-	return metrics, nil
 }
 
 /*******************************/
@@ -6280,7 +6148,7 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 	var conds []string
 
 	// Either the context's application name (which can be empty => all applications), or the provided filters
-	if names := s.observabilityNames(input.ApplicationName); len(names) > 0 {
+	if names := s.ObservabilityNames(input.ApplicationName); len(names) > 0 {
 		encoded, err := encodeArrayParam(s.dialect, names)
 		if err != nil {
 			return nil, fmt.Errorf("list schedules: %w", err)
