@@ -5890,9 +5890,7 @@ func TestSendBulk(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "m|m", got)
 
-		sysDB := dbosCtx.(*dbosContext).systemDB
-		rows, err := sysDB.GetAllNotifications(context.Background(), h.GetWorkflowID())
-		require.NoError(t, err)
+		rows := listNotifications(t, dbosCtx, h.GetWorkflowID())
 		require.Len(t, rows, 6000)
 	})
 
@@ -5908,9 +5906,7 @@ func TestSendBulk(t *testing.T) {
 		err = SendBulk(dbosCtx, msgs)
 		require.ErrorIs(t, err, ErrNonExistentWorkflow)
 
-		sysDB := dbosCtx.(*dbosContext).systemDB
-		rows, err := sysDB.GetAllNotifications(context.Background(), h.GetWorkflowID())
-		require.NoError(t, err)
+		rows := listNotifications(t, dbosCtx, h.GetWorkflowID())
 		require.Empty(t, rows, "first chunk must roll back when a later chunk fails")
 
 		got, err := h.GetResult()
@@ -6022,9 +6018,7 @@ func TestSendBulk(t *testing.T) {
 		_, err = sendH.GetResult()
 		require.NoError(t, err)
 
-		sysDB := dbosCtx.(*dbosContext).systemDB
-		before, err := sysDB.GetAllNotifications(context.Background(), h.GetWorkflowID())
-		require.NoError(t, err)
+		before := listNotifications(t, dbosCtx, h.GetWorkflowID())
 		require.Len(t, before, 2)
 
 		setWorkflowStatusPending(t, dbosCtx, sendH.GetWorkflowID())
@@ -6041,8 +6035,7 @@ func TestSendBulk(t *testing.T) {
 		_, err = recoveredSend.GetResult()
 		require.NoError(t, err)
 
-		after, err := sysDB.GetAllNotifications(context.Background(), h.GetWorkflowID())
-		require.NoError(t, err)
+		after := listNotifications(t, dbosCtx, h.GetWorkflowID())
 		require.Len(t, after, 2, "recovery must not insert the batch again")
 
 		got, err := h.GetResult()
@@ -6054,8 +6047,7 @@ func TestSendBulk(t *testing.T) {
 // notificationPayloads returns the decoded string messages sent to workflowID.
 func notificationPayloads(t *testing.T, ctx Context, workflowID string) []string {
 	t.Helper()
-	rows, err := ctx.(*dbosContext).systemDB.GetAllNotifications(context.Background(), workflowID)
-	require.NoError(t, err)
+	rows := listNotifications(t, ctx, workflowID)
 	out := make([]string, 0, len(rows))
 	for _, row := range rows {
 		raw, err := base64.StdEncoding.DecodeString(row.Message)
@@ -12999,4 +12991,29 @@ func TestRewind(t *testing.T) {
 		require.ErrorAs(t, err, &dbosErr)
 		assert.Equal(t, ErrorCodeNonExistentWorkflow, dbosErr.Code)
 	})
+}
+
+// notificationRow is a row of the notifications table, as listNotifications reads it.
+type notificationRow struct {
+	Topic   *string
+	Message string
+}
+
+// listNotifications returns every notification sent to workflowID, in arrival order.
+func listNotifications(t *testing.T, ctx Context, workflowID string) []notificationRow {
+	t.Helper()
+	sysDB := ctx.(*dbosContext).systemDB
+	query := sysDB.RenderSQL(`SELECT topic, message FROM %snotifications WHERE destination_uuid = $1 ORDER BY created_at_epoch_ms`,
+		sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
+	rows, err := sysDB.Pool().Query(context.Background(), query, workflowID)
+	require.NoError(t, err)
+	defer rows.Close()
+	var out []notificationRow
+	for rows.Next() {
+		var row notificationRow
+		require.NoError(t, rows.Scan(&row.Topic, &row.Message))
+		out = append(out, row)
+	}
+	require.NoError(t, rows.Err())
+	return out
 }

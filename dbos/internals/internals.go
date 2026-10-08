@@ -45,10 +45,6 @@ type (
 	GarbageCollectWorkflowsInput = sysdb.GarbageCollectWorkflowsInput
 	DeleteWorkflowsInput         = sysdb.DeleteWorkflowsDBInput
 	BackfillScheduleInput        = sysdb.BackfillScheduleDBInput
-
-	EventRecord        = sysdb.EventRecord
-	NotificationRecord = sysdb.NotificationRecord
-	StreamEntry        = sysdb.StreamEntry
 )
 
 // Retry are not part of the SystemDatabase interface today

@@ -82,11 +82,6 @@ type SystemDatabase interface {
 	StartEventListener(ctx context.Context, targetWorkflowID, key string) (*NotificationWaiter, error)
 	GetEventValue(ctx context.Context, q Querier, targetWorkflowID, key string) (*string, *string, error)
 
-	// Communication observability
-	GetAllEvents(ctx context.Context, workflowID string) ([]EventRecord, error)
-	GetAllNotifications(ctx context.Context, workflowID string) ([]NotificationRecord, error)
-	GetAllStreamEntries(ctx context.Context, workflowID string) ([]StreamEntry, error)
-
 	// Streams
 	WriteStream(ctx context.Context, input WriteStreamDBInput) error
 	ReadStream(ctx context.Context, input ReadStreamDBInput) ([]StreamEntry, bool, error)
@@ -4892,123 +4887,6 @@ func (s *SysDB) ReadStream(ctx context.Context, input ReadStreamDBInput) ([]Stre
 	}
 
 	return entries, closed, nil
-}
-
-// EventRecord is one row from the workflow_events table.
-type EventRecord struct {
-	Key           string
-	Value         string
-	Serialization string
-}
-
-// GetAllEvents returns every event row currently set on the workflow.
-func (s *SysDB) GetAllEvents(ctx context.Context, workflowID string) ([]EventRecord, error) {
-	query := s.RenderSQL(`SELECT key, value, serialization FROM %sworkflow_events WHERE workflow_uuid = $1`,
-		s.dialect.SchemaPrefix(s.schema))
-
-	rows, err := s.pool.Query(ctx, query, workflowID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query workflow events: %w", err)
-	}
-	defer rows.Close()
-
-	var events []EventRecord
-	for rows.Next() {
-		var rec EventRecord
-		var serialization *string
-		if err := rows.Scan(&rec.Key, &rec.Value, &serialization); err != nil {
-			return nil, fmt.Errorf("failed to scan event row: %w", err)
-		}
-		if serialization != nil {
-			rec.Serialization = *serialization
-		}
-		events = append(events, rec)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating event rows: %w", err)
-	}
-	return events, nil
-}
-
-// NotificationRecord is one row from the notifications table.
-// Topic is nil when the row stored the __null__topic__ sentinel.
-type NotificationRecord struct {
-	Topic            *string
-	Message          string
-	Serialization    string
-	CreatedAtEpochMs int64
-	Consumed         bool
-}
-
-// GetAllNotifications returns every notification sent to the workflow, ordered by arrival time.
-// The __null__topic__ sentinel is normalized back to a nil Topic.
-func (s *SysDB) GetAllNotifications(ctx context.Context, workflowID string) ([]NotificationRecord, error) {
-	query := s.RenderSQL(`SELECT topic, message, serialization, created_at_epoch_ms, consumed
-		FROM %snotifications
-		WHERE destination_uuid = $1
-		ORDER BY created_at_epoch_ms`,
-		s.dialect.SchemaPrefix(s.schema))
-
-	rows, err := s.pool.Query(ctx, query, workflowID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query notifications: %w", err)
-	}
-	defer rows.Close()
-
-	var results []NotificationRecord
-	for rows.Next() {
-		var rec NotificationRecord
-		var serialization *string
-		if err := rows.Scan(&rec.Topic, &rec.Message, &serialization, &rec.CreatedAtEpochMs, &rec.Consumed); err != nil {
-			return nil, fmt.Errorf("failed to scan notification row: %w", err)
-		}
-		if rec.Topic != nil && *rec.Topic == NullTopic {
-			rec.Topic = nil
-		}
-		if serialization != nil {
-			rec.Serialization = *serialization
-		}
-		results = append(results, rec)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating notification rows: %w", err)
-	}
-	return results, nil
-}
-
-// GetAllStreamEntries returns every stream entry for the workflow, ordered by (key, offset).
-// Rows holding the stream-closed sentinel are filtered out; callers may group by Key.
-func (s *SysDB) GetAllStreamEntries(ctx context.Context, workflowID string) ([]StreamEntry, error) {
-	query := s.RenderSQL(`SELECT key, value, "offset", serialization FROM %sstreams
-		WHERE workflow_uuid = $1
-		ORDER BY key, "offset"`,
-		s.dialect.SchemaPrefix(s.schema))
-
-	rows, err := s.pool.Query(ctx, query, workflowID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query streams: %w", err)
-	}
-	defer rows.Close()
-
-	var records []StreamEntry
-	for rows.Next() {
-		var rec StreamEntry
-		var serialization *string
-		if err := rows.Scan(&rec.Key, &rec.Value, &rec.Offset, &serialization); err != nil {
-			return nil, fmt.Errorf("failed to scan stream row: %w", err)
-		}
-		if rec.Value == StreamClosedSentinel {
-			continue
-		}
-		if serialization != nil {
-			rec.Serialization = *serialization
-		}
-		records = append(records, rec)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating stream rows: %w", err)
-	}
-	return records, nil
 }
 
 /*******************************/
