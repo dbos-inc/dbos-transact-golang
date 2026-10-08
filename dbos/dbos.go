@@ -319,7 +319,7 @@ type dbosContext struct {
 	queueRunnerStarted atomic.Bool
 
 	// Conductor client
-	conductor *conductor
+	conductor ConductorConnection
 
 	// Application metadata
 	applicationVersion string
@@ -668,6 +668,48 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	initExecutor.applicationID = os.Getenv("DBOS__APPID")
 	initExecutor.serializer = config.Serializer
 
+	// Resolve the Conductor configuration. In DBOS Cloud, connect to Conductor for
+	// observability using the cloud-provided environment variables. Otherwise, connect
+	// if a Conductor API key was configured. Fail early if go.dbos.dev/dbos-enterprise-go
+	// is not linked.
+	var conductorOpts *ConductorOptions
+	if os.Getenv("DBOS__CLOUD") == "true" {
+		cloudAppName := os.Getenv("DBOS__CONDUCTOR_APP_NAME")
+		cloudConductorKey := os.Getenv("DBOS__CONDUCTOR_KEY")
+		cloudConductorURL := os.Getenv("DBOS__CONDUCTOR_URL")
+		if cloudAppName != "" && cloudConductorKey != "" && cloudConductorURL != "" {
+			conductorOpts = &ConductorOptions{
+				URL:              cloudConductorURL,
+				APIKey:           cloudConductorKey,
+				AppName:          cloudAppName,
+				ExecutorMetadata: config.ConductorExecutorMetadata,
+				MetadataOnlyMode: config.ConductorMetadataOnlyMode,
+			}
+		}
+	} else if config.ConductorAPIKey != "" {
+		initExecutor.executorID = uuid.NewString()
+		if config.ConductorURL == "" {
+			dbosDomain := os.Getenv("DBOS_DOMAIN")
+			if dbosDomain == "" {
+				dbosDomain = _DBOS_DOMAIN
+			}
+			config.ConductorURL = fmt.Sprintf("wss://%s/conductor/v1alpha1", dbosDomain)
+		}
+		conductorOpts = &ConductorOptions{
+			URL:              config.ConductorURL,
+			APIKey:           config.ConductorAPIKey,
+			AppName:          config.AppName,
+			ExecutorMetadata: config.ConductorExecutorMetadata,
+			MetadataOnlyMode: config.ConductorMetadataOnlyMode,
+		}
+	}
+	var conductorFactory ConductorFactory
+	if conductorOpts != nil {
+		if conductorFactory = registeredConductorFactory(); conductorFactory == nil {
+			return nil, enterpriseUnavailableError()
+		}
+	}
+
 	ownerAppName := config.AppName
 	if config.namelessOwner {
 		ownerAppName = ""
@@ -709,44 +751,12 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	// Initialize the queue runner (which owns the DBOS internal queue)
 	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
 
-	// Initialize conductor. In DBOS Cloud, connect to Conductor for observability
-	// using the cloud-provided environment variables. Otherwise, connect if a
-	// Conductor API key was configured.
-	var conductorCfg *conductorConfig
-	if os.Getenv("DBOS__CLOUD") == "true" {
-		cloudAppName := os.Getenv("DBOS__CONDUCTOR_APP_NAME")
-		cloudConductorKey := os.Getenv("DBOS__CONDUCTOR_KEY")
-		cloudConductorURL := os.Getenv("DBOS__CONDUCTOR_URL")
-		if cloudAppName != "" && cloudConductorKey != "" && cloudConductorURL != "" {
-			conductorCfg = &conductorConfig{
-				url:              cloudConductorURL,
-				apiKey:           cloudConductorKey,
-				appName:          cloudAppName,
-				executorMetadata: config.ConductorExecutorMetadata,
-				metadataOnlyMode: config.ConductorMetadataOnlyMode,
-			}
-		}
-	} else if config.ConductorAPIKey != "" {
-		initExecutor.executorID = uuid.NewString()
-		if config.ConductorURL == "" {
-			dbosDomain := os.Getenv("DBOS_DOMAIN")
-			if dbosDomain == "" {
-				dbosDomain = _DBOS_DOMAIN
-			}
-			config.ConductorURL = fmt.Sprintf("wss://%s/conductor/v1alpha1", dbosDomain)
-		}
-		conductorCfg = &conductorConfig{
-			url:              config.ConductorURL,
-			apiKey:           config.ConductorAPIKey,
-			appName:          config.AppName,
-			executorMetadata: config.ConductorExecutorMetadata,
-			metadataOnlyMode: config.ConductorMetadataOnlyMode,
-		}
-	}
-
-	if conductorCfg != nil {
-		conductor, err := newConductor(initExecutor, *conductorCfg)
+	if conductorOpts != nil {
+		conductor, err := conductorFactory(initExecutor, *conductorOpts)
 		if err != nil {
+			// Leave nothing behind: the system database is already open.
+			systemDB.Shutdown(initExecutor, config.SystemDBStartupTimeout)
+			cancelFunc(err)
 			return nil, models.NewInitializationError(fmt.Sprintf("failed to initialize conductor: %v", err))
 		}
 		initExecutor.conductor = conductor
@@ -932,7 +942,7 @@ func (c *dbosContext) Launch() error {
 
 	// Start the conductor if it has been initialized
 	if c.conductor != nil {
-		c.conductor.launch()
+		c.conductor.Launch()
 		c.logger.Debug("Conductor started")
 	}
 
@@ -1054,7 +1064,7 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	// Shutdown the conductor
 	if c.conductor != nil {
 		c.logger.Debug("Shutting down conductor")
-		if err := c.conductor.shutdown(timeout); err != nil {
+		if err := c.conductor.Shutdown(timeout); err != nil {
 			pending = append(pending, "conductor")
 		}
 	}

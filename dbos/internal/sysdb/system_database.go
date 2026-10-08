@@ -2,8 +2,10 @@ package sysdb
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +36,9 @@ type SystemDatabase interface {
 	Launch(ctx context.Context)
 	Pool() Pool
 	Dialect() Dialect
+	Schema() string                              // The schema the system tables live in
+	RenderSQL(format string, args ...any) string // Sprintf a pg-style query and rewrite it for the dialect
+	ObservabilityNames(names []string) []string  // nil scopes to this application; empty spans every application
 	// IsContentionError reports whether err is a lock/serialization contention
 	// error for the active backend. See Dialect.IsContentionError.
 	IsContentionError(err error) bool
@@ -48,11 +53,9 @@ type SystemDatabase interface {
 	SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration, failIfMissing bool) (*AwaitWorkflowResultOutput, error)
 	CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInput) ([]string, error)
-	CancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInput) error
 	ResumeWorkflows(ctx context.Context, input ResumeWorkflowsDBInput) ([]string, error)
 	ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) ([]string, error)
-	ForkFrom(ctx context.Context, input ForkFromDBInput) ([]string, error)
 	RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput) error
 
 	GetDeduplicatedWorkflow(ctx context.Context, queueName, deduplicationID string) (*string, error)
@@ -79,11 +82,6 @@ type SystemDatabase interface {
 	SetEvent(ctx context.Context, input WorkflowSetEventInput) error
 	StartEventListener(ctx context.Context, targetWorkflowID, key string) (*NotificationWaiter, error)
 	GetEventValue(ctx context.Context, q Querier, targetWorkflowID, key string) (*string, *string, error)
-
-	// Communication observability
-	GetAllEvents(ctx context.Context, workflowID string) ([]EventRecord, error)
-	GetAllNotifications(ctx context.Context, workflowID string) ([]NotificationRecord, error)
-	GetAllStreamEntries(ctx context.Context, workflowID string) ([]StreamEntry, error)
 
 	// Streams
 	WriteStream(ctx context.Context, input WriteStreamDBInput) error
@@ -118,12 +116,6 @@ type SystemDatabase interface {
 	UpdateQueueConfig(ctx context.Context, name string, mutate func(*models.QueueConfig) error) (*models.QueueConfig, error)
 	DeleteQueue(ctx context.Context, name string) error
 
-	// Garbage collection
-	GarbageCollectWorkflows(ctx context.Context, input GarbageCollectWorkflowsInput) error
-
-	// Metrics
-	GetMetrics(ctx context.Context, startTime string, endTime string, applicationNames []string) ([]MetricData, error)
-
 	// Schedules
 	CreateSchedule(ctx context.Context, input CreateScheduleDBInput) error
 	UpsertSchedule(ctx context.Context, input UpsertScheduleDBInput) error
@@ -141,20 +133,6 @@ type SystemDatabase interface {
 	ListApplicationVersions(ctx context.Context) ([]VersionInfo, error)
 	GetLatestApplicationVersion(ctx context.Context, tx Tx, applicationName string) (*VersionInfo, error)
 	RenameApplication(ctx context.Context, input RenameApplicationDBInput) (ApplicationRowCounts, error)
-
-	// Workflow export/import
-	ExportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error)
-	ImportWorkflow(ctx context.Context, workflows []ExportedWorkflow) error
-}
-
-// ExportedWorkflow contains all data for a single workflow, in a portable format suitable for
-// exporting from one environment and importing into another.
-type ExportedWorkflow struct {
-	WorkflowStatus        map[string]any   `json:"workflow_status"`
-	OperationOutputs      []map[string]any `json:"operation_outputs"`
-	WorkflowEvents        []map[string]any `json:"workflow_events"`
-	WorkflowEventsHistory []map[string]any `json:"workflow_events_history"`
-	Streams               []map[string]any `json:"streams"`
 }
 
 type SysDB struct {
@@ -185,9 +163,9 @@ func (s *SysDB) owner() *string {
 	return &name
 }
 
-// call observabilityNames with a nil parameter to get this system database's own application.
+// Call ObservabilityNames with a nil parameter to get this system database's own application.
 // pass an empty string or an empty slice to match all applications.
-func (s *SysDB) observabilityNames(names []string) []string {
+func (s *SysDB) ObservabilityNames(names []string) []string {
 	if names != nil || s.appName == "" {
 		return names
 	}
@@ -1100,7 +1078,6 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 
 		// Add acquire timeout to prevent indefinite blocking
 		config.ConnConfig.ConnectTimeout = 10 * time.Second
-		config.ConnConfig.OnNotice = forwardNotice
 
 		if config.ConnConfig.RuntimeParams == nil {
 			config.ConnConfig.RuntimeParams = make(map[string]string)
@@ -1723,7 +1700,7 @@ func (s *SysDB) ListWorkflows(ctx context.Context, input ListWorkflowsDBInput) (
 	// ID-keyed reads shouldn't be defaulted to this application.
 	appNames := input.ApplicationName
 	if appNames == nil && len(input.WorkflowIDs) == 0 {
-		appNames = s.observabilityNames(nil)
+		appNames = s.ObservabilityNames(nil)
 	}
 	qb.addWhereClaimedBy("application_name", appNames)
 	if !input.CompletedAfter.IsZero() {
@@ -2305,6 +2282,15 @@ type DeleteWorkflowsDBInput struct {
 	Tx             Tx
 }
 
+// Keyed by workflow_uuid with no foreign key on workflow_status.
+var payloadTables = []string{"workflow_input", "workflow_output", "operation_outputs"}
+
+// AdvisoryLockKey derives a pg advisory lock key from a name.
+func AdvisoryLockKey(name string) int64 {
+	sum := sha256.Sum256([]byte(name))
+	return int64(binary.BigEndian.Uint64(sum[:8])) // #nosec G115 -- the sign flip is the point: the key is a signed bigint
+}
+
 func (s *SysDB) DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInput) error {
 	// If no transaction is provided, create one so the entire operation is atomic
 	tx := input.Tx
@@ -2403,32 +2389,6 @@ func (s *SysDB) GetWorkflowChildren(ctx context.Context, input GetWorkflowChildr
 	}
 
 	return children, nil
-}
-
-func (s *SysDB) CancelAllBefore(ctx context.Context, cutoffTime time.Time) error {
-	// List all workflows in PENDING, ENQUEUED, or DELAYED state ending at cutoffTime
-	listInput := ListWorkflowsDBInput{
-		EndTime: cutoffTime,
-		Status:  []models.WorkflowStatusType{models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed},
-	}
-
-	workflows, err := s.ListWorkflows(ctx, listInput)
-	if err != nil {
-		return fmt.Errorf("failed to list workflows for cancellation: %w", err)
-	}
-
-	if len(workflows) == 0 {
-		return nil
-	}
-
-	ids := make([]string, len(workflows))
-	for i, workflow := range workflows {
-		ids[i] = workflow.ID
-	}
-	if _, err := s.CancelWorkflows(ctx, CancelWorkflowsDBInput{WorkflowIDs: ids}); err != nil {
-		return fmt.Errorf("failed to cancel workflows during cancelAllBefore: %w", err)
-	}
-	return nil
 }
 
 type ResumeWorkflowsDBInput struct {
@@ -3000,105 +2960,6 @@ func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput)
 		}
 	}
 	return nil
-}
-
-type ForkFromDBInput struct {
-	WorkflowIDs        []string
-	ApplicationVersion string
-	QueueName          string
-	QueuePartitionKey  string
-	FromLastFailure    bool
-	FromLastStep       bool
-	FromStep           *int
-	FromStepName       *string
-}
-
-// ForkFrom forks a batch of workflows, computing each workflow's start step
-// from its recorded checkpoints according to exactly one of four modes:
-// fromLastFailure (last step that recorded an error, falling back to the last step),
-// fromLastStep, fromStep (explicit step), or fromStepName (last occurrence of a named step).
-func (s *SysDB) ForkFrom(ctx context.Context, input ForkFromDBInput) ([]string, error) {
-	modes := 0
-	for _, set := range []bool{input.FromLastFailure, input.FromLastStep, input.FromStep != nil, input.FromStepName != nil} {
-		if set {
-			modes++
-		}
-	}
-	if modes != 1 {
-		return nil, errors.New("exactly one of fromLastFailure, fromLastStep, fromStep, or fromStepName must be specified")
-	}
-	if len(input.WorkflowIDs) == 0 {
-		return []string{}, nil
-	}
-
-	startSteps := make(map[string]int, len(input.WorkflowIDs))
-	if input.FromStep != nil {
-		for _, id := range input.WorkflowIDs {
-			startSteps[id] = *input.FromStep
-		}
-	} else {
-		idsParam, err := encodeArrayParam(s.dialect, input.WorkflowIDs)
-		if err != nil {
-			return nil, err
-		}
-		args := []any{idsParam}
-
-		var stepExpr string
-		switch {
-		case input.FromLastFailure:
-			stepExpr = "COALESCE(MAX(CASE WHEN error IS NOT NULL THEN function_id END), MAX(function_id))"
-		default: // fromLastStep and fromStepName
-			stepExpr = "MAX(function_id)"
-		}
-		nameFilter := ""
-		if input.FromStepName != nil {
-			nameFilter = " AND function_name = $2"
-			args = append(args, *input.FromStepName)
-		}
-
-		query := s.RenderSQL(`SELECT workflow_uuid, `+stepExpr+`
-			FROM %soperation_outputs
-			WHERE `+dialectAnyClause(s.dialect, "workflow_uuid", 1)+nameFilter+`
-			GROUP BY workflow_uuid`, s.dialect.SchemaPrefix(s.schema))
-
-		rows, err := s.pool.Query(ctx, query, args...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to query start steps: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var workflowID string
-			var startStep int
-			if err := rows.Scan(&workflowID, &startStep); err != nil {
-				return nil, fmt.Errorf("failed to scan start step: %w", err)
-			}
-			startSteps[workflowID] = startStep
-		}
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("failed to read start steps: %w", err)
-		}
-
-		for _, id := range input.WorkflowIDs {
-			if _, ok := startSteps[id]; !ok {
-				if input.FromStepName != nil {
-					return nil, fmt.Errorf("workflow %s has no step named '%s'", id, *input.FromStepName)
-				}
-				return nil, fmt.Errorf("workflow %s has no steps", id)
-			}
-		}
-	}
-
-	orderedStartSteps := make([]int, len(input.WorkflowIDs))
-	for i, id := range input.WorkflowIDs {
-		orderedStartSteps[i] = startSteps[id]
-	}
-	return s.ForkWorkflows(ctx, ForkWorkflowsDBInput{
-		OriginalWorkflowIDs: input.WorkflowIDs,
-		StartSteps:          orderedStartSteps,
-		ApplicationVersion:  input.ApplicationVersion,
-		QueueName:           input.QueueName,
-		QueuePartitionKey:   input.QueuePartitionKey,
-	})
 }
 
 type AwaitWorkflowResultOutput struct {
@@ -3856,7 +3717,7 @@ func (s *SysDB) GetWorkflowAggregates(ctx context.Context, input GetWorkflowAggr
 	if !input.DequeuedBefore.IsZero() {
 		qb.addWhereLessEqual("started_at_epoch_ms", input.DequeuedBefore.UnixMilli())
 	}
-	qb.addWhereClaimedBy("application_name", s.observabilityNames(input.ApplicationName))
+	qb.addWhereClaimedBy("application_name", s.ObservabilityNames(input.ApplicationName))
 
 	// Build select aggregates. MAX/MIN ignore NULLs, so workflows missing a
 	// started_at_epoch_ms or completed_at drop out of the queue-wait / latency maxima.
@@ -4070,7 +3931,7 @@ func (s *SysDB) GetStepAggregates(ctx context.Context, input GetStepAggregatesDB
 	if !input.CompletedBefore.IsZero() {
 		qb.addWhereLessEqual("completed_at_epoch_ms", input.CompletedBefore.UnixMilli())
 	}
-	qb.addWhereClaimedBy("application_name", s.observabilityNames(input.ApplicationName))
+	qb.addWhereClaimedBy("application_name", s.ObservabilityNames(input.ApplicationName))
 
 	// Build SELECT clause: group expressions aliased to "g0", "g1", ... so position is stable.
 	selectParts := make([]string, 0, len(groups)+len(selects))
@@ -4921,123 +4782,6 @@ func (s *SysDB) ReadStream(ctx context.Context, input ReadStreamDBInput) ([]Stre
 	return entries, closed, nil
 }
 
-// EventRecord is one row from the workflow_events table.
-type EventRecord struct {
-	Key           string
-	Value         string
-	Serialization string
-}
-
-// GetAllEvents returns every event row currently set on the workflow.
-func (s *SysDB) GetAllEvents(ctx context.Context, workflowID string) ([]EventRecord, error) {
-	query := s.RenderSQL(`SELECT key, value, serialization FROM %sworkflow_events WHERE workflow_uuid = $1`,
-		s.dialect.SchemaPrefix(s.schema))
-
-	rows, err := s.pool.Query(ctx, query, workflowID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query workflow events: %w", err)
-	}
-	defer rows.Close()
-
-	var events []EventRecord
-	for rows.Next() {
-		var rec EventRecord
-		var serialization *string
-		if err := rows.Scan(&rec.Key, &rec.Value, &serialization); err != nil {
-			return nil, fmt.Errorf("failed to scan event row: %w", err)
-		}
-		if serialization != nil {
-			rec.Serialization = *serialization
-		}
-		events = append(events, rec)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating event rows: %w", err)
-	}
-	return events, nil
-}
-
-// NotificationRecord is one row from the notifications table.
-// Topic is nil when the row stored the __null__topic__ sentinel.
-type NotificationRecord struct {
-	Topic            *string
-	Message          string
-	Serialization    string
-	CreatedAtEpochMs int64
-	Consumed         bool
-}
-
-// GetAllNotifications returns every notification sent to the workflow, ordered by arrival time.
-// The __null__topic__ sentinel is normalized back to a nil Topic.
-func (s *SysDB) GetAllNotifications(ctx context.Context, workflowID string) ([]NotificationRecord, error) {
-	query := s.RenderSQL(`SELECT topic, message, serialization, created_at_epoch_ms, consumed
-		FROM %snotifications
-		WHERE destination_uuid = $1
-		ORDER BY created_at_epoch_ms`,
-		s.dialect.SchemaPrefix(s.schema))
-
-	rows, err := s.pool.Query(ctx, query, workflowID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query notifications: %w", err)
-	}
-	defer rows.Close()
-
-	var results []NotificationRecord
-	for rows.Next() {
-		var rec NotificationRecord
-		var serialization *string
-		if err := rows.Scan(&rec.Topic, &rec.Message, &serialization, &rec.CreatedAtEpochMs, &rec.Consumed); err != nil {
-			return nil, fmt.Errorf("failed to scan notification row: %w", err)
-		}
-		if rec.Topic != nil && *rec.Topic == NullTopic {
-			rec.Topic = nil
-		}
-		if serialization != nil {
-			rec.Serialization = *serialization
-		}
-		results = append(results, rec)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating notification rows: %w", err)
-	}
-	return results, nil
-}
-
-// GetAllStreamEntries returns every stream entry for the workflow, ordered by (key, offset).
-// Rows holding the stream-closed sentinel are filtered out; callers may group by Key.
-func (s *SysDB) GetAllStreamEntries(ctx context.Context, workflowID string) ([]StreamEntry, error) {
-	query := s.RenderSQL(`SELECT key, value, "offset", serialization FROM %sstreams
-		WHERE workflow_uuid = $1
-		ORDER BY key, "offset"`,
-		s.dialect.SchemaPrefix(s.schema))
-
-	rows, err := s.pool.Query(ctx, query, workflowID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query streams: %w", err)
-	}
-	defer rows.Close()
-
-	var records []StreamEntry
-	for rows.Next() {
-		var rec StreamEntry
-		var serialization *string
-		if err := rows.Scan(&rec.Key, &rec.Value, &rec.Offset, &serialization); err != nil {
-			return nil, fmt.Errorf("failed to scan stream row: %w", err)
-		}
-		if rec.Value == StreamClosedSentinel {
-			continue
-		}
-		if serialization != nil {
-			rec.Serialization = *serialization
-		}
-		records = append(records, rec)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating stream rows: %w", err)
-	}
-	return records, nil
-}
-
 /*******************************/
 /******* QUEUES ********/
 /*******************************/
@@ -5793,7 +5537,7 @@ func (s *SysDB) getQueueRow(ctx context.Context, db Querier, name string) (*mode
 func (s *SysDB) ListQueues(ctx context.Context, applicationNames []string) ([]models.QueueConfig, error) {
 	query := s.RenderSQL(`SELECT `+_QUEUE_SELECT_COLUMNS+` FROM %squeues`, s.dialect.SchemaPrefix(s.schema))
 	var args []any
-	if names := s.observabilityNames(applicationNames); len(names) > 0 {
+	if names := s.ObservabilityNames(applicationNames); len(names) > 0 {
 		encoded, err := encodeArrayParam(s.dialect, names)
 		if err != nil {
 			return nil, fmt.Errorf("list queues: %w", err)
@@ -5962,138 +5706,6 @@ func (s *SysDB) UpdateQueueConfig(ctx context.Context, name string, mutate func(
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return q, nil
-}
-
-/*******************************/
-/******* METRICS ********/
-/*******************************/
-
-type MetricData struct {
-	MetricName string  `json:"metric_name"` // step name or workflow name
-	MetricType string  `json:"metric_type"` // workflow_count, step_count, etc
-	Value      float64 `json:"value"`
-}
-
-func (s *SysDB) GetMetrics(ctx context.Context, startTime, endTime string, applicationNames []string) ([]MetricData, error) {
-	// Parse ISO timestamp strings to time.Time
-	startTimeParsed, err := time.Parse(time.RFC3339, startTime)
-	if err != nil {
-		return nil, fmt.Errorf("invalid start_time format: %w", err)
-	}
-	endTimeParsed, err := time.Parse(time.RFC3339, endTime)
-	if err != nil {
-		return nil, fmt.Errorf("invalid end_time format: %w", err)
-	}
-
-	// Convert to epoch milliseconds
-	startEpochMs := startTimeParsed.UnixMilli()
-	endEpochMs := endTimeParsed.UnixMilli()
-
-	var metrics []MetricData
-
-	// Query workflow metrics
-	workflowMetrics, err := s.getMetricWorkflowCount(ctx, startEpochMs, endEpochMs, applicationNames)
-	if err != nil {
-		return nil, err
-	}
-	metrics = append(metrics, workflowMetrics...)
-
-	// Query step metrics
-	stepMetrics, err := s.getMetricStepCount(ctx, startEpochMs, endEpochMs, applicationNames)
-	if err != nil {
-		return nil, err
-	}
-	metrics = append(metrics, stepMetrics...)
-
-	return metrics, nil
-}
-
-func (s *SysDB) getMetricWorkflowCount(ctx context.Context, startEpochMs, endEpochMs int64, applicationNames []string) ([]MetricData, error) {
-	appNameClause := ""
-	args := []any{startEpochMs, endEpochMs}
-	if names := s.observabilityNames(applicationNames); len(names) > 0 {
-		encoded, err := encodeArrayParam(s.dialect, names)
-		if err != nil {
-			return nil, fmt.Errorf("workflow metrics: %w", err)
-		}
-		args = append(args, encoded)
-		appNameClause = " AND (" + dialectAnyClause(s.dialect, "application_name", len(args)) + " OR application_name IS NULL)"
-	}
-	workflowQuery := s.RenderSQL(`
-		SELECT name, COUNT(workflow_uuid) as count
-		FROM %sworkflow_status
-		WHERE created_at >= $1 AND created_at < $2`+appNameClause+`
-		GROUP BY name
-	`, s.dialect.SchemaPrefix(s.schema))
-
-	rows, err := s.pool.Query(ctx, workflowQuery, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query workflow metrics: %w", err)
-	}
-	defer rows.Close()
-
-	var metrics []MetricData
-	for rows.Next() {
-		var workflowName string
-		var workflowCount int64
-		if err := rows.Scan(&workflowName, &workflowCount); err != nil {
-			return nil, fmt.Errorf("failed to scan workflow metric: %w", err)
-		}
-		metrics = append(metrics, MetricData{
-			MetricType: "workflow_count",
-			MetricName: workflowName,
-			Value:      float64(workflowCount),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating workflow metrics: %w", err)
-	}
-
-	return metrics, nil
-}
-
-func (s *SysDB) getMetricStepCount(ctx context.Context, startEpochMs, endEpochMs int64, applicationNames []string) ([]MetricData, error) {
-	appNameClause := ""
-	args := []any{startEpochMs, endEpochMs}
-	if names := s.observabilityNames(applicationNames); len(names) > 0 {
-		encoded, err := encodeArrayParam(s.dialect, names)
-		if err != nil {
-			return nil, fmt.Errorf("step metrics: %w", err)
-		}
-		args = append(args, encoded)
-		appNameClause = " AND (" + dialectAnyClause(s.dialect, "application_name", len(args)) + " OR application_name IS NULL)"
-	}
-	stepQuery := s.RenderSQL(`
-		SELECT function_name, COUNT(*) as count
-		FROM %soperation_outputs
-		WHERE completed_at_epoch_ms >= $1 AND completed_at_epoch_ms < $2`+appNameClause+`
-		GROUP BY function_name
-	`, s.dialect.SchemaPrefix(s.schema))
-
-	rows, err := s.pool.Query(ctx, stepQuery, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query step metrics: %w", err)
-	}
-	defer rows.Close()
-
-	var metrics []MetricData
-	for rows.Next() {
-		var stepName string
-		var stepCount int64
-		if err := rows.Scan(&stepName, &stepCount); err != nil {
-			return nil, fmt.Errorf("failed to scan step metric: %w", err)
-		}
-		metrics = append(metrics, MetricData{
-			MetricType: "step_count",
-			MetricName: stepName,
-			Value:      float64(stepCount),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating step metrics: %w", err)
-	}
-
-	return metrics, nil
 }
 
 /*******************************/
@@ -6280,7 +5892,7 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 	var conds []string
 
 	// Either the context's application name (which can be empty => all applications), or the provided filters
-	if names := s.observabilityNames(input.ApplicationName); len(names) > 0 {
+	if names := s.ObservabilityNames(input.ApplicationName); len(names) > 0 {
 		encoded, err := encodeArrayParam(s.dialect, names)
 		if err != nil {
 			return nil, fmt.Errorf("list schedules: %w", err)
@@ -7399,434 +7011,4 @@ func RetryWithResult[T any](ctx context.Context, fn func() (T, error), options .
 	// Return retry's error directly: it is the final fn() error, or ctx.Err()
 	// when the context is cancelled during a backoff wait.
 	return result, Retry(ctx, wrappedFn, options...)
-}
-
-/*******
-import/export workflows, functions that have nothing to do here and that
-we'll move back in the section it belongs to some other day
-********/
-
-func (s *SysDB) ExportWorkflow(ctx context.Context, workflowID string, exportChildren bool) ([]ExportedWorkflow, error) {
-	tx, err := s.pool.BeginTx(ctx, TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction for exportWorkflow: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	workflowIDs := []string{workflowID}
-	if exportChildren {
-		children, err := s.GetWorkflowChildren(ctx, GetWorkflowChildrenDBInput{
-			WorkflowID: workflowID,
-			Tx:         tx,
-		})
-		if err != nil {
-			return nil, err
-		}
-		for _, child := range children {
-			workflowIDs = append(workflowIDs, child.ID)
-		}
-	}
-
-	exported := make([]ExportedWorkflow, 0, len(workflowIDs))
-
-	for _, wfID := range workflowIDs {
-		// Export workflow_status
-		statusQuery := s.RenderSQL(`SELECT
-				workflow_uuid, status, name, authenticated_user, assumed_role, authenticated_roles,
-				COALESCE(workflow_output.output, workflow_status.output),
-				COALESCE(workflow_output.error, workflow_status.error),
-				executor_id, created_at, updated_at, application_version, application_id,
-				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
-				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id,
-				COALESCE(workflow_input.inputs, workflow_status.inputs), priority,
-				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization,
-				was_forked_from, rate_limited, completed_at, attributes, schedule_name,
-				debounce_deadline_epoch_ms, is_debounced, application_name
-			FROM %sworkflow_status
-			LEFT JOIN %sworkflow_input USING (workflow_uuid)
-			LEFT JOIN %sworkflow_output USING (workflow_uuid)
-			WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema), s.dialect.SchemaPrefix(s.schema))
-
-		row := tx.QueryRow(ctx, statusQuery, wfID)
-		var (
-			wfUUID, status, name                                         *string
-			authUser, assumedRole, authRoles, output, errStr, executorID *string
-			appVersion, appID, className, configName, queueName          *string
-			dedupID, inputs, queuePartitionKey, forkedFrom               *string
-			parentWorkflowID                                             *string
-			createdAt, updatedAt, recoveryAttempts                       *int64
-			workflowTimeoutMs, workflowDeadlineEpochMs, startedAtEpochMs *int64
-			priority                                                     *int
-			delayUntilEpochMs                                            *int64
-			serialization                                                *string
-			wasForkedFrom, rateLimited, isDebounced                      *bool
-			completedAt, debounceDeadlineEpochMs                         *int64
-			attributes, wfScheduleName, applicationName                  *string
-		)
-		err := row.Scan(
-			&wfUUID, &status, &name, &authUser, &assumedRole, &authRoles,
-			&output, &errStr, &executorID, &createdAt, &updatedAt, &appVersion, &appID,
-			&className, &configName, &recoveryAttempts, &queueName, &workflowTimeoutMs,
-			&workflowDeadlineEpochMs, &startedAtEpochMs, &dedupID, &inputs, &priority,
-			&queuePartitionKey, &forkedFrom, &parentWorkflowID, &delayUntilEpochMs, &serialization,
-			&wasForkedFrom, &rateLimited, &completedAt, &attributes, &wfScheduleName,
-			&debounceDeadlineEpochMs, &isDebounced, &applicationName,
-		)
-		if err != nil {
-			if err == pgx.ErrNoRows {
-				return nil, models.NewNonExistentWorkflowError(wfID)
-			}
-			return nil, fmt.Errorf("failed to export workflow_status for %s: %w", wfID, err)
-		}
-
-		workflowStatus := map[string]any{
-			"workflow_uuid":              wfUUID,
-			"status":                     status,
-			"name":                       name,
-			"authenticated_user":         authUser,
-			"assumed_role":               assumedRole,
-			"authenticated_roles":        authRoles,
-			"output":                     output,
-			"error":                      errStr,
-			"executor_id":                executorID,
-			"created_at":                 createdAt,
-			"updated_at":                 updatedAt,
-			"application_version":        appVersion,
-			"application_id":             appID,
-			"class_name":                 className,
-			"config_name":                configName,
-			"recovery_attempts":          recoveryAttempts,
-			"queue_name":                 queueName,
-			"workflow_timeout_ms":        workflowTimeoutMs,
-			"workflow_deadline_epoch_ms": workflowDeadlineEpochMs,
-			"started_at_epoch_ms":        startedAtEpochMs,
-			"deduplication_id":           dedupID,
-			"inputs":                     inputs,
-			"priority":                   priority,
-			"queue_partition_key":        queuePartitionKey,
-			"forked_from":                forkedFrom,
-			"parent_workflow_id":         parentWorkflowID,
-			"delay_until_epoch_ms":       delayUntilEpochMs,
-			"serialization":              serialization,
-			"was_forked_from":            wasForkedFrom,
-			"rate_limited":               rateLimited,
-			"completed_at":               completedAt,
-			"attributes":                 attributes,
-			"schedule_name":              wfScheduleName,
-			"debounce_deadline_epoch_ms": debounceDeadlineEpochMs,
-			"is_debounced":               isDebounced,
-			"application_name":           applicationName,
-		}
-
-		// Export operation_outputs
-		outputsQuery := s.RenderSQL(`SELECT workflow_uuid, function_id, function_name, output, error,
-				child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms, serialization, application_name
-			FROM %soperation_outputs WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
-
-		outputRows, err := tx.Query(ctx, outputsQuery, wfID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to export operation_outputs for %s: %w", wfID, err)
-		}
-		var operationOutputs []map[string]any
-		for outputRows.Next() {
-			var opWfUUID, opFuncName *string
-			var opFuncID *int
-			var opOutput, opError, opChildWfID *string
-			var opStartedAt, opCompletedAt *int64
-			var opSerialization, opApplicationName *string
-			if err := outputRows.Scan(&opWfUUID, &opFuncID, &opFuncName, &opOutput, &opError, &opChildWfID, &opStartedAt, &opCompletedAt, &opSerialization, &opApplicationName); err != nil {
-				scanErr := fmt.Errorf("failed to scan operation_outputs row for %s: %w", wfID, err)
-				if cerr := outputRows.Close(); cerr != nil {
-					return nil, errors.Join(scanErr, fmt.Errorf("close operation_outputs rows: %w", cerr))
-				}
-				return nil, scanErr
-			}
-			operationOutputs = append(operationOutputs, map[string]any{
-				"workflow_uuid":         opWfUUID,
-				"function_id":           opFuncID,
-				"function_name":         opFuncName,
-				"output":                opOutput,
-				"error":                 opError,
-				"child_workflow_id":     opChildWfID,
-				"started_at_epoch_ms":   opStartedAt,
-				"completed_at_epoch_ms": opCompletedAt,
-				"serialization":         opSerialization,
-				"application_name":      opApplicationName,
-			})
-		}
-		if cerr := outputRows.Close(); cerr != nil {
-			return nil, fmt.Errorf("failed to close operation_outputs rows for %s: %w", wfID, cerr)
-		}
-		if err := outputRows.Err(); err != nil {
-			return nil, fmt.Errorf("error iterating operation_outputs for %s: %w", wfID, err)
-		}
-
-		// Export workflow_events
-		eventsQuery := s.RenderSQL(`SELECT workflow_uuid, key, value, serialization
-			FROM %sworkflow_events WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
-
-		eventRows, err := tx.Query(ctx, eventsQuery, wfID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to export workflow_events for %s: %w", wfID, err)
-		}
-		var workflowEvents []map[string]any
-		for eventRows.Next() {
-			var evWfUUID, evKey, evValue, evSerialization *string
-			if err := eventRows.Scan(&evWfUUID, &evKey, &evValue, &evSerialization); err != nil {
-				scanErr := fmt.Errorf("failed to scan workflow_events row for %s: %w", wfID, err)
-				if cerr := eventRows.Close(); cerr != nil {
-					return nil, errors.Join(scanErr, fmt.Errorf("close workflow_events rows: %w", cerr))
-				}
-				return nil, scanErr
-			}
-			workflowEvents = append(workflowEvents, map[string]any{
-				"workflow_uuid": evWfUUID,
-				"key":           evKey,
-				"value":         evValue,
-				"serialization": evSerialization,
-			})
-		}
-		if cerr := eventRows.Close(); cerr != nil {
-			return nil, fmt.Errorf("failed to close workflow_events rows for %s: %w", wfID, cerr)
-		}
-		if err := eventRows.Err(); err != nil {
-			return nil, fmt.Errorf("error iterating workflow_events for %s: %w", wfID, err)
-		}
-
-		// Export workflow_events_history
-		historyQuery := s.RenderSQL(`SELECT workflow_uuid, function_id, key, value, serialization
-			FROM %sworkflow_events_history WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
-
-		historyRows, err := tx.Query(ctx, historyQuery, wfID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to export workflow_events_history for %s: %w", wfID, err)
-		}
-		var workflowEventsHistory []map[string]any
-		for historyRows.Next() {
-			var hWfUUID, hKey, hValue, hSerialization *string
-			var hFuncID *int
-			if err := historyRows.Scan(&hWfUUID, &hFuncID, &hKey, &hValue, &hSerialization); err != nil {
-				scanErr := fmt.Errorf("failed to scan workflow_events_history row for %s: %w", wfID, err)
-				if cerr := historyRows.Close(); cerr != nil {
-					return nil, errors.Join(scanErr, fmt.Errorf("close workflow_events_history rows: %w", cerr))
-				}
-				return nil, scanErr
-			}
-			workflowEventsHistory = append(workflowEventsHistory, map[string]any{
-				"workflow_uuid": hWfUUID,
-				"function_id":   hFuncID,
-				"key":           hKey,
-				"value":         hValue,
-				"serialization": hSerialization,
-			})
-		}
-		if cerr := historyRows.Close(); cerr != nil {
-			return nil, fmt.Errorf("failed to close workflow_events_history rows for %s: %w", wfID, cerr)
-		}
-		if err := historyRows.Err(); err != nil {
-			return nil, fmt.Errorf("error iterating workflow_events_history for %s: %w", wfID, err)
-		}
-
-		// Export streams
-		streamsQuery := s.RenderSQL(`SELECT workflow_uuid, key, value, "offset", function_id, serialization
-			FROM %sstreams WHERE workflow_uuid = $1`, s.dialect.SchemaPrefix(s.schema))
-
-		streamRows, err := tx.Query(ctx, streamsQuery, wfID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to export streams for %s: %w", wfID, err)
-		}
-		var streams []map[string]any
-		for streamRows.Next() {
-			var sWfUUID, sKey, sValue, sSerialization *string
-			var sOffset, sFuncID *int
-			if err := streamRows.Scan(&sWfUUID, &sKey, &sValue, &sOffset, &sFuncID, &sSerialization); err != nil {
-				scanErr := fmt.Errorf("failed to scan streams row for %s: %w", wfID, err)
-				if cerr := streamRows.Close(); cerr != nil {
-					return nil, errors.Join(scanErr, fmt.Errorf("close streams rows: %w", cerr))
-				}
-				return nil, scanErr
-			}
-			streams = append(streams, map[string]any{
-				"workflow_uuid": sWfUUID,
-				"key":           sKey,
-				"value":         sValue,
-				"offset":        sOffset,
-				"function_id":   sFuncID,
-				"serialization": sSerialization,
-			})
-		}
-		if cerr := streamRows.Close(); cerr != nil {
-			return nil, fmt.Errorf("failed to close streams rows for %s: %w", wfID, cerr)
-		}
-		if err := streamRows.Err(); err != nil {
-			return nil, fmt.Errorf("error iterating streams for %s: %w", wfID, err)
-		}
-
-		exported = append(exported, ExportedWorkflow{
-			WorkflowStatus:        workflowStatus,
-			OperationOutputs:      operationOutputs,
-			WorkflowEvents:        workflowEvents,
-			WorkflowEventsHistory: workflowEventsHistory,
-			Streams:               streams,
-		})
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("failed to commit exportWorkflow transaction: %w", err)
-	}
-	return exported, nil
-}
-
-func (s *SysDB) ImportWorkflow(ctx context.Context, workflows []ExportedWorkflow) error {
-	tx, err := s.pool.BeginTx(ctx, TxOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction for importWorkflow: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	for _, wf := range workflows {
-		status := wf.WorkflowStatus
-
-		// Import workflow_status
-		insertStatusQuery := s.RenderSQL(`INSERT INTO %sworkflow_status (
-				workflow_uuid, status, name, authenticated_user, assumed_role, authenticated_roles,
-				executor_id, created_at, updated_at, application_version, application_id,
-				class_name, config_name, recovery_attempts, queue_name, workflow_timeout_ms,
-				workflow_deadline_epoch_ms, started_at_epoch_ms, deduplication_id, priority,
-				queue_partition_key, forked_from, parent_workflow_id, delay_until_epoch_ms, serialization,
-				was_forked_from, rate_limited, completed_at, attributes, schedule_name,
-				debounce_deadline_epoch_ms, is_debounced, application_name
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)`,
-			s.dialect.SchemaPrefix(s.schema))
-
-		// was_forked_from and rate_limited are NOT NULL; default them to false
-		// for payloads exported before these fields were included (older exports,
-		// or ones from an SDK that omits them), so importing them doesn't violate
-		// the constraint.
-		boolOrFalse := func(v any) bool {
-			switch b := v.(type) {
-			case bool:
-				return b
-			case *bool:
-				if b != nil {
-					return *b
-				}
-			}
-			return false
-		}
-		wasForkedFrom := boolOrFalse(status["was_forked_from"])
-		rateLimited := boolOrFalse(status["rate_limited"])
-		isDebounced := boolOrFalse(status["is_debounced"])
-
-		_, err := tx.Exec(ctx, insertStatusQuery,
-			status["workflow_uuid"], status["status"], status["name"],
-			status["authenticated_user"], status["assumed_role"], status["authenticated_roles"],
-			status["executor_id"],
-			status["created_at"], status["updated_at"], status["application_version"], status["application_id"],
-			status["class_name"], status["config_name"], status["recovery_attempts"], status["queue_name"],
-			status["workflow_timeout_ms"], status["workflow_deadline_epoch_ms"], status["started_at_epoch_ms"],
-			status["deduplication_id"], status["priority"],
-			status["queue_partition_key"], status["forked_from"], status["parent_workflow_id"],
-			status["delay_until_epoch_ms"], status["serialization"], wasForkedFrom,
-			rateLimited, status["completed_at"], status["attributes"], status["schedule_name"],
-			status["debounce_deadline_epoch_ms"], isDebounced, status["application_name"],
-		)
-		if err != nil {
-			return fmt.Errorf("failed to import workflow_status: %w", err)
-		}
-
-		// Retention starts at import: the retention timestamp defaults to now.
-		insertInputQuery := s.RenderSQL(`INSERT INTO %sworkflow_input (workflow_uuid, inputs)
-			VALUES ($1, $2)`, s.dialect.SchemaPrefix(s.schema))
-		if _, err := tx.Exec(ctx, insertInputQuery, status["workflow_uuid"], status["inputs"]); err != nil {
-			return fmt.Errorf("failed to import workflow_input: %w", err)
-		}
-		// Handle both path:
-		// 1) status comes straight from the DB, where a null column means v is a nil string
-		// 2) status comes from an export, in which case fields are stored in map[string]any and v != nil (because a nil string is stored as a nil interface{} in the map and a nil interface{} is not equal to nil)
-		hasOutcome := false
-		for _, v := range []any{status["output"], status["error"]} {
-			if p, ok := v.(*string); ok {
-				hasOutcome = hasOutcome || p != nil
-			} else {
-				hasOutcome = hasOutcome || v != nil
-			}
-		}
-		if hasOutcome {
-			insertOutputQuery := s.RenderSQL(`INSERT INTO %sworkflow_output (workflow_uuid, output, error)
-				VALUES ($1, $2, $3)`, s.dialect.SchemaPrefix(s.schema))
-			if _, err := tx.Exec(ctx, insertOutputQuery, status["workflow_uuid"], status["output"], status["error"]); err != nil {
-				return fmt.Errorf("failed to import workflow_output: %w", err)
-			}
-		}
-
-		// Import operation_outputs
-		for _, op := range wf.OperationOutputs {
-			insertOpQuery := s.RenderSQL(`INSERT INTO %soperation_outputs (
-					workflow_uuid, function_id, function_name, output, error,
-					child_workflow_id, started_at_epoch_ms, completed_at_epoch_ms, serialization, application_name
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-				s.dialect.SchemaPrefix(s.schema))
-
-			_, err := tx.Exec(ctx, insertOpQuery,
-				op["workflow_uuid"], op["function_id"], op["function_name"],
-				op["output"], op["error"], op["child_workflow_id"],
-				op["started_at_epoch_ms"], op["completed_at_epoch_ms"], op["serialization"],
-				op["application_name"],
-			)
-			if err != nil {
-				return fmt.Errorf("failed to import operation_outputs: %w", err)
-			}
-		}
-
-		// Import workflow_events
-		for _, ev := range wf.WorkflowEvents {
-			insertEvQuery := s.RenderSQL(`INSERT INTO %sworkflow_events (
-					workflow_uuid, key, value, serialization
-				) VALUES ($1, $2, $3, $4)`,
-				s.dialect.SchemaPrefix(s.schema))
-
-			_, err := tx.Exec(ctx, insertEvQuery,
-				ev["workflow_uuid"], ev["key"], ev["value"], ev["serialization"],
-			)
-			if err != nil {
-				return fmt.Errorf("failed to import workflow_events: %w", err)
-			}
-		}
-
-		// Import workflow_events_history
-		for _, h := range wf.WorkflowEventsHistory {
-			insertHistQuery := s.RenderSQL(`INSERT INTO %sworkflow_events_history (
-					workflow_uuid, function_id, key, value, serialization
-				) VALUES ($1, $2, $3, $4, $5)`,
-				s.dialect.SchemaPrefix(s.schema))
-
-			_, err := tx.Exec(ctx, insertHistQuery,
-				h["workflow_uuid"], h["function_id"], h["key"], h["value"], h["serialization"],
-			)
-			if err != nil {
-				return fmt.Errorf("failed to import workflow_events_history: %w", err)
-			}
-		}
-
-		// Import streams
-		for _, st := range wf.Streams {
-			insertStreamQuery := s.RenderSQL(`INSERT INTO %sstreams (
-					workflow_uuid, key, value, "offset", function_id, serialization
-				) VALUES ($1, $2, $3, $4, $5, $6)`,
-				s.dialect.SchemaPrefix(s.schema))
-
-			_, err := tx.Exec(ctx, insertStreamQuery,
-				st["workflow_uuid"], st["key"], st["value"], st["offset"], st["function_id"], st["serialization"],
-			)
-			if err != nil {
-				return fmt.Errorf("failed to import streams: %w", err)
-			}
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit importWorkflow transaction: %w", err)
-	}
-	return nil
 }

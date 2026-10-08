@@ -351,21 +351,6 @@ func decodeListingValue(encoded *string, storedSerialization string, customSer S
 	}
 }
 
-// listingValueJSON renders a listing value as JSON text for wire protocols
-// (conductor). Default JSON rows already carry their JSON text
-// as a string and pass through unchanged; decoded values (portable or custom
-// serializer rows) are marshaled.
-func listingValueJSON(v any) (string, bool) {
-	if s, ok := v.(string); ok && json.Valid([]byte(s)) {
-		return s, true
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return "", false
-	}
-	return string(b), true
-}
-
 // getCustomSerializerFromCtx extracts the user-provided custom serializer, if set.
 // It accepts any context but only real DBOS contexts (a Client or Context,
 // both *dbosContext under the hood) carry one; mocks and plain contexts yield nil.

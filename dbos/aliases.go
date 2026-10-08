@@ -43,6 +43,9 @@ type (
 	// RateLimiter configures rate limiting for workflow queue execution: at
 	// most Limit workflows start within each Period.
 	RateLimiter = models.RateLimiter
+
+	// QueueConfig is a queue's persisted configuration: the columns of the queues table.
+	QueueConfig = models.QueueConfig
 )
 
 const (
@@ -153,11 +156,6 @@ func PgxPool(p Pool) *pgxpool.Pool { return sysdb.PgxPool(p) }
 func SQLDB(p Pool) *sql.DB { return sysdb.SQLDB(p) }
 
 type (
-	// ExportedWorkflow contains all data for a single workflow, in a portable
-	// format suitable for exporting from one environment and importing into
-	// another.
-	ExportedWorkflow = sysdb.ExportedWorkflow
-
 	// VersionInfo describes a registered application version.
 	VersionInfo = sysdb.VersionInfo
 

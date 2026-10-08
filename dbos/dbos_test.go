@@ -2383,13 +2383,13 @@ func TestLaunchSkipsSelfRecoveryWithConductor(t *testing.T) {
 	require.NoError(t, ctxA.Shutdown(ctxA, 10*time.Second))
 
 	// Launch with Conductor: the PENDING row is left for Conductor to recover.
-	mockServer := newMockWebSocketServer()
-	t.Cleanup(mockServer.shutdown)
-	ctxB := newCtx(t, mockServer.getURL())
+	// The client itself lives in the enterprise module; a stand-in is enough here.
+	RegisterConductorFactory(fakeConductorFactory(&fakeConductor{}))
+	t.Cleanup(func() { RegisterConductorFactory(nil) })
+	ctxB := newCtx(t, "ws://conductor.invalid")
 	require.NotNil(t, ctxB.conductor)
 	setWorkflowExecutorID(t, ctxB, wfid, ctxB.executorID)
 	require.NoError(t, ctxB.Launch())
-	require.True(t, mockServer.waitForConnection(5*time.Second))
 	time.Sleep(500 * time.Millisecond)
 	pending, err := RetrieveWorkflow[string](ctxB, wfid)
 	require.NoError(t, err)
