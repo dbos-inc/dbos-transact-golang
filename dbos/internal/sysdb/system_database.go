@@ -2,8 +2,10 @@ package sysdb
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,9 +115,6 @@ type SystemDatabase interface {
 	UpsertQueue(ctx context.Context, input UpsertQueueDBInput) (bool, error)
 	UpdateQueueConfig(ctx context.Context, name string, mutate func(*models.QueueConfig) error) (*models.QueueConfig, error)
 	DeleteQueue(ctx context.Context, name string) error
-
-	// Maintenance
-	VacuumTables(ctx context.Context, tables []string) // VACUUM ANALYZE the named system tables, on Postgres only
 
 	// Schedules
 	CreateSchedule(ctx context.Context, input CreateScheduleDBInput) error
@@ -1079,7 +1078,6 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 
 		// Add acquire timeout to prevent indefinite blocking
 		config.ConnConfig.ConnectTimeout = 10 * time.Second
-		config.ConnConfig.OnNotice = forwardNotice
 
 		if config.ConnConfig.RuntimeParams == nil {
 			config.ConnConfig.RuntimeParams = make(map[string]string)
@@ -2282,6 +2280,15 @@ type DeleteWorkflowsDBInput struct {
 	WorkflowIDs    []string
 	DeleteChildren bool
 	Tx             Tx
+}
+
+// Keyed by workflow_uuid with no foreign key on workflow_status.
+var payloadTables = []string{"workflow_input", "workflow_output", "operation_outputs"}
+
+// AdvisoryLockKey derives a pg advisory lock key from a name.
+func AdvisoryLockKey(name string) int64 {
+	sum := sha256.Sum256([]byte(name))
+	return int64(binary.BigEndian.Uint64(sum[:8])) // #nosec G115 -- the sign flip is the point: the key is a signed bigint
 }
 
 func (s *SysDB) DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInput) error {
