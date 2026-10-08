@@ -51,7 +51,6 @@ type SystemDatabase interface {
 	SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error
 	AwaitWorkflowResult(ctx context.Context, workflowID string, pollInterval time.Duration, failIfMissing bool) (*AwaitWorkflowResultOutput, error)
 	CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInput) ([]string, error)
-	CancelAllBefore(ctx context.Context, cutoffTime time.Time) error
 	DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInput) error
 	ResumeWorkflows(ctx context.Context, input ResumeWorkflowsDBInput) ([]string, error)
 	ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) ([]string, error)
@@ -2403,32 +2402,6 @@ func (s *SysDB) GetWorkflowChildren(ctx context.Context, input GetWorkflowChildr
 	}
 
 	return children, nil
-}
-
-func (s *SysDB) CancelAllBefore(ctx context.Context, cutoffTime time.Time) error {
-	// List all workflows in PENDING, ENQUEUED, or DELAYED state ending at cutoffTime
-	listInput := ListWorkflowsDBInput{
-		EndTime: cutoffTime,
-		Status:  []models.WorkflowStatusType{models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed},
-	}
-
-	workflows, err := s.ListWorkflows(ctx, listInput)
-	if err != nil {
-		return fmt.Errorf("failed to list workflows for cancellation: %w", err)
-	}
-
-	if len(workflows) == 0 {
-		return nil
-	}
-
-	ids := make([]string, len(workflows))
-	for i, workflow := range workflows {
-		ids[i] = workflow.ID
-	}
-	if _, err := s.CancelWorkflows(ctx, CancelWorkflowsDBInput{WorkflowIDs: ids}); err != nil {
-		return fmt.Errorf("failed to cancel workflows during cancelAllBefore: %w", err)
-	}
-	return nil
 }
 
 type ResumeWorkflowsDBInput struct {
