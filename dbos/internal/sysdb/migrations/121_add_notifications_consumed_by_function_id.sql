@@ -2,4 +2,4 @@
 -- delete the messages the discarded run took delivery of.
 
 ALTER TABLE %s."notifications"
-    ADD COLUMN IF NOT EXISTS "consumed_by_function_id" INTEGER;
+    ADD COLUMN IF NOT EXISTS "consumed_by_function_id" INT4;
