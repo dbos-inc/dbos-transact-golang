@@ -16,7 +16,7 @@ import (
 
 func TestScheduleCRUD(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	// First register the workflows
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
@@ -258,7 +258,7 @@ func TestScheduleCRUD(t *testing.T) {
 
 func TestApplySchedules(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	// First register the workflow
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
@@ -372,7 +372,7 @@ func TestApplySchedules(t *testing.T) {
 // name are idempotent (upsert): one row, no error, and re-apply preserves schedule_id.
 func TestApplySchedulesConcurrent(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 	require.NoError(t, dbosCtx.Launch())
@@ -442,7 +442,7 @@ func TestApplySchedulesConcurrent(t *testing.T) {
 // picked up by the reconciler (signature change → restart) and new context is used.
 func TestApplySchedulesLiveUpdate(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	resetLiveUpdateVersionCounts()
 	RegisterWorkflow(dbosCtx, testLiveUpdateScheduledWorkflow)
@@ -492,7 +492,7 @@ func TestApplySchedulesLiveUpdate(t *testing.T) {
 // fields without clobbering status or last_fired_at.
 func TestApplySchedulesPreservesRuntimeState(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 	// No Launch needed: this test only exercises the DB upsert path.
@@ -588,7 +588,7 @@ func TestCalculateScheduleSignature(t *testing.T) {
 
 func TestApplySchedulesInvalidSignature(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	require.NoError(t, dbosCtx.Launch())
 
@@ -623,7 +623,7 @@ func TestApplySchedulesInvalidSignature(t *testing.T) {
 
 func TestScheduleCronValidation(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 	require.NoError(t, dbosCtx.Launch())
@@ -666,7 +666,7 @@ func TestScheduleCronValidation(t *testing.T) {
 
 func TestBackfillSchedule(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	// First register the workflow
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
@@ -717,7 +717,7 @@ func TestBackfillScheduleRecovery(t *testing.T) {
 	// A one-hour polling interval keeps the live scheduler from ever installing
 	// the every-second cron; backfill and recovery don't need it.
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: time.Hour})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	scheduledInputCapture = sync.Map{}
 	RegisterWorkflow(dbosCtx, testCapturingScheduledWorkflow)
@@ -789,7 +789,7 @@ func TestBackfillScheduleRecovery(t *testing.T) {
 
 func TestTriggerSchedule(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	scheduledInputCapture = sync.Map{}
 	RegisterWorkflow(dbosCtx, testCapturingScheduledWorkflow)
@@ -873,7 +873,7 @@ func TestTriggerSchedule(t *testing.T) {
 
 func TestScheduleWithOptions(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	// First register the workflow
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
@@ -998,7 +998,7 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 		return err == nil && len(before) >= 1
 	}, 3*time.Second, 50*time.Millisecond, "expected at least one successful run before shutdown")
 
-	dbosCtx.Shutdown(dbosCtx, 5 * time.Second)
+	dbosCtx.Shutdown(dbosCtx, 5*time.Second)
 
 	// Reset the event so the next Wait only returns after a post-restart fire.
 	backfillRestartFiredEvent.Clear()
@@ -1007,7 +1007,7 @@ func TestAutomaticBackfillOnRestart(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	dbosCtx2 := setupDBOS(t, setupDBOSOptions{dropDB: false, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx2.Shutdown(dbosCtx2, 5 * time.Second)
+	defer dbosCtx2.Shutdown(dbosCtx2, 5*time.Second)
 
 	RegisterWorkflow(dbosCtx2, testWorkflowForBackfillRestart)
 	require.NoError(t, dbosCtx2.Launch())
@@ -1055,7 +1055,7 @@ func testWorkflowExpectingTriggerScheduleError(ctx Context, _ string) (string, e
 // BackfillSchedule, and TriggerSchedule reject calls from within a workflow.
 func TestScheduleWorkflowInternalRejections(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 	RegisterWorkflow(dbosCtx, testWorkflowExpectingApplySchedulesError)
@@ -1088,7 +1088,7 @@ func TestScheduleWorkflowInternalRejections(t *testing.T) {
 // wall-clock reference should fall at the configured hour in that tz.
 func TestScheduleCronTimezone(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 5 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 5*time.Second)
 
 	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
 	require.NoError(t, dbosCtx.Launch())
@@ -1126,64 +1126,17 @@ func TestScheduleCronTimezone(t *testing.T) {
 	require.Equal(t, 15, next.Day())
 }
 
-func TestScheduleNameSurvivesExportImport(t *testing.T) {
-	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
-
-	RegisterWorkflow(dbosCtx, testWorkflowForSchedule)
-	require.NoError(t, dbosCtx.Launch())
-
-	require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
-		ScheduleName: "export-test",
-		Schedule:     "0 0 0 * * *", // daily, won't fire during the test,
-		Workflow:     testWorkflowForSchedule,
-	}))
-	t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, "export-test") })
-
-	handle, err := TriggerSchedule[any](dbosCtx, "export-test")
-	require.NoError(t, err)
-	_, err = handle.GetResult()
-	require.NoError(t, err)
-	workflowID := handle.GetWorkflowID()
-
-	original, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
-	require.NoError(t, err)
-	require.Len(t, original, 1)
-	require.Equal(t, "export-test", original[0].ScheduleName)
-
-	// Export, delete, then reimport: schedule_name must survive the round-trip.
-	sdb := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
-	exported, err := sdb.ExportWorkflow(dbosCtx, workflowID, true)
-	require.NoError(t, err)
-	require.NoError(t, DeleteWorkflows(dbosCtx, []string{workflowID}))
-	gone, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
-	require.NoError(t, err)
-	require.Empty(t, gone)
-
-	require.NoError(t, sdb.ImportWorkflow(dbosCtx, exported))
-	imported, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
-	require.NoError(t, err)
-	require.Len(t, imported, 1)
-	require.Equal(t, "export-test", imported[0].ScheduleName)
-
-	// The reimported run is still found by the schedule name filter.
-	byName, err := ListWorkflows(dbosCtx, WithFilterScheduleName("export-test"))
-	require.NoError(t, err)
-	require.Len(t, byName, 1)
-	require.Equal(t, workflowID, byName[0].ID)
-}
-
 // A schedule can fire on an executor that does not have the target workflow
 // registered: the tick enqueues by name and name resolution happens at dequeue
 // time on a worker that has the function.
 func TestScheduleFiresWithoutLocalRegistration(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true, schedulerPollingInterval: 100 * time.Millisecond})
-	defer dbosCtx.Shutdown(dbosCtx, 10 * time.Second)
+	defer dbosCtx.Shutdown(dbosCtx, 10*time.Second)
 	require.NoError(t, dbosCtx.Launch())
 
 	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Shutdown(client, 30 * time.Second) })
+	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
 
 	const scheduleName = "unregistered-workflow-schedule"
 	const workflowName = "workflowRegisteredOnAnotherWorker"

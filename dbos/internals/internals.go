@@ -41,9 +41,15 @@ type (
 	SystemDatabase = sysdb.SystemDatabase // The interface
 	Dialect        = sysdb.Dialect        // The SQL dialect of the system database
 
+	// These are internal types, not importable from outside the OSS package
+	// We alias them publicly for the commercial package to use
 	GarbageCollectWorkflowsInput = sysdb.GarbageCollectWorkflowsInput
 	DeleteWorkflowsInput         = sysdb.DeleteWorkflowsDBInput
 	BackfillScheduleInput        = sysdb.BackfillScheduleDBInput
+	GetWorkflowChildrenInput     = sysdb.GetWorkflowChildrenDBInput
+
+	Tx        = sysdb.Tx        // A transaction on the system database pool
+	TxOptions = sysdb.TxOptions // Options for Pool().BeginTx
 )
 
 // Retry are not part of the SystemDatabase interface today
