@@ -54,7 +54,6 @@ type SystemDatabase interface {
 	DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInput) error
 	ResumeWorkflows(ctx context.Context, input ResumeWorkflowsDBInput) ([]string, error)
 	ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) ([]string, error)
-	ForkFrom(ctx context.Context, input ForkFromDBInput) ([]string, error)
 	RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput) error
 
 	GetDeduplicatedWorkflow(ctx context.Context, queueName, deduplicationID string) (*string, error)
@@ -2968,105 +2967,6 @@ func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput)
 		}
 	}
 	return nil
-}
-
-type ForkFromDBInput struct {
-	WorkflowIDs        []string
-	ApplicationVersion string
-	QueueName          string
-	QueuePartitionKey  string
-	FromLastFailure    bool
-	FromLastStep       bool
-	FromStep           *int
-	FromStepName       *string
-}
-
-// ForkFrom forks a batch of workflows, computing each workflow's start step
-// from its recorded checkpoints according to exactly one of four modes:
-// fromLastFailure (last step that recorded an error, falling back to the last step),
-// fromLastStep, fromStep (explicit step), or fromStepName (last occurrence of a named step).
-func (s *SysDB) ForkFrom(ctx context.Context, input ForkFromDBInput) ([]string, error) {
-	modes := 0
-	for _, set := range []bool{input.FromLastFailure, input.FromLastStep, input.FromStep != nil, input.FromStepName != nil} {
-		if set {
-			modes++
-		}
-	}
-	if modes != 1 {
-		return nil, errors.New("exactly one of fromLastFailure, fromLastStep, fromStep, or fromStepName must be specified")
-	}
-	if len(input.WorkflowIDs) == 0 {
-		return []string{}, nil
-	}
-
-	startSteps := make(map[string]int, len(input.WorkflowIDs))
-	if input.FromStep != nil {
-		for _, id := range input.WorkflowIDs {
-			startSteps[id] = *input.FromStep
-		}
-	} else {
-		idsParam, err := encodeArrayParam(s.dialect, input.WorkflowIDs)
-		if err != nil {
-			return nil, err
-		}
-		args := []any{idsParam}
-
-		var stepExpr string
-		switch {
-		case input.FromLastFailure:
-			stepExpr = "COALESCE(MAX(CASE WHEN error IS NOT NULL THEN function_id END), MAX(function_id))"
-		default: // fromLastStep and fromStepName
-			stepExpr = "MAX(function_id)"
-		}
-		nameFilter := ""
-		if input.FromStepName != nil {
-			nameFilter = " AND function_name = $2"
-			args = append(args, *input.FromStepName)
-		}
-
-		query := s.RenderSQL(`SELECT workflow_uuid, `+stepExpr+`
-			FROM %soperation_outputs
-			WHERE `+dialectAnyClause(s.dialect, "workflow_uuid", 1)+nameFilter+`
-			GROUP BY workflow_uuid`, s.dialect.SchemaPrefix(s.schema))
-
-		rows, err := s.pool.Query(ctx, query, args...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to query start steps: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var workflowID string
-			var startStep int
-			if err := rows.Scan(&workflowID, &startStep); err != nil {
-				return nil, fmt.Errorf("failed to scan start step: %w", err)
-			}
-			startSteps[workflowID] = startStep
-		}
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("failed to read start steps: %w", err)
-		}
-
-		for _, id := range input.WorkflowIDs {
-			if _, ok := startSteps[id]; !ok {
-				if input.FromStepName != nil {
-					return nil, fmt.Errorf("workflow %s has no step named '%s'", id, *input.FromStepName)
-				}
-				return nil, fmt.Errorf("workflow %s has no steps", id)
-			}
-		}
-	}
-
-	orderedStartSteps := make([]int, len(input.WorkflowIDs))
-	for i, id := range input.WorkflowIDs {
-		orderedStartSteps[i] = startSteps[id]
-	}
-	return s.ForkWorkflows(ctx, ForkWorkflowsDBInput{
-		OriginalWorkflowIDs: input.WorkflowIDs,
-		StartSteps:          orderedStartSteps,
-		ApplicationVersion:  input.ApplicationVersion,
-		QueueName:           input.QueueName,
-		QueuePartitionKey:   input.QueuePartitionKey,
-	})
 }
 
 type AwaitWorkflowResultOutput struct {

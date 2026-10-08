@@ -41,7 +41,6 @@ type (
 	SystemDatabase = sysdb.SystemDatabase // The interface
 	Dialect        = sysdb.Dialect        // The SQL dialect of the system database
 
-	ForkFromInput                = sysdb.ForkFromDBInput
 	GarbageCollectWorkflowsInput = sysdb.GarbageCollectWorkflowsInput
 	DeleteWorkflowsInput         = sysdb.DeleteWorkflowsDBInput
 	BackfillScheduleInput        = sysdb.BackfillScheduleDBInput

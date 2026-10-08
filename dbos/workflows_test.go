@@ -11755,37 +11755,6 @@ func TestWorkflowAttributes(t *testing.T) {
 func TestFork(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
-	// Workflow whose second and third steps fail on their first call, for fork-from-failure tests.
-	var failStepOneCount, failStepTwoCount, failStepThreeCount atomic.Int64
-	failableWorkflow := func(ctx Context, _ string) (int, error) {
-		one, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
-			failStepOneCount.Add(1)
-			return 1, nil
-		}, WithStepName("stepOne"))
-		if err != nil {
-			return 0, err
-		}
-		two, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
-			if failStepTwoCount.Add(1) == 1 { // fail on first call only (wf1)
-				return 0, errors.New("step two failed")
-			}
-			return 2, nil
-		}, WithStepName("stepTwo"))
-		if err != nil {
-			return 0, err
-		}
-		three, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
-			if failStepThreeCount.Add(1) == 1 { // fail on first call only (wf2)
-				return 0, errors.New("step three failed")
-			}
-			return 3, nil
-		}, WithStepName("stepThree"))
-		if err != nil {
-			return 0, err
-		}
-		return one + two + three, nil
-	}
-
 	// Always-succeeding workflow for bulk fork tests.
 	var stepOneCount, stepTwoCount, stepThreeCount atomic.Int64
 	threeStepWorkflow := func(ctx Context, _ string) (int, error) {
@@ -11805,35 +11774,6 @@ func TestFork(t *testing.T) {
 		}
 		three, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
 			stepThreeCount.Add(1)
-			return 3, nil
-		}, WithStepName("stepThree"))
-		if err != nil {
-			return 0, err
-		}
-		return one + two + three, nil
-	}
-
-	// Workflow that catches its second step's error and continues, so its last
-	// failed step (1) differs from its last step (2) — distinguishing
-	// fromLastFailure from fromLastStep.
-	var caughtStepTwoCount atomic.Int64
-	caughtFailureWorkflow := func(ctx Context, _ string) (int, error) {
-		one, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
-			return 1, nil
-		}, WithStepName("stepOne"))
-		if err != nil {
-			return 0, err
-		}
-		two, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
-			if caughtStepTwoCount.Add(1) == 1 { // fail on first call only
-				return 0, errors.New("step two failed")
-			}
-			return 2, nil
-		}, WithStepName("stepTwo"))
-		if err != nil {
-			two = 0 // swallow the error and continue
-		}
-		three, err := RunAsStep(ctx, func(ctx context.Context) (int, error) {
 			return 3, nil
 		}, WithStepName("stepThree"))
 		if err != nil {
@@ -11892,9 +11832,7 @@ func TestFork(t *testing.T) {
 		}, WithStepName("combine"))
 	}
 
-	RegisterWorkflow(dbosCtx, failableWorkflow, WithWorkflowName("failableThreeStepWorkflow"))
 	RegisterWorkflow(dbosCtx, threeStepWorkflow, WithWorkflowName("bulkForkWorkflow"))
-	RegisterWorkflow(dbosCtx, caughtFailureWorkflow, WithWorkflowName("caughtFailureWorkflow"))
 	RegisterWorkflow(dbosCtx, blockingWorkflow, WithWorkflowName("forkTimeoutWorkflow"))
 	RegisterWorkflow(dbosCtx, multiplyChild, WithWorkflowName("replacementChildWorkflow"))
 	RegisterWorkflow(dbosCtx, sumParent, WithWorkflowName("replacementParentWorkflow"))
@@ -11916,174 +11854,6 @@ func TestFork(t *testing.T) {
 	})
 
 	sysDB := dbosCtx.(*dbosContext).systemDB
-
-	t.Run("FromFailure", func(t *testing.T) {
-		runToFailure := func(expectedErr string) string {
-			wfID := uuid.NewString()
-			handle, err := RunWorkflow(dbosCtx, failableWorkflow, "", WithWorkflowID(wfID))
-			require.NoError(t, err)
-			_, err = handle.GetResult()
-			require.ErrorContains(t, err, expectedErr)
-			return wfID
-		}
-
-		awaitForks := func(forkedIDs []string) {
-			for _, fid := range forkedIDs {
-				fh, err := RetrieveWorkflow[int](dbosCtx, fid)
-				require.NoError(t, err)
-				res, err := fh.GetResult()
-				require.NoError(t, err)
-				require.Equal(t, 6, res)
-			}
-		}
-
-		// wf1: step two fails -> last failed step is 1
-		wf1ID := runToFailure("step two failed")
-		require.Equal(t, int64(1), failStepOneCount.Load())
-		require.Equal(t, int64(1), failStepTwoCount.Load())
-		require.Equal(t, int64(0), failStepThreeCount.Load())
-
-		// wf2: step two succeeds, step three fails -> last failed step is 2
-		wf2ID := runToFailure("step three failed")
-		require.Equal(t, int64(2), failStepOneCount.Load())
-		require.Equal(t, int64(2), failStepTwoCount.Load())
-		require.Equal(t, int64(1), failStepThreeCount.Load())
-
-		// wf3: all steps succeed -> no failed step, falls back to last step (2)
-		wf3ID := uuid.NewString()
-		handle, err := RunWorkflow(dbosCtx, failableWorkflow, "", WithWorkflowID(wf3ID))
-		require.NoError(t, err)
-		res, err := handle.GetResult()
-		require.NoError(t, err)
-		require.Equal(t, 6, res)
-		require.Equal(t, int64(3), failStepOneCount.Load())
-		require.Equal(t, int64(3), failStepTwoCount.Load())
-		require.Equal(t, int64(2), failStepThreeCount.Load())
-
-		t.Run("FromLastFailure", func(t *testing.T) {
-			forkedIDs, err := sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
-				WorkflowIDs:     []string{wf1ID, wf2ID, wf3ID},
-				FromLastFailure: true,
-			})
-			require.NoError(t, err)
-			require.Len(t, forkedIDs, 3)
-			awaitForks(forkedIDs)
-
-			require.Equal(t, int64(3), failStepOneCount.Load())   // replayed for all three forks
-			require.Equal(t, int64(4), failStepTwoCount.Load())   // re-run for wf1's fork only
-			require.Equal(t, int64(5), failStepThreeCount.Load()) // re-run for all three forks
-
-			// A fork also marks its source was_forked_from.
-			srcs, err := sysDB.ListWorkflows(dbosCtx, sysdb.ListWorkflowsDBInput{WorkflowIDs: []string{wf1ID}})
-			require.NoError(t, err)
-			require.Len(t, srcs, 1)
-			require.True(t, srcs[0].WasForkedFrom, "a forked-from workflow should be marked was_forked_from")
-		})
-
-		t.Run("FromLastStep", func(t *testing.T) {
-			forkedIDs, err := sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
-				WorkflowIDs:  []string{wf1ID, wf2ID, wf3ID},
-				FromLastStep: true,
-			})
-			require.NoError(t, err)
-			require.Len(t, forkedIDs, 3)
-			awaitForks(forkedIDs)
-
-			// wf1's last step is stepTwo (stepThree never ran), so stepTwo re-runs
-			require.Equal(t, int64(5), failStepTwoCount.Load())
-			// all three forks re-run stepThree
-			require.Equal(t, int64(8), failStepThreeCount.Load())
-		})
-
-		t.Run("FromStep", func(t *testing.T) {
-			startStep := 0
-			forkedIDs, err := sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
-				WorkflowIDs: []string{wf3ID},
-				FromStep:    &startStep,
-			})
-			require.NoError(t, err)
-			require.Len(t, forkedIDs, 1)
-			awaitForks(forkedIDs)
-
-			require.Equal(t, int64(4), failStepOneCount.Load())
-			require.Equal(t, int64(6), failStepTwoCount.Load())
-			require.Equal(t, int64(9), failStepThreeCount.Load())
-		})
-
-		t.Run("FromStepName", func(t *testing.T) {
-			stepName := "stepTwo"
-			forkedIDs, err := sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
-				WorkflowIDs:  []string{wf3ID},
-				FromStepName: &stepName,
-			})
-			require.NoError(t, err)
-			require.Len(t, forkedIDs, 1)
-			awaitForks(forkedIDs)
-
-			require.Equal(t, int64(4), failStepOneCount.Load())    // replayed
-			require.Equal(t, int64(7), failStepTwoCount.Load())    // re-run
-			require.Equal(t, int64(10), failStepThreeCount.Load()) // re-run
-		})
-
-		t.Run("Validation", func(t *testing.T) {
-			// wf1 never ran stepThree
-			missingName := "stepThree"
-			_, err := sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
-				WorkflowIDs:  []string{wf1ID},
-				FromStepName: &missingName,
-			})
-			require.ErrorContains(t, err, "has no step named")
-
-			nonexistent := "nonexistentStep"
-			_, err = sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
-				WorkflowIDs:  []string{wf3ID},
-				FromStepName: &nonexistent,
-			})
-			require.ErrorContains(t, err, "has no step named")
-
-			// no mode specified
-			_, err = sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
-				WorkflowIDs: []string{wf3ID},
-			})
-			require.ErrorContains(t, err, "exactly one")
-
-			// multiple modes specified
-			_, err = sysDB.ForkFrom(dbosCtx, sysdb.ForkFromDBInput{
-				WorkflowIDs:     []string{wf3ID},
-				FromLastFailure: true,
-				FromLastStep:    true,
-			})
-			require.ErrorContains(t, err, "exactly one")
-		})
-
-		t.Run("LastFailureVsLastStep", func(t *testing.T) {
-			wfID := uuid.NewString()
-			handle, err := RunWorkflow(dbosCtx, caughtFailureWorkflow, "", WithWorkflowID(wfID))
-			require.NoError(t, err)
-			res, err := handle.GetResult()
-			require.NoError(t, err)
-			require.Equal(t, 4, res) // stepTwo's error was caught, so two contributes 0
-
-			forkAndGet := func(input sysdb.ForkFromDBInput) int {
-				input.WorkflowIDs = []string{wfID}
-				forkedIDs, err := sysDB.ForkFrom(dbosCtx, input)
-				require.NoError(t, err)
-				require.Len(t, forkedIDs, 1)
-				fh, err := RetrieveWorkflow[int](dbosCtx, forkedIDs[0])
-				require.NoError(t, err)
-				res, err := fh.GetResult()
-				require.NoError(t, err)
-				return res
-			}
-
-			// fromLastStep starts at the last step (stepThree): stepTwo's
-			// checkpointed error replays and is caught again.
-			require.Equal(t, 4, forkAndGet(sysdb.ForkFromDBInput{FromLastStep: true}))
-			// fromLastFailure starts at the failed step (stepTwo) even though a
-			// later step succeeded: stepTwo re-runs and succeeds this time.
-			require.Equal(t, 6, forkAndGet(sysdb.ForkFromDBInput{FromLastFailure: true}))
-		})
-	})
 
 	t.Run("ForkWorkflows", func(t *testing.T) {
 		// Run three workflows to completion
