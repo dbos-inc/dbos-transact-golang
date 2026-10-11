@@ -10620,6 +10620,20 @@ func attrDebouncedWorkflow(dbosCtx Context, x int) (int, error) {
 	return x, nil
 }
 
+func attrUpdatingWorkflow(dbosCtx Context, _ int) (int, error) {
+	id, err := GetWorkflowID(dbosCtx)
+	if err != nil {
+		return 0, err
+	}
+	if err := SetWorkflowAttributes(dbosCtx, id, map[string]any{"phase": "running"}); err != nil {
+		return 0, err
+	}
+	if err := SetWorkflowAttributes(dbosCtx, id, map[string]any{"progress": 50}, WithMergeAttributes()); err != nil {
+		return 0, err
+	}
+	return 1, nil
+}
+
 func TestWorkflowAttributes(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	databaseURL := backendDatabaseURL(t) // resolve here: a subtest's t gets its own sqlite file
@@ -10629,6 +10643,7 @@ func TestWorkflowAttributes(t *testing.T) {
 	RegisterWorkflow(dbosCtx, attrNoopWorkflow)
 	RegisterWorkflow(dbosCtx, attrBlockingWorkflow)
 	RegisterWorkflow(dbosCtx, attrDebouncedWorkflow)
+	RegisterWorkflow(dbosCtx, attrUpdatingWorkflow)
 
 	queue, err := RegisterQueue(dbosCtx, "attr-test-queue")
 	require.NoError(t, err)
@@ -10853,6 +10868,244 @@ func TestWorkflowAttributes(t *testing.T) {
 		var dbosErr *Error
 		require.ErrorAs(t, err, &dbosErr)
 		assert.Equal(t, ErrorCodeNonExistentWorkflow, dbosErr.Code)
+	})
+
+	t.Run("Merge", func(t *testing.T) {
+		wfid := uuid.NewString()
+		handle, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 1, WithWorkflowID(wfid), WithWorkflowAttributes(map[string]any{"customer": "acme", "tier": 1}))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		// Merge keeps unrelated keys, replaces matching keys, and is shallow.
+		require.NoError(t, SetWorkflowAttributes(dbosCtx, wfid, map[string]any{
+			"tier":     3,
+			"nested":   map[string]any{"old": 1},
+			"nullable": nil,
+		}, WithMergeAttributes()))
+		require.NoError(t, SetWorkflowAttributes(dbosCtx, wfid, map[string]any{
+			"nested": map[string]any{"new": 2},
+			"a.b":    1,
+		}, WithMergeAttributes()))
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"customer": "acme",
+			"tier":     float64(3),
+			"nested":   map[string]any{"new": float64(2)},
+			"nullable": nil,
+			"a.b":      float64(1),
+		}, status.Attributes)
+
+		// Keys that need escaping in JSON paths, and values of every JSON type.
+		special := map[string]any{
+			"a[0]":  1,
+			"$":     2,
+			"a b":   3,
+			"a'b":   4,
+			"a\\b":  5,
+			"é":     6,
+			"日本":    7,
+			"":      8,
+			"list":  []any{1, "two", nil},
+			"float": 1.5,
+			"bool":  false,
+			"text":  `it's "quoted"`,
+		}
+		require.NoError(t, SetWorkflowAttributes(dbosCtx, wfid, special, WithMergeAttributes()))
+		require.NoError(t, SetWorkflowAttributes(dbosCtx, wfid, map[string]any{"é": "again", "a[0]": nil}, WithMergeAttributes()))
+		expected := map[string]any{
+			"customer": "acme",
+			"tier":     float64(3),
+			"nested":   map[string]any{"new": float64(2)},
+			"nullable": nil,
+			"a.b":      float64(1),
+			"a[0]":     nil,
+			"$":        float64(2),
+			"a b":      float64(3),
+			"a'b":      float64(4),
+			"a\\b":     float64(5),
+			"é":        "again",
+			"日本":       float64(7),
+			"":         float64(8),
+			"list":     []any{float64(1), "two", nil},
+			"float":    1.5,
+			"bool":     false,
+			"text":     `it's "quoted"`,
+		}
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, expected, status.Attributes)
+
+		// Merging an empty map changes nothing.
+		require.NoError(t, SetWorkflowAttributes(dbosCtx, wfid, map[string]any{}, WithMergeAttributes()))
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, expected, status.Attributes)
+
+		// A cleared workflow can gain attributes through a merge.
+		require.NoError(t, SetWorkflowAttributes(dbosCtx, wfid, nil))
+		require.NoError(t, SetWorkflowAttributes(dbosCtx, wfid, map[string]any{"merged": true}, WithMergeAttributes()))
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"merged": true}, status.Attributes)
+
+		// A nil map cannot be merged, and the previous value stays.
+		err = SetWorkflowAttributes(dbosCtx, wfid, nil, WithMergeAttributes())
+		require.ErrorIs(t, err, ErrInvalidOption)
+		assert.ErrorContains(t, err, "cannot merge nil")
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"merged": true}, status.Attributes)
+
+		err = SetWorkflowAttributes(dbosCtx, "does-not-exist-"+uuid.NewString(), map[string]any{"k": "v"}, WithMergeAttributes())
+		require.ErrorIs(t, err, ErrNonExistentWorkflow)
+	})
+
+	t.Run("MergeManyKeys", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 1, WithWorkflowAttributes(map[string]any{"k0": "old", "keep": true}))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		// Enough keys to span several SQLite json_set chunks.
+		many := make(map[string]any, 300)
+		expected := map[string]any{"keep": true}
+		for i := range 300 {
+			key := fmt.Sprintf("k%d", i)
+			many[key] = i
+			expected[key] = float64(i)
+		}
+		require.NoError(t, SetWorkflowAttributes(dbosCtx, handle.GetWorkflowID(), many, WithMergeAttributes()))
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, expected, status.Attributes)
+	})
+
+	t.Run("MergeConcurrently", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 1)
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		errCh := make(chan error, 8)
+		for i := range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				err := SetWorkflowAttributes(dbosCtx, handle.GetWorkflowID(), map[string]any{
+					fmt.Sprintf("%d", i): i,
+					"last":               i,
+				}, WithMergeAttributes())
+				if err != nil {
+					errCh <- err
+				}
+			}()
+		}
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			require.NoError(t, err)
+		}
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		require.NotNil(t, status.Attributes)
+		last, ok := status.Attributes["last"].(float64)
+		require.True(t, ok, "last attribute should be a number, got %#v", status.Attributes["last"])
+		assert.Contains(t, []float64{0, 1, 2, 3, 4, 5, 6, 7}, last)
+		delete(status.Attributes, "last")
+		expected := make(map[string]any, 8)
+		for i := range 8 {
+			expected[fmt.Sprintf("%d", i)] = float64(i)
+		}
+		assert.Equal(t, expected, status.Attributes)
+	})
+
+	t.Run("MergeAfterRewind", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 1, WithWorkflowAttributes(map[string]any{"source": "original"}))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		for attempt := 1; attempt <= 2; attempt++ {
+			rewound, err := RewindWorkflow[int](dbosCtx, handle.GetWorkflowID())
+			require.NoError(t, err)
+			_, err = rewound.GetResult()
+			require.NoError(t, err)
+			require.NoError(t, SetWorkflowAttributes(dbosCtx, handle.GetWorkflowID(), map[string]any{
+				fmt.Sprintf("rewind_%d", attempt): true,
+			}, WithMergeAttributes()))
+		}
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"source":   "original",
+			"rewind_1": true,
+			"rewind_2": true,
+		}, status.Attributes)
+	})
+
+	t.Run("MergeInsideWorkflow", func(t *testing.T) {
+		wfid := uuid.NewString()
+		handle, err := RunWorkflow(dbosCtx, attrUpdatingWorkflow, 1, WithWorkflowID(wfid), WithWorkflowAttributes(map[string]any{"phase": "start"}))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"phase": "running", "progress": float64(50)}, status.Attributes)
+
+		steps, err := GetWorkflowSteps(dbosCtx, wfid)
+		require.NoError(t, err)
+		require.Len(t, steps, 2)
+		assert.Equal(t, "DBOS.updateWorkflowAttributes", steps[0].StepName)
+		assert.Equal(t, "DBOS.updateWorkflowAttributes", steps[1].StepName)
+
+		// Recovery replays the recorded steps and does not merge again.
+		setWorkflowStatusPending(t, dbosCtx, wfid)
+		recovered, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err)
+		var recoveredHandle WorkflowHandle[any]
+		for _, h := range recovered {
+			if h.GetWorkflowID() == wfid {
+				recoveredHandle = h
+				break
+			}
+		}
+		require.NotNil(t, recoveredHandle)
+		_, err = recoveredHandle.GetResult()
+		require.NoError(t, err)
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"phase": "running", "progress": float64(50)}, status.Attributes)
+	})
+
+	t.Run("MergeClient", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, attrNoopWorkflow, 1, WithWorkflowAttributes(map[string]any{"source": "updated"}))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+
+		client, err := NewClient(dbosCtx, ClientConfig{DatabaseURL: databaseURL})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			client.Shutdown(client, 30*time.Second)
+		})
+
+		require.NoError(t, client.SetWorkflowAttributes(client, handle.GetWorkflowID(), map[string]any{"count": 1}, WithMergeAttributes()))
+		status, err := handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"source": "updated", "count": float64(1)}, status.Attributes)
+
+		err = client.SetWorkflowAttributes(client, handle.GetWorkflowID(), nil, WithMergeAttributes())
+		require.ErrorIs(t, err, ErrInvalidOption)
+		status, err = handle.GetStatus()
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"source": "updated", "count": float64(1)}, status.Attributes)
 	})
 }
 

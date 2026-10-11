@@ -2089,31 +2089,55 @@ func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowO
 type SetWorkflowAttributesDBInput struct {
 	WorkflowID string
 	Attributes map[string]any
-	Tx         Tx
+	// Merge shallow-merges top-level keys into the stored object. A nil map is
+	// rejected. An empty map leaves an existing object unchanged.
+	Merge bool
+	Tx    Tx
 }
 
+// sqliteJSONSetMaxPairs bounds each json_set call. SQLite's default
+// SQLITE_MAX_FUNCTION_ARG is 127, and each pair consumes two arguments plus the
+// target value.
+const sqliteJSONSetMaxPairs = 50
+
 // SetWorkflowAttributes replaces the custom attributes attached to an existing
-// workflow. A nil/empty attributes map clears them (stored as NULL). Returns a
-// non-existent workflow error if no workflow with the given ID exists.
+// workflow. A nil/empty attributes map clears them (stored as NULL) unless
+// Merge is set, in which case top-level keys are shallow-merged in one update.
+// Returns a non-existent workflow error if no workflow with the given ID exists.
 func (s *SysDB) SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error {
-	var attributesJSON *string
-	if len(input.Attributes) > 0 {
-		marshaled, err := json.Marshal(input.Attributes)
-		if err != nil {
-			return fmt.Errorf("failed to marshal workflow attributes: %w", err)
-		}
-		attributesStr := string(marshaled)
-		attributesJSON = &attributesStr
+	if input.Merge && input.Attributes == nil {
+		return models.NewInvalidOptionError("cannot merge nil into workflow attributes")
 	}
 
-	query := s.RenderSQL(`UPDATE %sworkflow_status SET attributes = $1, updated_at = %s WHERE workflow_uuid = $2`, s.dialect.SchemaPrefix(s.schema), s.dialect.NowMsSQL())
+	var (
+		query string
+		args  []any
+		err   error
+	)
+	if input.Merge {
+		query, args, err = s.mergeWorkflowAttributesQuery(input.Attributes, input.WorkflowID)
+		if err != nil {
+			return err
+		}
+	} else {
+		var attributesJSON *string
+		if len(input.Attributes) > 0 {
+			marshaled, err := json.Marshal(input.Attributes)
+			if err != nil {
+				return fmt.Errorf("failed to marshal workflow attributes: %w", err)
+			}
+			attributesStr := string(marshaled)
+			attributesJSON = &attributesStr
+		}
+		query = s.RenderSQL(`UPDATE %sworkflow_status SET attributes = $1, updated_at = %s WHERE workflow_uuid = $2`, s.dialect.SchemaPrefix(s.schema), s.dialect.NowMsSQL())
+		args = []any{attributesJSON, input.WorkflowID}
+	}
 
 	var res Result
-	var err error
 	if input.Tx != nil {
-		res, err = input.Tx.Exec(ctx, query, attributesJSON, input.WorkflowID)
+		res, err = input.Tx.Exec(ctx, query, args...)
 	} else {
-		res, err = s.pool.Exec(ctx, query, attributesJSON, input.WorkflowID)
+		res, err = s.pool.Exec(ctx, query, args...)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to update workflow attributes: %w", err)
@@ -2126,6 +2150,75 @@ func (s *SysDB) SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttr
 		return models.NewNonExistentWorkflowError(input.WorkflowID)
 	}
 	return nil
+}
+
+// mergeWorkflowAttributesQuery builds one UPDATE that shallow-merges attributes.
+// Postgres and Cockroach use jsonb ||. SQLite nests json_set calls, 50 pairs
+// at a time, so a large patch stays under SQLITE_MAX_FUNCTION_ARG.
+func (s *SysDB) mergeWorkflowAttributesQuery(attributes map[string]any, workflowID string) (string, []any, error) {
+	schema := s.dialect.SchemaPrefix(s.schema)
+	now := s.dialect.NowMsSQL()
+	if s.dialect.Name() == DialectSQLite {
+		query, args, err := sqliteMergeWorkflowAttributesQuery(schema, now, attributes, workflowID)
+		if err != nil {
+			return "", nil, err
+		}
+		return s.dialect.RewriteQuery(query), args, nil
+	}
+
+	payload, err := json.Marshal(attributes)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to marshal workflow attributes: %w", err)
+	}
+	query := fmt.Sprintf(`UPDATE %sworkflow_status
+		SET attributes = CASE
+		      WHEN jsonb_typeof(attributes) = 'object' THEN attributes
+		      ELSE '{}'::jsonb
+		    END || $1::jsonb,
+		    updated_at = %s
+		WHERE workflow_uuid = $2`, schema, now)
+	return s.dialect.RewriteQuery(query), []any{string(payload), workflowID}, nil
+}
+
+func sqliteMergeWorkflowAttributesQuery(schema, now string, attributes map[string]any, workflowID string) (string, []any, error) {
+	keys := make([]string, 0, len(attributes))
+	for key := range attributes {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+
+	expr := `CASE WHEN json_type(attributes) = 'object' THEN attributes ELSE '{}' END`
+	args := make([]any, 0, len(keys)*2+1)
+	placeholder := 1
+	for start := 0; start < len(keys); start += sqliteJSONSetMaxPairs {
+		end := start + sqliteJSONSetMaxPairs
+		if end > len(keys) {
+			end = len(keys)
+		}
+		var b strings.Builder
+		b.WriteString("json_set(")
+		b.WriteString(expr)
+		for _, key := range keys[start:end] {
+			quoted, err := json.Marshal(key)
+			if err != nil {
+				return "", nil, fmt.Errorf("failed to marshal workflow attribute key: %w", err)
+			}
+			raw, err := json.Marshal(attributes[key])
+			if err != nil {
+				return "", nil, fmt.Errorf("failed to marshal workflow attributes: %w", err)
+			}
+			fmt.Fprintf(&b, ", $%d, json($%d)", placeholder, placeholder+1)
+			args = append(args, "$."+string(quoted), string(raw))
+			placeholder += 2
+		}
+		b.WriteByte(')')
+		expr = b.String()
+	}
+
+	query := fmt.Sprintf(`UPDATE %sworkflow_status SET attributes = %s, updated_at = %s WHERE workflow_uuid = $%d`,
+		schema, expr, now, placeholder)
+	args = append(args, workflowID)
+	return query, args, nil
 }
 
 type CancelWorkflowsDBInput struct {

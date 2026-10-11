@@ -206,21 +206,21 @@ type Client interface {
 	ReadStreamAsync(_ Client, workflowID string, key string) (<-chan StreamValue[any], error)                               // Read values from a durable stream asynchronously
 
 	// Workflow management
-	RetrieveWorkflow(_ Client, workflowID string) (WorkflowHandle[any], error)                                   // Get a handle to an existing workflow
-	CancelWorkflow(_ Client, workflowID string, opts ...CancelWorkflowOption) error                              // Cancel a workflow by setting its status to CANCELLED
-	CancelWorkflows(_ Client, workflowIDs []string, opts ...CancelWorkflowOption) error                          // Cancel multiple workflows in a single DB round-trip
-	SetWorkflowAttributes(_ Client, workflowID string, attributes map[string]any) error                          // Replace the custom attributes on an existing workflow (nil clears them)
-	SetWorkflowDelay(_ Client, workflowID string, opts ...SetWorkflowDelayOption) error                          // Set or update the delay on a DELAYED workflow
-	ResumeWorkflow(_ Client, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)       // Resume a cancelled workflow
-	ResumeWorkflows(_ Client, workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error) // Resume multiple workflows in a single DB round-trip
-	RewindWorkflow(_ Client, workflowID string, opts ...RewindWorkflowOption) (WorkflowHandle[any], error)       // Drop a workflow's history from a step onwards and re-run it under the same ID
-	ForkWorkflow(_ Client, input ForkWorkflowInput) (WorkflowHandle[any], error)                                 // Fork a workflow from a specific step
-	ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]WorkflowHandle[any], error)                             // Fork multiple workflows in a single DB round-trip
-	ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                               // List workflows based on filtering criteria
-	GetWorkflowSteps(_ Client, workflowID string, opts ...GetWorkflowStepsOption) ([]StepInfo, error)            // Get the execution steps of a workflow
-	GetWorkflowAggregates(_ Client, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error)            // Aggregate counts of workflows by one or more grouping columns
-	GetStepAggregates(_ Client, input GetStepAggregatesInput) ([]StepAggregateRow, error)                        // Aggregate counts/durations of steps by function name and/or status
-	DeleteWorkflows(_ Client, workflowIDs []string, opts ...DeleteWorkflowOption) error                          // Delete workflows and all their associated data
+	RetrieveWorkflow(_ Client, workflowID string) (WorkflowHandle[any], error)                                               // Get a handle to an existing workflow
+	CancelWorkflow(_ Client, workflowID string, opts ...CancelWorkflowOption) error                                          // Cancel a workflow by setting its status to CANCELLED
+	CancelWorkflows(_ Client, workflowIDs []string, opts ...CancelWorkflowOption) error                                      // Cancel multiple workflows in a single DB round-trip
+	SetWorkflowAttributes(_ Client, workflowID string, attributes map[string]any, opts ...SetWorkflowAttributesOption) error // Replace attributes (nil clears them), or shallow-merge with WithMergeAttributes
+	SetWorkflowDelay(_ Client, workflowID string, opts ...SetWorkflowDelayOption) error                                      // Set or update the delay on a DELAYED workflow
+	ResumeWorkflow(_ Client, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)                   // Resume a cancelled workflow
+	ResumeWorkflows(_ Client, workflowIDs []string, opts ...ResumeWorkflowOption) ([]WorkflowHandle[any], error)             // Resume multiple workflows in a single DB round-trip
+	RewindWorkflow(_ Client, workflowID string, opts ...RewindWorkflowOption) (WorkflowHandle[any], error)                   // Drop a workflow's history from a step onwards and re-run it under the same ID
+	ForkWorkflow(_ Client, input ForkWorkflowInput) (WorkflowHandle[any], error)                                             // Fork a workflow from a specific step
+	ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]WorkflowHandle[any], error)                                         // Fork multiple workflows in a single DB round-trip
+	ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]WorkflowStatus, error)                                           // List workflows based on filtering criteria
+	GetWorkflowSteps(_ Client, workflowID string, opts ...GetWorkflowStepsOption) ([]StepInfo, error)                        // Get the execution steps of a workflow
+	GetWorkflowAggregates(_ Client, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error)                        // Aggregate counts of workflows by one or more grouping columns
+	GetStepAggregates(_ Client, input GetStepAggregatesInput) ([]StepAggregateRow, error)                                    // Aggregate counts/durations of steps by function name and/or status
+	DeleteWorkflows(_ Client, workflowIDs []string, opts ...DeleteWorkflowOption) error                                      // Delete workflows and all their associated data
 
 	// Queue management
 	RegisterQueue(_ Client, name string, options ...QueueOption) (Queue, error) // Register and persist a database-backed queue

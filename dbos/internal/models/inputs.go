@@ -168,3 +168,9 @@ type StepInfo struct {
 
 // AlertHandler is a function that handles alerts received from DBOS Conductor.
 type AlertHandler func(name string, message string, metadata map[string]string)
+
+type SetWorkflowAttributesInput struct {
+	Merge bool
+}
+
+type SetWorkflowAttributesOption func(*SetWorkflowAttributesInput)

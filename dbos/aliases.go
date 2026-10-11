@@ -201,6 +201,10 @@ type (
 	// required; other fields are optional.
 	ForkWorkflowInput = models.ForkWorkflowInput
 
+	// SetWorkflowAttributesOption configures SetWorkflowAttributes.
+	// WithMergeAttributes shallow-merges top-level keys instead of replacing the map.
+	SetWorkflowAttributesOption = models.SetWorkflowAttributesOption
+
 	// GetWorkflowAggregatesInput is the input to GetWorkflowAggregates. At
 	// least one GroupBy* flag must be true or TimeBucketSize must be > 0, and
 	// at least one Select* flag must be true.
