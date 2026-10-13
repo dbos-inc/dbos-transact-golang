@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -847,6 +848,148 @@ func sleepStepIDDriftWorkflow(ctx Context, _ string) (string, error) {
 	return "ok", nil
 }
 
+// Transaction-level conflicts inside a transactional step. The step function fails
+// with a conflict that only a fresh transaction can clear; the step must run again in a
+// new transaction and record the eventual success, never the conflict.
+const (
+	txnConflictProbeTable      = "txn_conflict_probe"
+	txnConflictConcurrentWrite = "concurrent-update" // 40001 from a committed concurrent update
+	txnConflictDeadlock        = "deadlock"          // 40P01 from a lock cycle with another session
+)
+
+var (
+	txnConflictAttempts    atomic.Int32
+	txnConflictPool        Pool       // a second connection to the system database, set by the sub-suite
+	txnConflictPartnerDone chan error // the deadlock partner's outcome, set by the first attempt
+)
+
+// txnConflictWorkflow runs one transactional step. Input is "<iso>|<mode>": iso is the
+// IsoLevel's integer value; mode is one of the txnConflict* conflicts to provoke on the
+// first attempt. The second attempt writes +10 to the step's rows; the other session
+// writes +1, so every row ends at 11 once both have committed exactly once.
+func txnConflictWorkflow(ctx Context, input string) (string, error) {
+	isoStr, mode, _ := strings.Cut(input, "|")
+	iso, err := strconv.Atoi(isoStr)
+	if err != nil {
+		return "", err
+	}
+	wfID, err := GetWorkflowID(ctx)
+	if err != nil {
+		return "", err
+	}
+	rowA, rowB := wfID+"-a", wfID+"-b"
+	return runAsTxn(ctx, func(c context.Context, tx Tx) (string, error) {
+		attempt := txnConflictAttempts.Add(1)
+		switch mode {
+		case txnConflictConcurrentWrite:
+			// Take this transaction's snapshot of the row, then let another connection
+			// commit a write to it. Under REPEATABLE READ and SERIALIZABLE the update
+			// below then fails with 40001, which no savepoint rollback can clear.
+			var v int
+			if err := tx.QueryRow(c, `SELECT v FROM `+txnConflictProbeTable+` WHERE k = $1`, rowA).Scan(&v); err != nil {
+				return "", err
+			}
+			if attempt == 1 {
+				if _, err := txnConflictPool.Exec(c, `UPDATE `+txnConflictProbeTable+` SET v = v + 1 WHERE k = $1`, rowA); err != nil {
+					return "", err
+				}
+			}
+			if _, err := tx.Exec(c, `UPDATE `+txnConflictProbeTable+` SET v = v + 10 WHERE k = $1`, rowA); err != nil {
+				return "", err
+			}
+			return "ok", nil
+		case txnConflictDeadlock:
+			if attempt == 1 {
+				return "", txnConflictProvokeDeadlock(c, tx, rowA, rowB)
+			}
+			if _, err := tx.Exec(c, `UPDATE `+txnConflictProbeTable+` SET v = v + 10 WHERE k IN ($1, $2)`, rowA, rowB); err != nil {
+				return "", err
+			}
+			return "ok", nil
+		default:
+			return "", fmt.Errorf("unknown conflict mode %q", mode)
+		}
+	}, WithTxIsolation(IsoLevel(iso)))
+}
+
+// txnConflictProvokeDeadlock drives tx into a genuine deadlock with a partner session
+// and returns the 40P01 Postgres raises in tx. Postgres aborts the session whose own
+// deadlock check finds the cycle, and a session checks once, deadlock_timeout after it
+// starts waiting. So the partner is made to wait first: its check finds no cycle and it
+// keeps waiting. tx then closes the cycle, and its check is the one that fires.
+//
+// Afterwards tx holds nothing, the partner commits its +1 to both rows once tx rolls
+// back, and its outcome is left in txnConflictPartnerDone.
+func txnConflictProvokeDeadlock(c context.Context, tx Tx, rowA, rowB string) error {
+	// deadlock_timeout can only be lowered by a superuser; otherwise live with the default.
+	deadlockTimeout := time.Second
+	var superuser string
+	if err := tx.QueryRow(c, `SELECT current_setting('is_superuser')`).Scan(&superuser); err != nil {
+		return err
+	}
+	if superuser == "on" {
+		deadlockTimeout = 100 * time.Millisecond
+		if _, err := tx.Exec(c, `SET LOCAL deadlock_timeout = '100ms'`); err != nil {
+			return err
+		}
+	}
+	// tx locks A.
+	if _, err := tx.Exec(c, `UPDATE `+txnConflictProbeTable+` SET v = v + 10 WHERE k = $1`, rowA); err != nil {
+		return err
+	}
+
+	// The partner locks B, then waits for A. Its own context: the step's ends with the attempt.
+	bg := context.Background()
+	partner, err := txnConflictPool.BeginTx(bg, TxOptions{})
+	if err != nil {
+		return err
+	}
+	var partnerPID int
+	if err := partner.QueryRow(bg, `SELECT pg_backend_pid()`).Scan(&partnerPID); err != nil {
+		return errors.Join(err, partner.Rollback(bg))
+	}
+	if superuser == "on" {
+		if _, err := partner.Exec(bg, `SET LOCAL deadlock_timeout = '100ms'`); err != nil {
+			return errors.Join(err, partner.Rollback(bg))
+		}
+	}
+	if _, err := partner.Exec(bg, `UPDATE `+txnConflictProbeTable+` SET v = v + 1 WHERE k = $1`, rowB); err != nil {
+		return errors.Join(err, partner.Rollback(bg))
+	}
+	done := make(chan error, 1)
+	txnConflictPartnerDone = done
+	go func() {
+		if _, err := partner.Exec(bg, `UPDATE `+txnConflictProbeTable+` SET v = v + 1 WHERE k = $1`, rowA); err != nil {
+			done <- errors.Join(err, partner.Rollback(bg))
+			return
+		}
+		done <- partner.Commit(bg)
+	}()
+
+	// Wait until the partner is blocked on A, then let its one deadlock check come and go.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting bool
+		if err := txnConflictPool.QueryRow(c, `SELECT COALESCE(wait_event_type = 'Lock', false) FROM pg_stat_activity WHERE pid = $1`, partnerPID).Scan(&waiting); err != nil {
+			return err
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			return errors.New("the deadlock partner never blocked on row A")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(2 * deadlockTimeout)
+
+	// Close the cycle: tx waits for B, its check finds the cycle, and Postgres aborts tx.
+	if _, err := tx.Exec(c, `UPDATE `+txnConflictProbeTable+` SET v = v + 10 WHERE k = $1`, rowB); err != nil {
+		return err
+	}
+	return errors.New("expected a deadlock, but the update on row B went through")
+}
+
 func TestSteps(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 
@@ -1257,6 +1400,7 @@ func TestSteps(t *testing.T) {
 	RegisterWorkflow(dbosCtx, staleWritesWorkflow)
 	RegisterWorkflow(dbosCtx, stepTimingParentWorkflow)
 	RegisterWorkflow(dbosCtx, stepTimingChildWorkflow)
+	RegisterWorkflow(dbosCtx, txnConflictWorkflow)
 
 	// Installed before Launch so no goroutine reads sysDB.Pool() concurrently
 	// with the swap; armed on demand by StepIDNotReallocatedOnDBRetry.
@@ -2292,6 +2436,83 @@ func TestSteps(t *testing.T) {
 		require.Equal(t, "DBOS.sleep", sleep.StepName)
 		require.GreaterOrEqual(t, sleep.CompletedAt.Sub(sleep.StartedAt), 400*time.Millisecond,
 			"expected the sleep span to be the sleep duration, not the checkpoint write")
+	})
+
+	// A transactional step whose function fails with a transaction-level conflict
+	// (serialization failure, deadlock) cannot be retried inside the same transaction:
+	// the conflict has to restart it. The step must run again in a fresh transaction
+	// and checkpoint the success, not freeze the conflict as its permanent outcome.
+	// Both conflicts are the real thing, raised by Postgres against a second session.
+	t.Run("TxnStepConflictRetries", func(t *testing.T) {
+		skipIfSqlite(t, "transaction-level conflicts are a Postgres concern")
+		txnConflictPool = stepsFaultPool
+		_, err := txnConflictPool.Exec(dbosCtx, `CREATE TABLE IF NOT EXISTS `+txnConflictProbeTable+` (k TEXT PRIMARY KEY, v INT NOT NULL)`)
+		require.NoError(t, err)
+
+		levels := []struct {
+			name string
+			iso  IsoLevel
+		}{
+			{"ReadCommitted", IsoLevelReadCommitted},
+			{"RepeatableRead", IsoLevelRepeatableRead},
+			{"Serializable", IsoLevelSerializable},
+		}
+		modes := []struct {
+			name string
+			mode string
+		}{
+			{"SerializationFailure", txnConflictConcurrentWrite},
+			{"Deadlock", txnConflictDeadlock},
+		}
+		for _, level := range levels {
+			for _, mode := range modes {
+				if mode.mode == txnConflictConcurrentWrite && level.iso == IsoLevelReadCommitted {
+					continue // READ COMMITTED sees the committed update and never conflicts
+				}
+				t.Run(level.name+"/"+mode.name, func(t *testing.T) {
+					if mode.mode == txnConflictDeadlock {
+						skipIfCockroach(t, "CockroachDB has no deadlock_timeout and reports lock cycles as 40001 restarts")
+					}
+					wfID := "txn-conflict-" + strings.ToLower(level.name+"-"+mode.name)
+					rowA, rowB := wfID+"-a", wfID+"-b"
+					_, err := txnConflictPool.Exec(dbosCtx, `INSERT INTO `+txnConflictProbeTable+` (k, v) VALUES ($1, 0), ($2, 0) ON CONFLICT (k) DO UPDATE SET v = 0`, rowA, rowB)
+					require.NoError(t, err)
+					txnConflictAttempts.Store(0)
+					txnConflictPartnerDone = nil
+
+					input := strconv.Itoa(int(level.iso)) + "|" + mode.mode
+					handle, err := RunWorkflow(dbosCtx, txnConflictWorkflow, input, WithWorkflowID(wfID))
+					require.NoError(t, err)
+					result, err := handle.GetResult()
+					require.NoError(t, err, "a transaction conflict must restart the step, not fail it")
+					require.Equal(t, "ok", result)
+					require.EqualValues(t, 2, txnConflictAttempts.Load(), "the step must run again after the conflict")
+
+					steps, err := GetWorkflowSteps(dbosCtx, wfID)
+					require.NoError(t, err)
+					require.Len(t, steps, 1, "expected exactly one checkpoint for the step")
+					require.NoError(t, steps[0].Error, "the conflict must not be recorded as the step's outcome")
+
+					// The other session's +1 and the second attempt's +10 landed; the first attempt's +10 rolled back.
+					rows := []string{rowA}
+					if mode.mode == txnConflictDeadlock {
+						rows = append(rows, rowB)
+						require.NotNil(t, txnConflictPartnerDone, "the first attempt never started its deadlock partner")
+						select {
+						case perr := <-txnConflictPartnerDone:
+							require.NoError(t, perr, "the deadlock partner must commit once the step's transaction rolls back")
+						case <-time.After(10 * time.Second):
+							t.Fatal("the deadlock partner never finished")
+						}
+					}
+					for _, row := range rows {
+						var v int
+						require.NoError(t, txnConflictPool.QueryRow(dbosCtx, `SELECT v FROM `+txnConflictProbeTable+` WHERE k = $1`, row).Scan(&v))
+						require.Equal(t, 11, v, "row %s", row)
+					}
+				})
+			}
+		}
 	})
 }
 

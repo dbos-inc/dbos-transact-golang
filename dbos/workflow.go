@@ -2629,6 +2629,13 @@ func checkStepContext(ctx Context, workflowID, stepName string) error {
 	return nil
 }
 
+// txnRestartError marks a transactional step function failure that only a fresh
+// transaction can clear, e.g., serialization errors.
+type txnRestartError struct{ cause error }
+
+func (e *txnRestartError) Error() string { return e.cause.Error() }
+func (e *txnRestartError) Unwrap() error { return e.cause }
+
 // executeStepWithRetry runs runOnce (the step body) and retries with backoff on error when maxRetries > 0.
 func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptions, runOnce func() (any, error)) (stepOutput any, stepError error) {
 	work := func() error {
@@ -2651,6 +2658,11 @@ func executeStepWithRetry(c *dbosContext, workflowID string, stepOpts *stepOptio
 		// Do not retry steps from workflows that have lost ownership (ErrConflictingWorkflowID)
 		// Or datasource steps that have already recorded their checkpoint (errCompletionRecorded)
 		if errors.Is(err, errCompletionRecorded) || errors.Is(err, ErrConflictingWorkflowID) {
+			return false, err
+		}
+		// Or transactional steps whose transaction must restart (txnRestartError)
+		var restart *txnRestartError
+		if errors.As(err, &restart) {
 			return false, err
 		}
 		joinedErrors = errors.Join(joinedErrors, err)
@@ -2955,6 +2967,12 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 			}
 			output, err := fn(stepCtx, tx)
 			if err != nil {
+				// Do not consume the step budget for transient DB errors
+				// Also some of these, like serialization errors, require a fresh transaction.
+				dialect := c.systemDB.Dialect()
+				if dialect.IsRetryableTransaction(err, nil) || dialect.IsRetryable(err, nil) {
+					return nil, &txnRestartError{cause: err}
+				}
 				if _, rbErr := tx.Exec(uncancellableCtx, "ROLLBACK TO SAVEPOINT dbos_step"); rbErr != nil {
 					return nil, errors.Join(err, fmt.Errorf("failed to roll back to savepoint: %w", rbErr))
 				}
@@ -2970,6 +2988,11 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 		// its outcome: nothing is checkpointed, so a resume re-executes the step.
 		if isWorkflowCtxCancelled(stepState) {
 			return stepOutput, interruptedStepError(stepState, stepError)
+		}
+		// Do not durably checkpoint transient DB errors
+		var restart *txnRestartError
+		if errors.As(stepError, &restart) {
+			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, restart.cause)
 		}
 
 		txnSer := resolveEncoder(c)
