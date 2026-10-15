@@ -1780,10 +1780,6 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 			if err != nil {
 				serializedErr = serializeWorkflowError(c.logger, err, resolveEncoder(workflowCtx).Name())
 			}
-			// Remove from the active set before the outcome becomes durable: once it is
-			// visible, a resume→dequeue can re-dispatch this workflow to this executor,
-			// marking it PENDING. But a stale activeID entry would prevent the workflow from running.
-			removeActive()
 			recorded, recordErr := sysdb.RetryWithResult(c, func() (bool, error) {
 				return c.systemDB.UpdateWorkflowOutcome(uncancellableCtx, sysdb.UpdateWorkflowOutcomeDBInput{
 					WorkflowID: workflowID,
@@ -1793,6 +1789,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 					OwnerXID:   exec.ownerXID,
 				})
 			}, sysdb.WithRetrierLogger(c.logger))
+			removeActive()
 			if recordErr != nil {
 				c.logger.Error("Error recording workflow outcome", "workflow_id", workflowID, "error", recordErr)
 				outcomeChan <- workflowOutcome[any]{result: nil, err: recordErr}

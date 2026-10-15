@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,8 @@ import (
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1150,6 +1153,78 @@ func TestWorkerConcurrency(t *testing.T) {
 	completeEvents[3].Set()
 
 	require.True(t, queueEntriesAreCleanedUp(dbosCtx1), "expected queue entries to be cleaned up after global concurrency test")
+}
+
+// stallOutcomeTracer blocks the first workflow-outcome write it sees until released.
+type stallOutcomeTracer struct {
+	armed   atomic.Bool
+	stalled chan struct{} // closed once a write is held
+	release chan struct{} // closed by the test to let the write through
+}
+
+func (tr *stallOutcomeTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	isOutcomeWrite := strings.Contains(data.SQL, "owner_xid = NULL") && strings.Contains(data.SQL, "AND owner_xid = $4")
+	if isOutcomeWrite && tr.armed.CompareAndSwap(true, false) {
+		close(tr.stalled)
+		<-tr.release
+	}
+	return ctx
+}
+
+func (tr *stallOutcomeTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// A workflow stays in the worker-concurrency count until its outcome is durable.
+// Were it dropped first, the queue runner could claim a replacement while the row
+// is still PENDING, and the executor would hold worker_concurrency+1 PENDING rows.
+func TestWorkerConcurrencyHoldsUntilOutcomeDurable(t *testing.T) {
+	skipIfSqlite(t, "stalls the outcome write through a pgx query tracer")
+
+	tracer := &stallOutcomeTracer{stalled: make(chan struct{}), release: make(chan struct{})}
+	poolConfig, err := pgxpool.ParseConfig(getDatabaseURL())
+	require.NoError(t, err)
+	poolConfig.ConnConfig.Tracer = tracer
+	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
+	require.NoError(t, err)
+
+	dbosCtx, err := NewContext(context.Background(), Config{AppName: "test-wc-outcome", SystemDBPool: pool})
+	require.NoError(t, err)
+	t.Cleanup(func() { Shutdown(dbosCtx, 10*time.Second) })
+
+	wf := func(_ Context, i int) (int, error) { return i, nil }
+	RegisterWorkflow(dbosCtx, wf, WithWorkflowName("wcOutcomeWorkflow"))
+	queue, err := registerWFQ(dbosCtx, "wc-outcome-queue-"+uuid.NewString()[:8], WithWorkerConcurrency(1))
+	require.NoError(t, err)
+	require.NoError(t, Launch(dbosCtx))
+
+	// The first workflow runs to completion, but its outcome write is held.
+	tracer.armed.Store(true)
+	first, err := RunWorkflow(dbosCtx, wf, 1, WithQueue(queue))
+	require.NoError(t, err)
+	select {
+	case <-tracer.stalled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first workflow's outcome write never reached the database")
+	}
+
+	// While the first row is still PENDING, the worker has no room for a second.
+	second, err := RunWorkflow(dbosCtx, wf, 2, WithQueue(queue))
+	require.NoError(t, err)
+	time.Sleep(3 * models.DefaultBasePollingInterval)
+	status, err := second.GetStatus()
+	require.NoError(t, err)
+	assert.Equal(t, WorkflowStatusEnqueued, status.Status, "the second workflow was claimed while the first still held the worker's only slot")
+	status, err = first.GetStatus()
+	require.NoError(t, err)
+	assert.Equal(t, WorkflowStatusPending, status.Status)
+
+	// Releasing the write frees the slot and the second workflow runs.
+	close(tracer.release)
+	result, err := first.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, 1, result)
+	result, err = second.GetResult()
+	require.NoError(t, err)
+	assert.Equal(t, 2, result)
 }
 
 func rateLimiterTestWorkflow(ctx Context, _ string) (time.Time, error) {
