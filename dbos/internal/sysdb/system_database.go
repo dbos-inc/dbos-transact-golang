@@ -2089,15 +2089,23 @@ func (s *SysDB) UpdateWorkflowOutcome(ctx context.Context, input UpdateWorkflowO
 type SetWorkflowAttributesDBInput struct {
 	WorkflowID string
 	Attributes map[string]any
-	Tx         Tx
+	// Merge shallow-merges top-level keys into the stored object. A nil map is
+	// rejected. An empty map leaves an existing object unchanged.
+	Merge bool
+	Tx    Tx
 }
 
 // SetWorkflowAttributes replaces the custom attributes attached to an existing
-// workflow. A nil/empty attributes map clears them (stored as NULL). Returns a
-// non-existent workflow error if no workflow with the given ID exists.
+// workflow. A nil/empty attributes map clears them (stored as NULL) unless
+// Merge is set, in which case top-level keys are shallow-merged in one update.
+// Returns a non-existent workflow error if no workflow with the given ID exists.
 func (s *SysDB) SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttributesDBInput) error {
+	if input.Merge && input.Attributes == nil {
+		return models.NewInvalidOptionError("cannot merge nil into workflow attributes")
+	}
+
 	var attributesJSON *string
-	if len(input.Attributes) > 0 {
+	if input.Merge || len(input.Attributes) > 0 {
 		marshaled, err := json.Marshal(input.Attributes)
 		if err != nil {
 			return fmt.Errorf("failed to marshal workflow attributes: %w", err)
@@ -2106,7 +2114,12 @@ func (s *SysDB) SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttr
 		attributesJSON = &attributesStr
 	}
 
-	query := s.RenderSQL(`UPDATE %sworkflow_status SET attributes = $1, updated_at = %s WHERE workflow_uuid = $2`, s.dialect.SchemaPrefix(s.schema), s.dialect.NowMsSQL())
+	value := "$1"
+	if input.Merge {
+		value = s.dialect.MergeJSONObjectSQL("attributes", 1)
+	}
+	query := s.RenderSQL(`UPDATE %sworkflow_status SET attributes = %s, updated_at = %s WHERE workflow_uuid = $2`,
+		s.dialect.SchemaPrefix(s.schema), value, s.dialect.NowMsSQL())
 
 	var res Result
 	var err error

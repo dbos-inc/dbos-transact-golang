@@ -98,6 +98,13 @@ type Dialect interface {
 	// cannot faithfully reproduce it, so the filter is rejected there.
 	SupportsAttributesContainment() bool
 
+	// MergeJSONObjectSQL returns an expression that shallow-merges the JSON
+	// object bound at placeholder $idx into column: keys from the parameter
+	// overwrite the column's top-level keys, nested values are replaced rather
+	// than merged, and null values are kept. A NULL or non-object column is
+	// treated as an empty object.
+	MergeJSONObjectSQL(column string, idx int) string
+
 	// IsUniqueViolation reports whether err represents a unique-constraint
 	// violation surfaced from the driver.
 	IsUniqueViolation(err error) bool
@@ -226,6 +233,10 @@ func (PostgresDialect) SupportsListenNotify() bool          { return true }
 func (PostgresDialect) SupportsArrayParameters() bool       { return true }
 func (PostgresDialect) SupportsDataModifyingCTE() bool      { return true }
 func (PostgresDialect) SupportsAttributesContainment() bool { return true }
+
+func (PostgresDialect) MergeJSONObjectSQL(column string, idx int) string {
+	return fmt.Sprintf(`(CASE WHEN jsonb_typeof(%[1]s) = 'object' THEN %[1]s ELSE '{}'::jsonb END || $%[2]d::jsonb)`, column, idx)
+}
 
 // pgErrCode extracts the SQLSTATE code from a pgconn.PgError, or "" if err is
 // not a pg error.
@@ -376,6 +387,24 @@ func (SqliteDialect) SupportsListenNotify() bool                   { return fals
 func (SqliteDialect) SupportsArrayParameters() bool                { return false }
 func (SqliteDialect) SupportsDataModifyingCTE() bool               { return false }
 func (SqliteDialect) SupportsAttributesContainment() bool          { return false }
+
+// MergeJSONObjectSQL rebuilds the object from the column's entries that the
+// parameter does not override, followed by every parameter entry. json_patch
+// cannot be used: it drops null values and merges nested objects recursively.
+// Virtual-table columns carry no JSON subtype, so objects, arrays and booleans
+// are re-tagged with json(); strings, numbers and null pass through as SQL
+// values that json_group_object encodes itself.
+func (SqliteDialect) MergeJSONObjectSQL(column string, idx int) string {
+	return fmt.Sprintf(`(SELECT json_group_object(key, CASE type
+			WHEN 'object' THEN json(value) WHEN 'array' THEN json(value)
+			WHEN 'true' THEN json('true') WHEN 'false' THEN json('false')
+			ELSE value END) FROM (
+		SELECT key, type, value FROM json_each(CASE WHEN json_type(%[1]s) = 'object' THEN %[1]s ELSE '{}' END)
+		WHERE key NOT IN (SELECT key FROM json_each($%[2]d))
+		UNION ALL
+		SELECT key, type, value FROM json_each($%[2]d)
+	))`, column, idx)
+}
 
 // Classify sqlite errors via the registered driver's ErrorCode extractor
 // (see sqlite_driver.go). The extracted value is the extended result code

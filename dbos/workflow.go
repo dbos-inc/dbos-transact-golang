@@ -4868,42 +4868,71 @@ func CancelWorkflow(ctx Client, workflowID string, opts ...CancelWorkflowOption)
 	return ctx.CancelWorkflow(ctx, workflowID, opts...)
 }
 
-func (c *dbosContext) SetWorkflowAttributes(_ Client, workflowID string, attributes map[string]any) error {
+// WithMergeAttributes shallow-merges the given top-level keys into the workflow's
+// existing attributes instead of replacing them. Other keys are kept. A matching
+// key is overwritten, including when its value is a nested object. A nil value
+// is stored as JSON null. Merging a nil map is an error.
+func WithMergeAttributes() SetWorkflowAttributesOption {
+	return func(in *models.SetWorkflowAttributesInput) {
+		in.Merge = true
+	}
+}
+
+func (c *dbosContext) SetWorkflowAttributes(_ Client, workflowID string, attributes map[string]any, opts ...SetWorkflowAttributesOption) error {
+	params := models.SetWorkflowAttributesInput{}
+	for _, opt := range opts {
+		opt(&params)
+	}
+	if params.Merge && attributes == nil {
+		return models.NewInvalidOptionError("cannot merge nil into workflow attributes")
+	}
+
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 
+	call := func(ctx context.Context, tx Tx) error {
+		return c.systemDB.SetWorkflowAttributes(ctx, sysdb.SetWorkflowAttributesDBInput{
+			WorkflowID: workflowID,
+			Attributes: attributes,
+			Merge:      params.Merge,
+			Tx:         tx,
+		})
+	}
+
 	if isWithinWorkflow {
 		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (struct{}, error) {
-			return struct{}{}, c.systemDB.SetWorkflowAttributes(ctx, sysdb.SetWorkflowAttributesDBInput{
-				WorkflowID: workflowID,
-				Attributes: attributes,
-				Tx:         tx,
-			})
+			return struct{}{}, call(ctx, tx)
 		}, WithStepName("DBOS.updateWorkflowAttributes"))
 		return err
 	}
 	return sysdb.Retry(c, func() error {
-		return c.systemDB.SetWorkflowAttributes(c, sysdb.SetWorkflowAttributesDBInput{
-			WorkflowID: workflowID,
-			Attributes: attributes,
-		})
+		return call(c, nil)
 	}, sysdb.WithRetrierLogger(c.logger))
 }
 
 // SetWorkflowAttributes replaces the custom attributes attached to an existing
-// workflow, identified by workflowID. Pass a nil attributes map to clear all
-// attributes. Attributes must be JSON-serializable.
+// workflow, identified by workflowID. Pass a nil or empty attributes map to
+// clear all attributes. Attributes must be JSON-serializable.
+//
+// Pass WithMergeAttributes to shallow-merge the given top-level keys into the
+// existing attributes instead. Unrelated keys are kept, matching keys are
+// overwritten, and a nil value is stored as JSON null. WithMergeAttributes
+// rejects a nil map. An empty map leaves an existing object unchanged, and
+// merges into a missing value as an empty object.
 //
 // Returns an error if the workflow does not exist or the update fails.
+// Inside a workflow, the update is recorded as a step named
+// DBOS.updateWorkflowAttributes so recovery runs it once.
 //
 // Example:
 //
 //	err := dbos.SetWorkflowAttributes(ctx, "my-workflow-id", map[string]any{"customer": "acme"})
-func SetWorkflowAttributes(ctx Client, workflowID string, attributes map[string]any) error {
+//	err = dbos.SetWorkflowAttributes(ctx, "my-workflow-id", map[string]any{"tier": 2}, dbos.WithMergeAttributes())
+func SetWorkflowAttributes(ctx Client, workflowID string, attributes map[string]any, opts ...SetWorkflowAttributesOption) error {
 	if ctx == nil {
 		return errors.New("ctx cannot be nil")
 	}
-	return ctx.SetWorkflowAttributes(ctx, workflowID, attributes)
+	return ctx.SetWorkflowAttributes(ctx, workflowID, attributes, opts...)
 }
 
 func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...CancelWorkflowOption) error {
