@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -508,6 +509,7 @@ type WorkflowRegistryEntry struct {
 	FQN          string // Fully qualified name of the workflow function. For configured instances, qualified with the config name.
 	ClassName    string // Receiver type name for configured instance workflows
 	ConfigName   string // Config name for configured instance workflows
+	autoUpgrade  *bool  // WithAutoUpgrade; nil inherits Config.AutoUpgrade
 }
 
 func registerWorkflow(ctx Context, entry WorkflowRegistryEntry) {
@@ -561,9 +563,10 @@ func instanceQualifiedName(name, configName string) string {
 }
 
 type workflowRegistrationOptions struct {
-	maxRetries int
-	name       string
-	instance   ConfiguredInstance
+	maxRetries  int
+	name        string
+	instance    ConfiguredInstance
+	autoUpgrade *bool
 }
 
 type WorkflowRegistrationOption func(*workflowRegistrationOptions)
@@ -610,6 +613,16 @@ func WithInstance(instance ConfiguredInstance) WorkflowRegistrationOption {
 	}
 }
 
+// WithAutoUpgrade enrolls the workflow in, or withdraws it from, auto-upgrade: the
+// Transact Enterprise feature that hands the work left on older application versions to
+// the latest one. Without it, the workflow follows Config.AutoUpgrade. Enrolling a
+// workflow needs the enterprise module and an entitled DBOS key.
+func WithAutoUpgrade(enabled bool) WorkflowRegistrationOption {
+	return func(p *workflowRegistrationOptions) {
+		p.autoUpgrade = &enabled
+	}
+}
+
 // resolveWorkflowFunctionName resolves the function name for a workflow function,
 // handling generic workflows by appending the actual type parameters.
 func resolveWorkflowFunctionName[P any, R any](fn Workflow[P, R]) string {
@@ -650,6 +663,7 @@ func resolveWorkflowFunctionName[P any, R any](fn Workflow[P, R]) string {
 //   - WithMaxRecoveryAttempts: Set maximum recovery attempts for the workflow
 //   - WithWorkflowName: Set a custom name for the workflow
 //   - WithInstance: Register a method bound to a named instance
+//   - WithAutoUpgrade: Enroll the workflow in auto-upgrade, or keep it out
 //
 // Example:
 //
@@ -744,6 +758,7 @@ func RegisterWorkflow[P any, R any](ctx Context, fn Workflow[P, R], opts ...Work
 		Name:         registrationParams.name,
 		ClassName:    className,
 		ConfigName:   configName,
+		autoUpgrade:  registrationParams.autoUpgrade,
 	})
 
 }
@@ -763,6 +778,35 @@ func (c *dbosContext) resolveWorkflowName(workflowFn any) (string, error) {
 		return entry.Name, nil
 	}
 	return entry.FQN, nil
+}
+
+// autoUpgradableWorkflows returns the names, as workflow_status records them, of the
+// registered workflows enrolled in auto-upgrade: those registered with
+// WithAutoUpgrade(true), and, when Config.AutoUpgrade is set, every one that did not
+// opt out.
+func (c *dbosContext) autoUpgradableWorkflows() []string {
+	seen := make(map[string]struct{})
+	c.workflowRegistry.Range(func(_, value any) bool {
+		entry := value.(WorkflowRegistryEntry)
+		enrolled := c.config.AutoUpgrade
+		if entry.autoUpgrade != nil {
+			enrolled = *entry.autoUpgrade
+		}
+		if enrolled {
+			name := entry.Name
+			if name == "" {
+				name = entry.FQN
+			}
+			seen[name] = struct{}{}
+		}
+		return true
+	})
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 /**********************************/
@@ -4527,10 +4571,6 @@ func Sleep(ctx Context, duration time.Duration) (time.Duration, error) {
 const _DBOS_PATCH_PREFIX = "DBOS.patch-"
 
 func (c *dbosContext) Patch(_ Context, patchName string) (bool, error) {
-	if !c.config.EnablePatching {
-		return false, models.NewPatchingNotEnabledError()
-	}
-
 	if patchName == "" {
 		return false, errors.New("patch name cannot be empty")
 	}
@@ -4592,10 +4632,6 @@ func Patch(ctx Context, patchName string) (bool, error) {
 }
 
 func (c *dbosContext) DeprecatePatch(_ Context, patchName string) error {
-	if !c.config.EnablePatching {
-		return models.NewPatchingNotEnabledError()
-	}
-
 	if patchName == "" {
 		return errors.New("patch name cannot be empty")
 	}

@@ -33,6 +33,7 @@ const (
 	_DEFAULT_SYSTEM_DB_STARTUP_TIMEOUT = 2 * time.Minute
 	_DBOS_DOMAIN                       = "cloud.dbos.dev"
 	_LAUNCH_ROLLBACK_TIMEOUT           = 30 * time.Second
+	_DEFAULT_AUTO_UPGRADE_INTERVAL     = 30 * time.Second
 )
 
 // Config holds configuration parameters for initializing a DBOS context.
@@ -55,9 +56,13 @@ type Config struct {
 	ConductorAPIKey                string          // DBOS conductor API key (optional)
 	ConductorExecutorMetadata      map[string]any  // Metadata associated with this executor that may be used to identify it on the Conductor dashboard. Must be JSON-serializable.
 	ConductorMetadataOnlyMode      bool            // Send only workflow metadata to Conductor, never workflow data
+	TransactEnterpriseKey          string          // The DBOS key that entitles this application to Transact Enterprise features (optional; ConductorAPIKey stands in for it)
+	AutoUpgrade                    bool            // Auto-upgrade the workflows this application registers to the latest application version, a Transact Enterprise feature (default: false; see WithAutoUpgrade to enroll workflows one by one)
+	AutoUpgradeInterval            time.Duration   // Time between two auto-upgrade passes (defaults to 30 seconds)
+	AutoUpgradeGracePeriod         time.Duration   // How long the latest application version must have been the latest before auto-upgrade re-enqueues PENDING workflows left on older versions, giving executors on those versions time to drain. ENQUEUED and DELAYED workflows are upgraded without waiting (defaults to 0)
 	ApplicationVersion             string          // Application version (optional, overridden by DBOS__APPVERSION env var)
 	ExecutorID                     string          // Executor ID (optional, overridden by DBOS__VMID env var)
-	EnablePatching                 bool            // Enable the patching system for Patch and DeprecatePatch (default: false)
+	EnablePatching                 bool            // Deprecated: pins the application version to "PATCHING_ENABLED" so every deployment shares one version. Patch and DeprecatePatch no longer require it
 	Serializer                     Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
 	SchedulerPollingInterval       time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
 	SystemDBStartupTimeout         time.Duration   // Maximum time for system-database connection and migrations (defaults to 2 minutes)
@@ -95,6 +100,12 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	if inputConfig.NotificationCoalesceInterval < 0 || (inputConfig.NotificationCoalesceInterval > 0 && inputConfig.NotificationCoalesceInterval < sysdb.MinNotificationCoalesceInterval) {
 		return nil, fmt.Errorf("notificationCoalesceInterval must be at least %s, got %s", sysdb.MinNotificationCoalesceInterval, inputConfig.NotificationCoalesceInterval)
 	}
+	if inputConfig.AutoUpgradeInterval < 0 {
+		return nil, fmt.Errorf("autoUpgradeInterval cannot be negative")
+	}
+	if inputConfig.AutoUpgradeGracePeriod < 0 {
+		return nil, fmt.Errorf("autoUpgradeGracePeriod cannot be negative")
+	}
 
 	dbosConfig := &Config{
 		DatabaseURL:                    inputConfig.DatabaseURL,
@@ -106,6 +117,10 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ConductorAPIKey:                inputConfig.ConductorAPIKey,
 		ConductorExecutorMetadata:      inputConfig.ConductorExecutorMetadata,
 		ConductorMetadataOnlyMode:      inputConfig.ConductorMetadataOnlyMode,
+		TransactEnterpriseKey:          inputConfig.TransactEnterpriseKey,
+		AutoUpgrade:                    inputConfig.AutoUpgrade,
+		AutoUpgradeInterval:            inputConfig.AutoUpgradeInterval,
+		AutoUpgradeGracePeriod:         inputConfig.AutoUpgradeGracePeriod,
 		ApplicationVersion:             inputConfig.ApplicationVersion,
 		ExecutorID:                     inputConfig.ExecutorID,
 		SystemDBPool:                   inputConfig.SystemDBPool,
@@ -130,6 +145,11 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	if dbosConfig.Logger == nil {
 		dbosConfig.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
+	if dbosConfig.EnablePatching {
+		dbosConfig.Logger.Warn("EnablePatching is deprecated and will be removed in a future release. " +
+			"Patch and DeprecatePatch no longer require it. " +
+			"To keep every deployment on one application version, as the flag does, set ApplicationVersion explicitly.")
+	}
 
 	// Conductor addresses the application by name and refuses one outside its rule, so an
 	// application about to connect cannot usefully launch. A self-hosted one is told and left alone.
@@ -151,6 +171,9 @@ func processConfig(inputConfig *Config) (*Config, error) {
 	}
 	if dbosConfig.NotificationCoalesceInterval == 0 {
 		dbosConfig.NotificationCoalesceInterval = sysdb.DefaultNotificationCoalesceInterval
+	}
+	if dbosConfig.AutoUpgradeInterval == 0 {
+		dbosConfig.AutoUpgradeInterval = _DEFAULT_AUTO_UPGRADE_INTERVAL
 	}
 
 	// If patching is enabled and application version is not set, fix the application version
@@ -320,6 +343,9 @@ type dbosContext struct {
 
 	// Conductor client
 	conductor ConductorConnection
+
+	// Auto-upgrade, started by Launch when a workflow enrolled
+	autoUpgrader *autoUpgradeLoop
 
 	// Application metadata
 	applicationVersion string
@@ -706,7 +732,16 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 	var conductorFactory ConductorFactory
 	if conductorOpts != nil {
 		if conductorFactory = registeredConductorFactory(); conductorFactory == nil {
-			return nil, enterpriseUnavailableError()
+			return nil, enterpriseUnavailableError(conductorFeature)
+		}
+	}
+
+	if features := enabledFeatures(config); len(features) > 0 {
+		if err := requireEnterprise(features, config.TransactEnterpriseKey, config.ConductorAPIKey, inputConfig.ConductorURL); err != nil {
+			return nil, err
+		}
+		if registeredAutoUpgradeFactory() == nil {
+			return nil, enterpriseUnavailableError(autoUpgradeFeature.description)
 		}
 	}
 
@@ -921,6 +956,11 @@ func (c *dbosContext) Launch() error {
 	c.queueRunnerStarted.Store(true)
 	c.logger.Debug("Queue runner started")
 
+	// Start auto-upgrade if any workflow enrolled.
+	if err := c.startAutoUpgrade(); err != nil {
+		return err
+	}
+
 	// Start the cron scheduler.
 	c.getWorkflowScheduler().Start()
 	c.workflowSchedulerStarted.Store(true)
@@ -959,12 +999,13 @@ func (c *dbosContext) Launch() error {
 // In-flight workflows observe the cancellation and unwind, but are not
 // durably cancelled: their status rows are left PENDING so they are
 // recovered on the next launch rather than marked CANCELLED.
-// 2. Waits for the queue runner to complete processing
-// 3. Stops the workflow scheduler and waits for scheduled jobs to finish
-// 4. Waits for in-flight workflows to finish unwinding
-// 5. Shuts down the system database connection pool and notification listener
+// 2. Stops auto-upgrade, if a workflow enrolled
+// 3. Waits for the queue runner to complete processing
+// 4. Stops the workflow scheduler and waits for scheduled jobs to finish
+// 5. Waits for in-flight workflows to finish unwinding
 // 6. Shuts down conductor
-// 7. Marks the context as not launched
+// 7. Shuts down the system database connection pool and notification listener
+// 8. Marks the context as not launched
 //
 // Each step respects the provided timeout. If any component doesn't shut down within the timeout,
 // a warning is logged and the shutdown continues to the next component.
@@ -988,6 +1029,14 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	var pending []string
 
 	c.ctxCancelFunc(errShutdown)
+
+	// Stop auto-upgrade first so it releases its lock it if holds one.
+	if c.autoUpgrader != nil {
+		c.logger.Debug("Stopping auto-upgrade")
+		if err := c.autoUpgrader.stop(timeout); err != nil {
+			pending = append(pending, "auto-upgrade")
+		}
+	}
 
 	// Stop workflow producers before draining in-flight workflows. Producers
 	// (.e.g, queue runner) call RunWorkflow, which calls workflowsWg.Add(1);
