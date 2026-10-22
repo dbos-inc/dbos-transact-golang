@@ -9310,18 +9310,17 @@ func TestPatching(t *testing.T) {
 		require.NotContains(t, err.Error(), fmt.Sprintf("DBOS Error %s", ErrorCodeUnexpectedStep), "step IDs drifted into the patch marker's slot")
 	})
 
-	t.Run("PatchingNotEnabledError", func(t *testing.T) {
-		// Create a DBOS context without enabling patching
+	t.Run("PatchingNeedsNoFlag", func(t *testing.T) {
+		// Patch and DeprecatePatch work without EnablePatching: a fixed ApplicationVersion
+		// is enough for every deployment to recover and dequeue each other's workflows.
 		databaseURL := backendDatabaseURL(t)
 		dbosCtxNoPatching, err := NewContext(context.Background(), Config{
-			DatabaseURL:    databaseURL,
-			AppName:        "test-app-no-patching",
-			EnablePatching: false, // Explicitly disable patching
+			DatabaseURL: databaseURL,
+			AppName:     "test-app-no-patching",
 		})
 		require.NoError(t, err, "failed to create DBOS context without patching")
-		require.False(t, dbosCtxNoPatching.GetApplicationVersion() == "PATCHING_ENABLED", "expected application version to not be PATCHING_ENABLED")
+		require.NotEqual(t, "PATCHING_ENABLED", dbosCtxNoPatching.GetApplicationVersion(), "expected application version to not be PATCHING_ENABLED")
 
-		// Register a workflow that calls Patch
 		wfWithPatch := func(ctx Context, input int) (int, error) {
 			patched, err := Patch(ctx, "test-patch")
 			if err != nil {
@@ -9334,10 +9333,8 @@ func TestPatching(t *testing.T) {
 		}
 		RegisterWorkflow(dbosCtxNoPatching, wfWithPatch)
 
-		// Test DeprecatePatch as well
 		wfWithDeprecatePatch := func(ctx Context, input int) (int, error) {
-			err := DeprecatePatch(ctx, "test-patch")
-			if err != nil {
+			if err := DeprecatePatch(ctx, "test-patch"); err != nil {
 				return 0, err
 			}
 			return input + 10, nil
@@ -9348,31 +9345,18 @@ func TestPatching(t *testing.T) {
 		require.NoError(t, err, "failed to launch DBOS context")
 		defer Shutdown(dbosCtxNoPatching, 10*time.Second)
 
-		// Run the workflow - it should fail with ErrorCodePatchingNotEnabled error
+		// A new workflow takes the patched path.
 		handle, err := RunWorkflow(dbosCtxNoPatching, wfWithPatch, 1)
 		require.NoError(t, err, "failed to start workflow")
-		_, err = handle.GetResult()
-		require.Error(t, err, "expected error when calling Patch without EnablePatching")
+		result, err := handle.GetResult()
+		require.NoError(t, err, "Patch must work without EnablePatching")
+		require.Equal(t, 11, result)
 
-		// Verify it's the correct error type
-		dbosErr, ok := err.(*Error)
-		require.True(t, ok, "expected error to be of type *Error, got %T", err)
-		require.Equal(t, ErrorCodePatchingNotEnabled, dbosErr.Code, "expected error code to be ErrorCodePatchingNotEnabled")
-		require.Contains(t, dbosErr.Message, "Patching system is not enabled", "expected error message to mention patching is not enabled")
-		require.Contains(t, dbosErr.Message, "EnablePatching", "expected error message to mention EnablePatching")
-
-		// Deprecate path
 		handle2, err := RunWorkflow(dbosCtxNoPatching, wfWithDeprecatePatch, 1)
 		require.NoError(t, err, "failed to start workflow with DeprecatePatch")
-		_, err = handle2.GetResult()
-		require.Error(t, err, "expected error when calling DeprecatePatch without EnablePatching")
-
-		// Verify it's the correct error type
-		dbosErr2, ok := err.(*Error)
-		require.True(t, ok, "expected error to be of type *Error, got %T", err)
-		require.Equal(t, ErrorCodePatchingNotEnabled, dbosErr2.Code, "expected error code to be ErrorCodePatchingNotEnabled")
-		require.Contains(t, dbosErr2.Message, "Patching system is not enabled", "expected error message to mention patching is not enabled")
-		require.Contains(t, dbosErr2.Message, "EnablePatching", "expected error message to mention EnablePatching")
+		result, err = handle2.GetResult()
+		require.NoError(t, err, "DeprecatePatch must work without EnablePatching")
+		require.Equal(t, 11, result)
 	})
 
 	t.Run("PatchingEnabledWithVersioning", func(t *testing.T) {
@@ -9425,6 +9409,21 @@ func TestPatching(t *testing.T) {
 			})
 		})
 	})
+}
+
+func TestEnablePatchingIsDeprecated(t *testing.T) {
+	var logs bytes.Buffer
+	ctx, err := NewContext(context.Background(), Config{
+		AppName:        "test-app",
+		DatabaseURL:    sqliteURL(t),
+		EnablePatching: true,
+		Logger:         slog.New(slog.NewTextHandler(&logs, nil)),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { Shutdown(ctx, 10*time.Second) })
+	// The deprecated flag still pins the application version, and says it is deprecated.
+	assert.Equal(t, "PATCHING_ENABLED", ctx.GetApplicationVersion())
+	assert.Contains(t, logs.String(), "EnablePatching is deprecated")
 }
 
 // Helper workflows for stream testing

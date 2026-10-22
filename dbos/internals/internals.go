@@ -15,10 +15,11 @@ import (
 type Runtime interface {
 	dbos.Context
 
-	SystemDB() SystemDatabase        // The system database, for queries beyond the public API
-	Logger() *slog.Logger            // The context's logger
-	AlertHandler() dbos.AlertHandler // The handler registered with SetAlertHandler, or nil
-	DBOSVersion() string             // The dbos module version recorded in the binary's build info
+	SystemDB() SystemDatabase          // The system database, for queries beyond the public API
+	Logger() *slog.Logger              // The context's logger
+	AlertHandler() dbos.AlertHandler   // The handler registered with SetAlertHandler, or nil
+	DBOSVersion() string               // The dbos module version recorded in the binary's build info
+	AutoUpgradableWorkflows() []string // The recorded names of the registered workflows enrolled in auto-upgrade, sorted
 
 	RecoverPendingWorkflows(executorIDs []string) ([]dbos.WorkflowHandle[any], error)
 	DecodeStoredValue(value, serialization string) (any, error)
