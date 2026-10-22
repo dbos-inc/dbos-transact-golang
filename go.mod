@@ -2,7 +2,7 @@ module github.com/dbos-inc/dbos-transact-golang
 
 go 1.25.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/google/uuid v1.6.0
