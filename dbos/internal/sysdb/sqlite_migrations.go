@@ -211,6 +211,12 @@ var sqliteMigration122SQL string
 //go:embed migrations/sqlite/123_add_workflow_status_creator_xid.sql
 var sqliteMigration123SQL string
 
+//go:embed migrations/sqlite/124_create_application_versions_timestamp_index.sql
+var sqliteMigration124SQL string
+
+//go:embed migrations/sqlite/125_create_application_versions_owner_timestamp_index.sql
+var sqliteMigration125SQL string
+
 // BuildSqliteMigrations returns the SQLite migration list. Versions mirror pg
 // numbering (matching Python's sqlite_migrations); pg migrations 10, 14, 20,
 // 38, 39, 43, 44, 105, and 113 have no SQLite counterpart and are omitted.
@@ -280,6 +286,8 @@ func BuildSqliteMigrations() []MigrationFile {
 		{Version: 121, SQL: sqliteMigration121SQL},
 		{Version: 122, SQL: sqliteMigration122SQL},
 		{Version: 123, SQL: sqliteMigration123SQL},
+		{Version: 124, SQL: sqliteMigration124SQL},
+		{Version: 125, SQL: sqliteMigration125SQL},
 	}
 }
 
