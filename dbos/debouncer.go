@@ -228,8 +228,11 @@ func debounce[R any, P any](c *dbosContext, params debouncerParams, key string, 
 	if _, ok := any(input).(PortableWorkflowArgs); ok {
 		encodedInput, err = newPortableSerializer[any]().Encode(input)
 		serialization = PortableSerializerName
+	} else if ser := resolveEncoder(c); ser.Name() == PortableSerializerName {
+		// Debounced from a portable workflow: a portable_json input always carries the envelope.
+		encodedInput, err = encodePortableArgs(input)
+		serialization = PortableSerializerName
 	} else {
-		ser := resolveEncoder(c)
 		encodedInput, err = ser.Encode(input)
 		serialization = ser.Name()
 	}

@@ -1419,6 +1419,11 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 	// Serialize input before storing in workflow status
 	var encodedInput any
+	// A child of a portable workflow is stored as portable_json, so it is a portable workflow too:
+	// its input carries the args envelope and its outputs use the portable format.
+	if isChildWorkflow && parentWorkflowState.isPortableWorkflow {
+		params.isPortableWorkflow = true
+	}
 	if params.isPortableWorkflow { // Direct call to a portable workflow
 		var serErr error
 		encodedInput, serErr = encodePortableArgs(input)
@@ -2199,8 +2204,15 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 			return nil, fmt.Errorf("failed to serialize portable workflow input: %w", err)
 		}
 		serialization = PortableSerializerName
+	} else if ser := resolveEncoder(c); ser.Name() == PortableSerializerName {
+		// Enqueued from a portable workflow: a portable_json input always carries the envelope.
+		var err error
+		encodedInput, err = encodePortableArgs(input)
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize portable workflow input: %w", err)
+		}
+		serialization = PortableSerializerName
 	} else {
-		ser := resolveEncoder(c)
 		var err error
 		encodedInput, err = ser.Encode(input)
 		if err != nil {
