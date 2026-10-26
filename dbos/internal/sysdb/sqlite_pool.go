@@ -293,8 +293,12 @@ func applySQLitePragmas(ctx context.Context, db *sql.DB) error {
 	}
 	defer conn.Close()
 	for _, p := range pragmas {
-		if _, err := conn.ExecContext(ctx, p); err != nil {
-			return fmt.Errorf("failed to apply %q: %v", p, err)
+		// Switching to WAL needs a lock that a concurrent opener can hold.
+		if err := Retry(ctx, func() error {
+			_, err := conn.ExecContext(ctx, p)
+			return err
+		}); err != nil {
+			return fmt.Errorf("failed to apply %q: %w", p, err)
 		}
 	}
 	return nil

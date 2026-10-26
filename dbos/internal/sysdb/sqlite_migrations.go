@@ -324,19 +324,10 @@ func VerifySqliteMigrations(ctx context.Context, db *sql.DB, databaseLabel strin
 func RunSqliteMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 	migrations := BuildSqliteMigrations()
 
-	// Ensure the dbos_migrations table exists.
-	var exists int
-	err := db.QueryRowContext(ctx,
-		`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`,
-		MigrationTable).Scan(&exists)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("failed to probe sqlite_master: %v", err)
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := db.ExecContext(ctx,
-			fmt.Sprintf(`CREATE TABLE %s (version INTEGER NOT NULL PRIMARY KEY)`, MigrationTable)); err != nil {
-			return fmt.Errorf("failed to create migrations table: %v", err)
-		}
+	// IF NOT EXISTS: several processes can start on a new database at once.
+	if _, err := db.ExecContext(ctx,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (version INTEGER NOT NULL PRIMARY KEY)`, MigrationTable)); err != nil {
+		return fmt.Errorf("failed to create migrations table: %w", err)
 	}
 
 	// Read current version (single-row table).
@@ -344,14 +335,14 @@ func RunSqliteMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) e
 	if err := db.QueryRowContext(ctx,
 		fmt.Sprintf(`SELECT version FROM %s LIMIT 1`, MigrationTable)).Scan(&currentVersion); err != nil &&
 		!errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("failed to read current migration version: %v", err)
+		return fmt.Errorf("failed to read current migration version: %w", err)
 	}
 
 	for _, m := range migrations {
 		if m.Version <= currentVersion {
 			continue
 		}
-		if err := applySqliteMigration(ctx, db, m, currentVersion, logger); err != nil {
+		if err := applySqliteMigration(ctx, db, m, logger); err != nil {
 			return err
 		}
 		currentVersion = m.Version
@@ -359,18 +350,32 @@ func RunSqliteMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) e
 	return nil
 }
 
+// applySqliteMigration reads the version again inside its write transaction and
+// skips a migration that another process applied since the caller read it.
 func applySqliteMigration(
 	ctx context.Context,
 	db *sql.DB,
 	m MigrationFile,
-	lastApplied int64,
 	logger *slog.Logger,
 ) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction for migration %d: %v", m.Version, err)
+		return fmt.Errorf("failed to begin transaction for migration %d: %w", m.Version, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	var applied int64
+	hasRow := true
+	if err := tx.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT version FROM %s LIMIT 1`, MigrationTable)).Scan(&applied); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("failed to read current migration version: %w", err)
+		}
+		hasRow = false
+	}
+	if applied >= m.Version {
+		return nil
+	}
 
 	body := strings.TrimSpace(m.SQL)
 	for _, stmt := range splitSqliteStatements(body) {
@@ -378,24 +383,24 @@ func applySqliteMigration(
 			logger.Debug("applying sqlite migration statement", "version", m.Version, "stmt_prefix", firstNonEmptyLine(stmt))
 		}
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("failed to execute migration %d: %v", m.Version, err)
+			return fmt.Errorf("failed to execute migration %d: %w", m.Version, err)
 		}
 	}
 
-	if lastApplied == 0 {
+	if !hasRow {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf(`INSERT INTO %s (version) VALUES (?)`, MigrationTable), m.Version); err != nil {
-			return fmt.Errorf("failed to insert migration version %d: %v", m.Version, err)
+			return fmt.Errorf("failed to insert migration version %d: %w", m.Version, err)
 		}
 	} else {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf(`UPDATE %s SET version = ?`, MigrationTable), m.Version); err != nil {
-			return fmt.Errorf("failed to update migration version to %d: %v", m.Version, err)
+			return fmt.Errorf("failed to update migration version to %d: %w", m.Version, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit migration %d: %v", m.Version, err)
+		return fmt.Errorf("failed to commit migration %d: %w", m.Version, err)
 	}
 	return nil
 }
