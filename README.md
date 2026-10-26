@@ -8,7 +8,7 @@
 [![GitHub Stars](https://img.shields.io/github/stars/dbos-inc/dbos-transact-golang?style=social)](https://github.com/dbos-inc/dbos-transact-golang)
 
 
-# DBOS Transact: Lightweight Durable Workflow Orchestration with Postgres
+# DBOS Transact: Lightweight Durable Workflow Orchestration
 
 #### [Documentation](https://docs.dbos.dev/) &nbsp;&nbsp;•&nbsp;&nbsp;  [Examples](https://docs.dbos.dev/examples) &nbsp;&nbsp;•&nbsp;&nbsp; [Github](https://github.com/dbos-inc)
 </div>
@@ -17,7 +17,7 @@
 
 ## What is DBOS?
 
-DBOS provides lightweight durable workflow orchestration on top of Postgres. Instead of managing your own workflow orchestrator or task queue system, you can use DBOS to add durable workflows and queues to your program in just a few lines of code.
+DBOS provides lightweight durable workflow orchestration on top of Postgres or SQLite. Instead of managing your own workflow orchestrator or task queue system, you can use DBOS to add durable workflows and queues to your program in just a few lines of code.
 
 
 ## When Should I Use DBOS?
@@ -275,6 +275,15 @@ recvResult, err := recvHandle.GetResult()
 
 To get started, follow the [quickstart](https://docs.dbos.dev/quickstart) to install this open-source library and connect it to a Postgres database.
 Then, check out the [programming guide](https://docs.dbos.dev/python/programming-guide) to learn how to build with durable workflows and queues.
+
+DBOS can also keep its system database in SQLite instead of Postgres.
+Set `DatabaseURL` to a `sqlite:` URL (for example `sqlite:app.db`) and add one blank import to your program:
+
+```go
+import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
+```
+
+See [Using SQLite](https://docs.dbos.dev/golang/reference/configuration#using-sqlite) for details.
 
 ## Documentation
 
