@@ -221,20 +221,13 @@ func debounce[R any, P any](c *dbosContext, params debouncerParams, key string, 
 	}
 
 	// Serialize new inputs with the same encoder Enqueue uses, so a bounce stays
-	// consistent with the initial enqueue.
-	var encodedInput *string
-	var serialization string
-	var err error
-	if _, ok := any(input).(PortableWorkflowArgs); ok {
-		encodedInput, err = newPortableSerializer[any]().Encode(input)
-		serialization = PortableSerializerName
-	} else {
-		ser := resolveEncoder(c)
-		encodedInput, err = ser.Encode(input)
-		serialization = ser.Name()
-	}
+	// consistent with the initial enqueue. The workflow is portable when the caller
+	// asks for it or passes the envelope.
+	_, isPortableArgs := any(input).(PortableWorkflowArgs)
+	isPortable := options.isPortableWorkflow || isPortableArgs
+	encodedInput, serialization, err := encodeWorkflowInput(c, input, isPortable)
 	if err != nil {
-		return nil, fmt.Errorf("failed to serialize input: %w", err)
+		return nil, err
 	}
 
 	// In a workflow, checkpoint the fresh-enqueue workflow ID so a recovery replay
@@ -304,6 +297,9 @@ func debounce[R any, P any](c *dbosContext, params debouncerParams, key string, 
 		}
 		if workflowID != "" {
 			enqueueOpts = append(enqueueOpts, WithEnqueueWorkflowID(workflowID))
+		}
+		if isPortable {
+			enqueueOpts = append(enqueueOpts, WithEnqueuePortableWorkflow())
 		}
 		if options.ApplicationVersion != "" {
 			enqueueOpts = append(enqueueOpts, WithEnqueueApplicationVersion(options.ApplicationVersion))

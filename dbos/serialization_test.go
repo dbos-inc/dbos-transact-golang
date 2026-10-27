@@ -2383,6 +2383,205 @@ func TestDirectRunPortableWorkflow(t *testing.T) {
 	})
 }
 
+// portableChildInput is the struct input used by the portable child-input tests.
+type portableChildInput struct {
+	Name  string `json:"name"`
+	Value int    `json:"value"`
+}
+
+// storedWorkflowInput returns a workflow's stored input and serialization format.
+func storedWorkflowInput(t *testing.T, sysDB *sysdb.SysDB, workflowID string) (string, string) {
+	t.Helper()
+	schemaPrefix := sysDB.Dialect().SchemaPrefix(sysDB.Schema())
+	var storedInputs, storedSerialization string
+	q := sysDB.RenderSQL(`SELECT workflow_input.inputs, serialization FROM %sworkflow_status
+		LEFT JOIN %sworkflow_input USING (workflow_uuid) WHERE workflow_uuid = $1`, schemaPrefix, schemaPrefix)
+	require.NoError(t, sysDB.Pool().QueryRow(context.Background(), q, workflowID).Scan(&storedInputs, &storedSerialization))
+	return storedInputs, storedSerialization
+}
+
+// TestPortableParentNonPortableChildInput checks that a workflow started, enqueued or
+// debounced from inside a portable workflow, without asking for portable serialization,
+// keeps its own native format: it does not inherit portability from its parent, and its
+// input survives recovery and dequeue.
+func TestPortableParentNonPortableChildInput(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	executor.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
+
+	expectedInput := portableChildInput{Name: "native-child", Value: 7}
+
+	childWf := func(ctx Context, input portableChildInput) (portableChildInput, error) {
+		return input, nil
+	}
+	RegisterWorkflow(executor, childWf, WithWorkflowName("portable_parent_child_echo"))
+
+	queue, err := RegisterQueue(executor, "portable-parent-child-queue", WithQueueBasePollingInterval(10*time.Millisecond))
+	require.NoError(t, err)
+
+	deb, err := NewDebouncer(executor, childWf)
+	require.NoError(t, err)
+
+	const (
+		childID     = "portable-parent-direct-child"
+		queuedID    = "portable-parent-queued-child"
+		enqueuedID  = "portable-parent-enqueued-child"
+		debouncedID = "portable-parent-debounced-child"
+	)
+
+	parentWf := func(ctx Context, _ string) (string, error) {
+		child, err := RunWorkflow(ctx, childWf, expectedInput, WithWorkflowID(childID))
+		if err != nil {
+			return "", err
+		}
+		if _, err := child.GetResult(); err != nil {
+			return "", err
+		}
+		if _, err := RunWorkflow(ctx, childWf, expectedInput, WithWorkflowID(queuedID), WithQueue(queue)); err != nil {
+			return "", err
+		}
+		if _, err := Enqueue[portableChildInput](ctx, queue.GetName(), "portable_parent_child_echo", expectedInput, WithEnqueueWorkflowID(enqueuedID)); err != nil {
+			return "", err
+		}
+		if _, err := deb.Debounce(ctx, "portable-parent-debounce-key", 0, expectedInput, WithWorkflowID(debouncedID)); err != nil {
+			return "", err
+		}
+		return "done", nil
+	}
+	RegisterWorkflow(executor, parentWf, WithWorkflowName("portable_parent"))
+
+	require.NoError(t, Launch(executor))
+	defer Shutdown(executor, 10*time.Second)
+
+	c := executor.(*dbosContext)
+	sysDB := c.systemDB.(*sysdb.SysDB)
+	schemaPrefix := sysDB.Dialect().SchemaPrefix(sysDB.Schema())
+	nativeName := nativeEncoder(executor).Name()
+
+	parent, err := RunWorkflow(executor, parentWf, "start", WithPortableWorkflow())
+	require.NoError(t, err)
+	_, err = parent.GetResult()
+	require.NoError(t, err)
+	_, parentSerialization := storedWorkflowInput(t, sysDB, parent.GetWorkflowID())
+	require.Equal(t, PortableSerializerName, parentSerialization)
+
+	for _, workflowID := range []string{childID, queuedID, enqueuedID, debouncedID} {
+		t.Run(workflowID, func(t *testing.T) {
+			handle, err := RetrieveWorkflow[portableChildInput](executor, workflowID)
+			require.NoError(t, err)
+			result, err := handle.GetResult()
+			require.NoError(t, err)
+			assert.Equal(t, expectedInput, result)
+
+			storedInputs, storedSerialization := storedWorkflowInput(t, sysDB, workflowID)
+			assert.Equal(t, nativeName, storedSerialization, "a child keeps its own format rather than inheriting its parent's")
+			decoded, err := newJSONSerializer[portableChildInput]().Decode(&storedInputs)
+			require.NoError(t, err)
+			assert.Equal(t, expectedInput, decoded)
+		})
+	}
+
+	// Recovering the direct child decodes its stored input by its native tag.
+	t.Run("RecoverDirectChild", func(t *testing.T) {
+		_, err := sysDB.Pool().Exec(context.Background(), sysDB.RenderSQL(`UPDATE %sworkflow_status SET status = $1 WHERE workflow_uuid = $2`, schemaPrefix), string(WorkflowStatusPending), childID)
+		require.NoError(t, err)
+		_, err = sysDB.Pool().Exec(context.Background(), sysDB.RenderSQL(`DELETE FROM %sworkflow_output WHERE workflow_uuid = $1`, schemaPrefix), childID)
+		require.NoError(t, err)
+		handles, err := recoverPendingWorkflows(c, []string{"local"})
+		require.NoError(t, err)
+		require.Len(t, handles, 1)
+		_, err = handles[0].GetResult()
+		require.NoError(t, err)
+
+		retrieved, err := RetrieveWorkflow[portableChildInput](executor, childID)
+		require.NoError(t, err)
+		recovered, err := retrieved.GetResult()
+		require.NoError(t, err)
+		assert.Equal(t, expectedInput, recovered)
+	})
+}
+
+// TestPortableWorkflowNonEnvelopeInput checks that a workflow marked portable, but
+// started, enqueued or debounced with an input that is not a PortableWorkflowArgs, is
+// stored as portable_json with the args envelope, so its input survives dequeue.
+// Each is marked from a non-portable caller, so nothing is inherited.
+func TestPortableWorkflowNonEnvelopeInput(t *testing.T) {
+	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	executor.(*dbosContext).queueRunner.internalQueue.basePollingInterval = 10 * time.Millisecond
+
+	expectedInput := portableChildInput{Name: "portable-child", Value: 9}
+
+	childWf := func(ctx Context, input portableChildInput) (portableChildInput, error) {
+		return input, nil
+	}
+	RegisterWorkflow(executor, childWf, WithWorkflowName("portable_marked_echo"))
+
+	queue, err := RegisterQueue(executor, "portable-marked-queue", WithQueueBasePollingInterval(10*time.Millisecond))
+	require.NoError(t, err)
+
+	deb, err := NewDebouncer(executor, childWf)
+	require.NoError(t, err)
+
+	const (
+		queuedID           = "portable-marked-queued"
+		enqueuedID         = "portable-marked-enqueued"
+		debouncedID        = "portable-marked-debounced"
+		childEnqueuedID    = "portable-marked-child-enqueued"
+		childDebouncedID   = "portable-marked-child-debounced"
+		nativeParentWfName = "native_parent_of_portable"
+	)
+
+	// A non-portable parent enqueues and debounces portable workflows.
+	parentWf := func(ctx Context, _ string) (string, error) {
+		if _, err := Enqueue[portableChildInput](ctx, queue.GetName(), "portable_marked_echo", expectedInput,
+			WithEnqueueWorkflowID(childEnqueuedID), WithEnqueuePortableWorkflow()); err != nil {
+			return "", err
+		}
+		if _, err := deb.Debounce(ctx, "portable-marked-child-debounce-key", 0, expectedInput,
+			WithWorkflowID(childDebouncedID), WithPortableWorkflow()); err != nil {
+			return "", err
+		}
+		return "done", nil
+	}
+	RegisterWorkflow(executor, parentWf, WithWorkflowName(nativeParentWfName))
+
+	require.NoError(t, Launch(executor))
+	defer Shutdown(executor, 10*time.Second)
+
+	sysDB := executor.(*dbosContext).systemDB.(*sysdb.SysDB)
+
+	_, err = RunWorkflow(executor, childWf, expectedInput, WithWorkflowID(queuedID), WithQueue(queue), WithPortableWorkflow())
+	require.NoError(t, err)
+	_, err = Enqueue[portableChildInput](executor, queue.GetName(), "portable_marked_echo", expectedInput,
+		WithEnqueueWorkflowID(enqueuedID), WithEnqueuePortableWorkflow())
+	require.NoError(t, err)
+	_, err = deb.Debounce(executor, "portable-marked-debounce-key", 0, expectedInput, WithWorkflowID(debouncedID), WithPortableWorkflow())
+	require.NoError(t, err)
+
+	parent, err := RunWorkflow(executor, parentWf, "start")
+	require.NoError(t, err)
+	_, err = parent.GetResult()
+	require.NoError(t, err)
+
+	for _, workflowID := range []string{queuedID, enqueuedID, debouncedID, childEnqueuedID, childDebouncedID} {
+		t.Run(workflowID, func(t *testing.T) {
+			handle, err := RetrieveWorkflow[portableChildInput](executor, workflowID)
+			require.NoError(t, err)
+			result, err := handle.GetResult()
+			require.NoError(t, err)
+			assert.Equal(t, expectedInput, result)
+
+			storedInputs, storedSerialization := storedWorkflowInput(t, sysDB, workflowID)
+			assert.Equal(t, PortableSerializerName, storedSerialization)
+			var envelope portableArgsRaw
+			require.NoError(t, json.Unmarshal([]byte(storedInputs), &envelope))
+			require.Len(t, envelope.PositionalArgs, 1, "stored portable_json input must carry the args envelope")
+			decoded, err := decodePortableArgs[portableChildInput](&storedInputs)
+			require.NoError(t, err)
+			assert.Equal(t, expectedInput, decoded)
+		})
+	}
+}
+
 func TestPortableWorkflowError(t *testing.T) {
 	executor := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 

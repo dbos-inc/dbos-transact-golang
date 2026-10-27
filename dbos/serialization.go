@@ -276,10 +276,33 @@ func resolveEncoder(ctx context.Context) Serializer[any] {
 	if wfState, ok := ctx.Value(workflowStateKey).(*workflowState); ok && wfState != nil && wfState.isPortableWorkflow {
 		return newPortableSerializer[any]()
 	}
+	return nativeEncoder(ctx)
+}
+
+// nativeEncoder returns the configured custom serializer, or the default JSON one.
+func nativeEncoder(ctx context.Context) Serializer[any] {
 	if dc, ok := ctx.(*dbosContext); ok && dc.serializer != nil {
 		return dc.serializer
 	}
 	return newJSONSerializer[any]()
+}
+
+// encodeWorkflowInput encodes the input of a workflow being started, enqueued or
+// debounced, and returns the serialization format to record with it.
+func encodeWorkflowInput(ctx context.Context, input any, portable bool) (*string, string, error) {
+	if portable {
+		encoded, err := encodePortableArgs(input)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to serialize portable workflow input: %w", err)
+		}
+		return encoded, PortableSerializerName, nil
+	}
+	ser := nativeEncoder(ctx)
+	encoded, err := ser.Encode(input)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to serialize workflow input: %w", err)
+	}
+	return encoded, ser.Name(), nil
 }
 
 // resolveDecoder returns a typed serializer for decoding a value based on the stored serialization format.

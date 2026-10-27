@@ -1417,22 +1417,12 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		return nil, fmt.Errorf("priority %d exceeds maximum allowed value %d", params.Priority, math.MaxInt)
 	}
 
-	// Serialize input before storing in workflow status
-	var encodedInput any
-	if params.isPortableWorkflow { // Direct call to a portable workflow
-		var serErr error
-		encodedInput, serErr = encodePortableArgs(input)
-		if serErr != nil {
-			c.logger.Error("failed to serialize portable workflow input", "error", serErr, "workflow_id", workflowID)
-			return nil, models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to serialize portable workflow input: %w", serErr))
-		}
-	} else {
-		var serErr error
-		encodedInput, serErr = resolveEncoder(c).Encode(input)
-		if serErr != nil {
-			c.logger.Error("failed to serialize workflow input", "error", serErr, "workflow_id", workflowID)
-			return nil, models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to serialize workflow input: %w", serErr))
-		}
+	// Serialize input before storing in workflow status. The format is this workflow's
+	// own (WithPortableWorkflow), never inherited from a portable parent.
+	encodedInput, serialization, serErr := encodeWorkflowInput(c, input, params.isPortableWorkflow)
+	if serErr != nil {
+		c.logger.Error("failed to serialize workflow input", "error", serErr, "workflow_id", workflowID)
+		return nil, models.NewWorkflowExecutionError(workflowID, serErr)
 	}
 
 	var configName *string
@@ -1461,12 +1451,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		QueuePartitionKey:  params.QueuePartitionKey,
 		DelayUntil:         delayUntil,
 		Attributes:         params.WorkflowAttributes,
-		Serialization: func() string {
-			if params.isPortableWorkflow {
-				return PortableSerializerName
-			}
-			return resolveEncoder(c).Name()
-		}(),
+		Serialization:      serialization,
 	}
 	if isChildWorkflow {
 		workflowStatus.ParentWorkflowID = parentWorkflowState.workflowID
@@ -2074,8 +2059,21 @@ type enqueueOptions struct {
 	attributes          map[string]any
 	debounceDeadline    time.Time
 	isDebounced         bool
+	isPortableWorkflow  bool
 	tx                  any
 	txSet               bool
+}
+
+// WithEnqueuePortableWorkflow stores the enqueued workflow in the cross-language
+// portable JSON format: its input is wrapped in the [PortableWorkflowArgs] envelope
+// as the single positional argument, and the workflow runs as a portable workflow
+// when dequeued (see [WithPortableWorkflow]).
+//
+// Passing a [PortableWorkflowArgs] as the input implies this option.
+func WithEnqueuePortableWorkflow() EnqueueOption {
+	return func(opts *enqueueOptions) {
+		opts.isPortableWorkflow = true
+	}
 }
 
 // WithEnqueueTransaction enqueues the workflow on a transaction the caller owns
@@ -2188,25 +2186,12 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 		c.logger.Warn("enqueue timeout does not set a deadline: the timeout clock starts when the workflow is dequeued", "workflow_id", workflowID, "timeout", params.workflowTimeout)
 	}
 
-	// Encode input and determine serialization format
-	var encodedInput *string
-	var serialization string
-	if _, ok := input.(PortableWorkflowArgs); ok {
-		ser := newPortableSerializer[any]()
-		var err error
-		encodedInput, err = ser.Encode(input)
-		if err != nil {
-			return nil, fmt.Errorf("failed to serialize portable workflow input: %w", err)
-		}
-		serialization = PortableSerializerName
-	} else {
-		ser := resolveEncoder(c)
-		var err error
-		encodedInput, err = ser.Encode(input)
-		if err != nil {
-			return nil, fmt.Errorf("failed to serialize workflow input: %w", err)
-		}
-		serialization = ser.Name()
+	// Encode input and determine serialization format. The format is the enqueued
+	// workflow's own, never inherited from a portable workflow doing the enqueue.
+	_, isPortableArgs := input.(PortableWorkflowArgs)
+	encodedInput, serialization, err := encodeWorkflowInput(c, input, params.isPortableWorkflow || isPortableArgs)
+	if err != nil {
+		return nil, err
 	}
 
 	// A debounced enqueue is always DELAYED, even with a zero delay: the debounce key
