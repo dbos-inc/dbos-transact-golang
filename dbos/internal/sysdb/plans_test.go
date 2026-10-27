@@ -57,6 +57,15 @@ func TestLatestApplicationVersionUsesIndexes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crdb := IsCockroachDB(conn.Conn())
+	conn.Release()
+	if crdb {
+		t.Skip("skipping on CockroachDB: EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) and the Postgres plan nodes it asserts on are not available")
+	}
 	if _, err := pool.Exec(ctx, fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema)); err != nil {
 		t.Fatal(err)
 	}
