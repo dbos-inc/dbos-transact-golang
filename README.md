@@ -276,6 +276,15 @@ recvResult, err := recvHandle.GetResult()
 To get started, follow the [quickstart](https://docs.dbos.dev/quickstart) to install this open-source library and connect it to a Postgres database.
 Then, check out the [programming guide](https://docs.dbos.dev/python/programming-guide) to learn how to build with durable workflows and queues.
 
+DBOS can also keep its system database in SQLite instead of Postgres.
+Set `DatabaseURL` to a `sqlite:` URL (for example `sqlite:app.db`) and add one blank import to your program:
+
+```go
+import _ "github.com/dbos-inc/dbos-transact-golang/dbos/driver/sqlite"
+```
+
+See [Using SQLite](https://docs.dbos.dev/golang/reference/configuration#using-sqlite) for details.
+
 ## Documentation
 
 [https://docs.dbos.dev](https://docs.dbos.dev)
