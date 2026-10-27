@@ -485,6 +485,12 @@ var migration122SQL string
 //go:embed migrations/123_add_workflow_status_creator_xid.sql
 var migration123SQL string
 
+//go:embed migrations/124_create_application_versions_timestamp_index.sql
+var migration124SQL string
+
+//go:embed migrations/125_create_application_versions_owner_timestamp_index.sql
+var migration125SQL string
+
 type MigrationFile struct {
 	Version int64
 	SQL     string
@@ -671,6 +677,8 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 		{Version: 121, SQL: fmt.Sprintf(migration121SQL, sanitizedSchema)},
 		{Version: 122, SQL: fmt.Sprintf(migration122SQL, c, sanitizedSchema), Online: !isCockroach},
 		{Version: 123, SQL: fmt.Sprintf(migration123SQL, sanitizedSchema)},
+		{Version: 124, SQL: fmt.Sprintf(migration124SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 125, SQL: fmt.Sprintf(migration125SQL, c, sanitizedSchema), Online: !isCockroach},
 	}
 }
 
@@ -6438,6 +6446,26 @@ func (s *SysDB) ListApplicationVersions(ctx context.Context) ([]VersionInfo, err
 	return versions, nil
 }
 
+// latestApplicationVersionQuery selects the newest version owner can see: its
+// own plus unclaimed ones, or every application's when owner is empty.
+func (s *SysDB) latestApplicationVersionQuery(owner string) (string, []any) {
+	const columns = "version_id, version_name, version_timestamp, created_at, application_name"
+	table := s.dialect.SchemaPrefix(s.schema) + "application_versions"
+	if owner == "" {
+		return s.RenderSQL("SELECT %s FROM %s ORDER BY version_timestamp DESC LIMIT 1", columns, table), nil
+	}
+	// Probe stamped/unclaimed rows in two select statements and unionize them.
+	// That way both select can use the compositive index on application name and version timestamp.
+	// The order by must also start with the application name so that is IS NULL filter takes the index too.
+	probe := func(alias, filter string) string {
+		return fmt.Sprintf("SELECT %s FROM (SELECT %s FROM %s WHERE %s ORDER BY application_name, version_timestamp DESC LIMIT 1) AS %s",
+			columns, columns, table, filter, alias)
+	}
+	query := probe("owned", "application_name = $1") + " UNION ALL " + probe("unclaimed", "application_name IS NULL") +
+		" ORDER BY version_timestamp DESC LIMIT 1"
+	return s.dialect.RewriteQuery(query), []any{owner}
+}
+
 // GetLatestApplicationVersion returns the latest version registered by an
 // application, plus unclaimed ones. applicationName defaults to this context's.
 // An application-less context with no explicit name matches every application.
@@ -6446,23 +6474,14 @@ func (s *SysDB) GetLatestApplicationVersion(ctx context.Context, tx Tx, applicat
 	if owner == "" {
 		owner = s.appName
 	}
-	query := s.RenderSQL(`
-		SELECT version_id, version_name, version_timestamp, created_at, application_name
-		FROM %sapplication_versions
-	`, s.dialect.SchemaPrefix(s.schema))
-	var args []any
-	if owner != "" {
-		args = append(args, owner)
-		query += " WHERE " + nameFilterSQL("application_name", 1)
-	}
-	query += " ORDER BY version_timestamp DESC LIMIT 1"
+	query, args := s.latestApplicationVersionQuery(owner)
 	var q Querier = s.pool
 	if tx != nil {
 		q = tx
 	}
 	var v VersionInfo
 	var rowOwner *string
-	err := q.QueryRow(ctx, s.dialect.RewriteQuery(query), args...).Scan(&v.ID, &v.Name, &v.Timestamp, &v.CreatedAt, &rowOwner)
+	err := q.QueryRow(ctx, query, args...).Scan(&v.ID, &v.Name, &v.Timestamp, &v.CreatedAt, &rowOwner)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, models.NewNoApplicationVersionsError()
