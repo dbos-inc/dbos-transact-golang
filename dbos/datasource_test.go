@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1179,6 +1180,105 @@ func TestRunAsTransaction(t *testing.T) {
 		_, err = h.GetResult()
 		require.NoError(t, err)
 	})
+
+	// A stale run's failure must not become the step's outcome, or the owner would
+	// replay it instead of running fn. The workflow changes hands while fn runs, or
+	// just as the failure is being recorded.
+	t.Run("StaleOwnerFailureNotRecorded", func(t *testing.T) {
+		for _, takeoverAt := range []string{"body", "insert"} {
+			t.Run(takeoverAt, func(t *testing.T) {
+				ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+				ub := openUserBackend(t)
+				ds := ub.register(t, ctx, "app")
+				sys := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
+
+				var wfID string
+				takeover := func() { setWorkflowOwner(t, sys, wfID) }
+				if takeoverAt == "insert" {
+					// Installed before Launch, while no goroutine reads the field.
+					ds.pool = &takeoverPool{Pool: ds.pool, table: ub.completionTable(), takeover: takeover}
+				}
+				var runs atomic.Int32
+				stepErrs := make(chan error, 2)
+				wf := func(dctx Context, _ string) (string, error) {
+					res, err := RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+						if runs.Add(1) > 1 {
+							return "fresh", nil
+						}
+						if takeoverAt == "body" {
+							takeover()
+						}
+						return "", errors.New("stale execution failed")
+					})
+					stepErrs <- err
+					return res, err
+				}
+				RegisterWorkflow(ctx, wf)
+				require.NoError(t, Launch(ctx))
+
+				wfID = uuid.NewString()
+				h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+				require.NoError(t, err)
+				require.ErrorIs(t, <-stepErrs, ErrConflictingWorkflowID)
+
+				// The stale run parks without recording its failure: no completion row, no checkpoint.
+				require.Equal(t, 0, ub.countRows(t, `SELECT COUNT(*) FROM `+ub.completionTable()+` WHERE workflow_id = $1`, wfID))
+				steps, err := GetWorkflowSteps(ctx, wfID)
+				require.NoError(t, err)
+				require.Len(t, steps, 0)
+
+				// The owner then runs fn itself, and the parked run reports its outcome.
+				owner := startDuplicateExecution(t, ctx, wf, "", wfID)
+				require.NoError(t, <-stepErrs)
+				res, err := owner.GetResult()
+				require.NoError(t, err)
+				require.Equal(t, "fresh", res)
+				require.EqualValues(t, 2, runs.Load())
+				res, err = h.GetResult()
+				require.NoError(t, err)
+				require.Equal(t, "fresh", res)
+			})
+		}
+	})
+}
+
+// takeoverPool wraps a data source's pool and hands the workflow to another
+// execution just before the first completion row insert runs, on the pool or in
+// a transaction: the way a takeover landing right after an ownership check would.
+type takeoverPool struct {
+	Pool
+	table    string
+	takeover func()
+	fired    atomic.Bool
+}
+
+func (p *takeoverPool) beforeExec(query string) {
+	if strings.HasPrefix(query, "INSERT INTO "+p.table+" ") && p.fired.CompareAndSwap(false, true) {
+		p.takeover()
+	}
+}
+
+func (p *takeoverPool) Exec(ctx context.Context, query string, args ...any) (Result, error) {
+	p.beforeExec(query)
+	return p.Pool.Exec(ctx, query, args...)
+}
+
+func (p *takeoverPool) BeginTx(ctx context.Context, opts TxOptions) (Tx, error) {
+	tx, err := p.Pool.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &takeoverTx{Tx: tx, p: p}, nil
+}
+
+type takeoverTx struct {
+	Tx
+	p *takeoverPool
+}
+
+func (t *takeoverTx) Exec(ctx context.Context, query string, args ...any) (Result, error) {
+	t.p.beforeExec(query)
+	return t.Tx.Exec(ctx, query, args...)
 }
 
 // setupSharedDBOS builds a DBOS context whose system-database pool is ALSO the
