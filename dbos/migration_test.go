@@ -617,3 +617,31 @@ func TestMigrateSqlite(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, Shutdown(ctx, 30*time.Second))
 }
+
+// TestMigrateSqliteConcurrent starts several migrations on one new sqlite file at once.
+func TestMigrateSqliteConcurrent(t *testing.T) {
+	bg := context.Background()
+	databaseURL := "sqlite:" + filepath.Join(t.TempDir(), "concurrent.db")
+
+	const openers = 6
+	errs := make(chan error, openers)
+	start := make(chan struct{})
+	for range openers {
+		go func() {
+			<-start
+			errs <- Migrate(bg, databaseURL)
+		}()
+	}
+	close(start)
+	for range openers {
+		require.NoError(t, <-errs)
+	}
+
+	ctx, err := NewContext(bg, Config{
+		DatabaseURL:    databaseURL,
+		AppName:        "test-app",
+		SkipMigrations: true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, Shutdown(ctx, 30*time.Second))
+}
