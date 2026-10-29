@@ -22,12 +22,18 @@ type enterpriseFeature struct {
 
 var autoUpgradeFeature = enterpriseFeature{entitlement: "autoUpgrade", description: "Auto-upgrading workflows"}
 
+var shardingFeature = enterpriseFeature{entitlement: "sharding", description: "Using a sharded system database"}
+
 const conductorFeature = "Connecting to DBOS Conductor"
 
 func enabledFeatures(config *Config) []enterpriseFeature {
 	var features []enterpriseFeature
 	if config.AutoUpgrade {
 		features = append(features, autoUpgradeFeature)
+	}
+	// A client runs no workflows, so it needs the module but no entitlement.
+	if config.Sharding && !config.isClient {
+		features = append(features, shardingFeature)
 	}
 	return features
 }
