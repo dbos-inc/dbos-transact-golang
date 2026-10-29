@@ -584,6 +584,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 	// Best-effort, except that a row recorded meanwhile wins over the failure,
 	// and losing ownership parks the execution.
 	// This refers to non-conflict errors only
+	// A serialization failure or deadlock aborts the transaction: retry it with a fresh one, as runTxnResilient does.
 	if serializedErr != nil {
 		if recErr := sysdb.Retry(c, func() error {
 			tx, err := ds.pool.BeginTx(uncancellableCtx, TxOptions{})
@@ -599,7 +600,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 				return err
 			}
 			return tx.Commit(uncancellableCtx)
-		}, sysdb.WithRetrierLogger(c.logger)); recErr != nil {
+		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(ds.dialect.IsRetryableTransaction)); recErr != nil {
 			if errors.Is(recErr, errCompletionRecorded) {
 				stepError = recErr
 			} else if errors.Is(recErr, ErrConflictingWorkflowID) {
