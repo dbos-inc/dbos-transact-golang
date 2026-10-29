@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"reflect"
 	"runtime"
 	"runtime/debug"
@@ -29,6 +30,7 @@ import (
 // workflowState holds the runtime state for a workflow execution
 type workflowState struct {
 	workflowID          string
+	shardKey            string // The workflow's shard key; empty on an unsharded system database
 	ownerXID            string
 	stepID              int
 	isWithinStep        bool
@@ -83,7 +85,36 @@ type WorkflowHandle[R any] interface {
 
 type baseWorkflowHandle struct {
 	workflowID  string
-	dbosContext Context
+	shardKey    string  // The workflow's shard key, bound on dbosContext; empty unsharded
+	dbosContext Context // The handle's context, with the workflow's shard key bound
+}
+
+// keyedHandle is a handle that knows its workflow's shard key.
+type keyedHandle interface {
+	handleShardKey() string
+}
+
+func (h *baseWorkflowHandle) handleShardKey() string { return h.shardKey }
+
+// handleShardKey is the shard key a handle carries, or "" for one that carries none.
+func handleShardKey(handle any) string {
+	if keyed, ok := handle.(keyedHandle); ok {
+		return keyed.handleShardKey()
+	}
+	return ""
+}
+
+// bindShardKey returns ctx with workflowID bound to key, for a handle or an operation
+// that addresses the workflow later. An empty key, or a context DBOS did not create,
+// is returned unchanged.
+func bindShardKey(ctx Context, workflowID, key string) Context {
+	if key == "" {
+		return ctx
+	}
+	if c, ok := ctx.(*dbosContext); ok {
+		return c.clone(sysdb.WithShardKey(c.ctx, workflowID, key))
+	}
+	return ctx
 }
 
 // GetResultOption is a functional option for configuring GetResult behavior.
@@ -176,21 +207,23 @@ func (h *baseWorkflowHandle) GetWorkflowID() string {
 	return h.workflowID
 }
 
-func newWorkflowHandle[R any](ctx Context, workflowID string, outcomeChan chan workflowOutcome[R]) *workflowHandle[R] {
+func newWorkflowHandle[R any](ctx Context, workflowID, shardKey string, outcomeChan chan workflowOutcome[R]) *workflowHandle[R] {
 	return &workflowHandle[R]{
 		baseWorkflowHandle: baseWorkflowHandle{
 			workflowID:  workflowID,
-			dbosContext: ctx,
+			shardKey:    shardKey,
+			dbosContext: bindShardKey(ctx, workflowID, shardKey),
 		},
 		outcomeChan: outcomeChan,
 	}
 }
 
-func newWorkflowPollingHandle[R any](ctx Context, workflowID string) *workflowPollingHandle[R] {
+func newWorkflowPollingHandle[R any](ctx Context, workflowID, shardKey string) *workflowPollingHandle[R] {
 	return &workflowPollingHandle[R]{
 		baseWorkflowHandle: baseWorkflowHandle{
 			workflowID:  workflowID,
-			dbosContext: ctx,
+			shardKey:    shardKey,
+			dbosContext: bindShardKey(ctx, workflowID, shardKey),
 		},
 	}
 }
@@ -489,7 +522,7 @@ func (h *workflowHandleProxy[R]) GetWorkflowID() string {
 // type-asserts the wrapped handle's results.
 func typedHandle[R any](c Client, handle WorkflowHandle[any]) WorkflowHandle[R] {
 	if ctx, ok := c.(*dbosContext); ok {
-		return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID())
+		return newWorkflowPollingHandle[R](ctx, handle.GetWorkflowID(), handleShardKey(handle))
 	}
 	return &workflowHandleProxy[R]{wrappedHandle: handle}
 }
@@ -919,6 +952,7 @@ type workflowOptions struct {
 	WorkflowAttributes  map[string]any
 	isPortableWorkflow  bool
 	runInstance         ConfiguredInstance
+	ShardKey            string
 	err                 error // invalid option usage, surfaced when options are parsed
 }
 
@@ -1012,6 +1046,20 @@ func WithQueuePartitionKey(partitionKey string) WorkflowOption {
 func WithWorkflowAttributes(attributes map[string]any) WorkflowOption {
 	return func(p *workflowOptions) {
 		p.WorkflowAttributes = attributes
+	}
+}
+
+// WithShardKey sets the shard key the started or enqueued workflow lives under. It is
+// required on a sharded system database (see Config.Sharding), and an error on an
+// unsharded one. A child workflow does not inherit its parent's key: pass it explicitly.
+// A child under another key than its parent's must be enqueued (WithQueue).
+func WithShardKey(key string) WorkflowOption {
+	return func(p *workflowOptions) {
+		if key == "" {
+			p.err = errors.Join(p.err, models.NewInvalidOptionError("invalid shard key: a shard key must be a non-empty string"))
+			return
+		}
+		p.ShardKey = key
 	}
 }
 
@@ -2064,6 +2112,22 @@ type enqueueOptions struct {
 	isPortableWorkflow  bool
 	tx                  any
 	txSet               bool
+	shardKey            string
+	shardKeyErr         error
+}
+
+// WithEnqueueShardKey sets the shard key the enqueued workflow lives under. It is
+// required on a sharded system database (see Config.Sharding), and an error on an
+// unsharded one. A workflow enqueued from inside another workflow does not inherit its
+// parent's key.
+func WithEnqueueShardKey(key string) EnqueueOption {
+	return func(opts *enqueueOptions) {
+		if key == "" {
+			opts.shardKeyErr = models.NewInvalidOptionError("invalid shard key: a shard key must be a non-empty string")
+			return
+		}
+		opts.shardKey = key
+	}
 }
 
 // WithEnqueuePortableWorkflow stores the enqueued workflow in the cross-language
@@ -3324,6 +3388,8 @@ type sendOptions struct {
 	tx                    any
 	txSet                 bool
 	sendToForks           bool
+	shardKey              string
+	shardKeyErr           error
 }
 
 // SendOption is a functional option for configuring a Send call.
@@ -3336,6 +3402,19 @@ type SendOption func(*sendOptions)
 func WithSendToForks() SendOption {
 	return func(so *sendOptions) {
 		so.sendToForks = true
+	}
+}
+
+// WithSendShardKey names the destination's shard key, required on a sharded system
+// database (see Config.Sharding) unless the destination's key is bound on the context.
+// Not valid on SendBulk: set SendMessage.ShardKey on each message instead.
+func WithSendShardKey(key string) SendOption {
+	return func(opts *sendOptions) {
+		if key == "" {
+			opts.shardKeyErr = models.NewInvalidOptionError("invalid shard key: a shard key must be a non-empty string")
+			return
+		}
+		opts.shardKey = key
 	}
 }
 
