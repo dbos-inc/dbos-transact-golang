@@ -596,6 +596,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 				return err
 			}
 			// Holding this step's row, so a later owner's insert waits on our commit.
+			// Note there's still an unavoidable, short gap between reading ownership and committing.
 			if err := stillOwns(); err != nil {
 				return err
 			}
