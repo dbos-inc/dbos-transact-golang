@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,8 @@ import (
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -1179,6 +1182,151 @@ func TestRunAsTransaction(t *testing.T) {
 		_, err = h.GetResult()
 		require.NoError(t, err)
 	})
+
+	// A stale run's failure must not become the step's outcome, or the owner would
+	// replay it instead of running fn. The workflow changes hands while fn runs, or
+	// just as the failure is being recorded.
+	t.Run("StaleOwnerFailureNotRecorded", func(t *testing.T) {
+		for _, takeoverAt := range []string{"body", "insert"} {
+			t.Run(takeoverAt, func(t *testing.T) {
+				ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+				ub := openUserBackend(t)
+				ds := ub.register(t, ctx, "app")
+				sys := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
+
+				var wfID string
+				takeover := func() { setWorkflowOwner(t, sys, wfID) }
+				if takeoverAt == "insert" {
+					// Installed before Launch, while no goroutine reads the field.
+					ds.pool = &completionInsertHookPool{Pool: ds.pool, table: ub.completionTable(), hook: func() error { takeover(); return nil }}
+				}
+				var runs atomic.Int32
+				stepErrs := make(chan error, 2)
+				wf := func(dctx Context, _ string) (string, error) {
+					res, err := RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+						if runs.Add(1) > 1 {
+							return "fresh", nil
+						}
+						if takeoverAt == "body" {
+							takeover()
+						}
+						return "", errors.New("stale execution failed")
+					})
+					stepErrs <- err
+					return res, err
+				}
+				RegisterWorkflow(ctx, wf)
+				require.NoError(t, Launch(ctx))
+
+				wfID = uuid.NewString()
+				h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+				require.NoError(t, err)
+				require.ErrorIs(t, <-stepErrs, ErrConflictingWorkflowID)
+
+				// The stale run parks without recording its failure: no completion row, no checkpoint.
+				require.Equal(t, 0, ub.countRows(t, `SELECT COUNT(*) FROM `+ub.completionTable()+` WHERE workflow_id = $1`, wfID))
+				steps, err := GetWorkflowSteps(ctx, wfID)
+				require.NoError(t, err)
+				require.Len(t, steps, 0)
+
+				// The owner then runs fn itself, and the parked run reports its outcome.
+				owner := startDuplicateExecution(t, ctx, wf, "", wfID)
+				require.NoError(t, <-stepErrs)
+				res, err := owner.GetResult()
+				require.NoError(t, err)
+				require.Equal(t, "fresh", res)
+				require.EqualValues(t, 2, runs.Load())
+				res, err = h.GetResult()
+				require.NoError(t, err)
+				require.Equal(t, "fresh", res)
+			})
+		}
+	})
+
+	// A serialization failure while recording the failure row aborts that transaction,
+	// and CockroachDB cannot retry it server-side, so DBOS retries it with a fresh one.
+	t.Run("FailureRecordRetriesSerializationFailure", func(t *testing.T) {
+		if useSqliteBackend() {
+			t.Skip("SQLite's transaction conflicts (busy/locked) are already retried as transient errors")
+		}
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ds := ub.register(t, ctx, "app")
+		hook := &completionInsertHookPool{Pool: ds.pool, table: ub.completionTable(), hook: func() error {
+			return &pgconn.PgError{Code: pgerrcode.SerializationFailure}
+		}}
+		// Installed before Launch, while no goroutine reads the field.
+		ds.pool = hook
+
+		wf := func(dctx Context, _ string) (string, error) {
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (string, error) {
+				return "", errors.New("transaction failed")
+			})
+		}
+		RegisterWorkflow(ctx, wf)
+		require.NoError(t, Launch(ctx))
+
+		wfID := uuid.NewString()
+		h, err := RunWorkflow(ctx, wf, "", WithWorkflowID(wfID))
+		require.NoError(t, err)
+		_, err = h.GetResult()
+		require.ErrorContains(t, err, "transaction failed")
+		require.True(t, hook.fired.Load(), "the failure row insert was not intercepted")
+
+		// The retried transaction recorded the failure in both databases.
+		output, errStr := ub.completionCells(t, wfID, 0)
+		require.Nil(t, output)
+		require.NotNil(t, errStr)
+		steps, err := GetWorkflowSteps(ctx, wfID)
+		require.NoError(t, err)
+		require.Len(t, steps, 1)
+		require.NotNil(t, steps[0].Error)
+	})
+}
+
+// completionInsertHookPool wraps a data source's pool and runs hook just before the
+// first completion row insert, on the pool or in a transaction. A hook that hands
+// the workflow to another execution is a takeover landing right after an ownership
+// check; a hook that returns an error fails that insert instead of running it.
+type completionInsertHookPool struct {
+	Pool
+	table string
+	hook  func() error
+	fired atomic.Bool
+}
+
+func (p *completionInsertHookPool) beforeExec(query string) error {
+	if strings.HasPrefix(query, "INSERT INTO "+p.table+" ") && p.fired.CompareAndSwap(false, true) {
+		return p.hook()
+	}
+	return nil
+}
+
+func (p *completionInsertHookPool) Exec(ctx context.Context, query string, args ...any) (Result, error) {
+	if err := p.beforeExec(query); err != nil {
+		return nil, err
+	}
+	return p.Pool.Exec(ctx, query, args...)
+}
+
+func (p *completionInsertHookPool) BeginTx(ctx context.Context, opts TxOptions) (Tx, error) {
+	tx, err := p.Pool.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &completionInsertHookTx{Tx: tx, p: p}, nil
+}
+
+type completionInsertHookTx struct {
+	Tx
+	p *completionInsertHookPool
+}
+
+func (t *completionInsertHookTx) Exec(ctx context.Context, query string, args ...any) (Result, error) {
+	if err := t.p.beforeExec(query); err != nil {
+		return nil, err
+	}
+	return t.Tx.Exec(ctx, query, args...)
 }
 
 // setupSharedDBOS builds a DBOS context whose system-database pool is ALSO the

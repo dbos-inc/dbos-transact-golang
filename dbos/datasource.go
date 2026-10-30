@@ -578,16 +578,35 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 	}
 
 	// Mirror the failure into the user database so the user's own database is self-describing.
-	// fn's transaction rolled back, so this is a standalone insert on the pool,
+	// fn's transaction rolled back, so this is a separate transaction on the pool,
 	// written before the system-DB checkpoint to keep the layer-1-then-layer-2 recovery order.
-	// Best-effort, except that a row recorded meanwhile wins over the failure.
+	// Like txn1, it commits only while this execution owns the workflow.
+	// Best-effort, except that a row recorded meanwhile wins over the failure,
+	// and losing ownership parks the execution.
 	// This refers to non-conflict errors only
+	// A serialization failure or deadlock aborts the transaction: retry it with a fresh one, as runTxnResilient does.
 	if serializedErr != nil {
 		if recErr := sysdb.Retry(c, func() error {
-			return ds.recordCompletion(uncancellableCtx, ds.pool, stepState.workflowID, stepState.stepID, nil, serializedErr, ser.Name())
-		}, sysdb.WithRetrierLogger(c.logger)); recErr != nil {
+			tx, err := ds.pool.BeginTx(uncancellableCtx, TxOptions{})
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(uncancellableCtx)
+			if err := ds.recordCompletion(uncancellableCtx, tx, stepState.workflowID, stepState.stepID, nil, serializedErr, ser.Name()); err != nil {
+				return err
+			}
+			// Holding this step's row, so a later owner's insert waits on our commit.
+			// Note there's still an unavoidable, short gap between reading ownership and committing.
+			if err := stillOwns(); err != nil {
+				return err
+			}
+			return tx.Commit(uncancellableCtx)
+		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(ds.dialect.IsRetryableTransaction)); recErr != nil {
 			if errors.Is(recErr, errCompletionRecorded) {
 				stepError = recErr
+			} else if errors.Is(recErr, ErrConflictingWorkflowID) {
+				// The workflow changed hands before the failure was recorded. We rolled back and, now, park.
+				return nil, recErr
 			} else {
 				c.logger.Warn("Failed to record transaction failure in the user database; the system database remains the source of truth",
 					"datasource", ds.name, "workflow_id", stepState.workflowID, "step_id", stepState.stepID, "error", recErr)
