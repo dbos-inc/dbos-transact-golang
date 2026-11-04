@@ -952,7 +952,7 @@ type workflowOptions struct {
 	WorkflowAttributes  map[string]any
 	isPortableWorkflow  bool
 	runInstance         ConfiguredInstance
-	ShardKey            string
+	ShardKey            *string
 	err                 error // invalid option usage, surfaced when options are parsed
 }
 
@@ -1055,11 +1055,7 @@ func WithWorkflowAttributes(attributes map[string]any) WorkflowOption {
 // A child under another key than its parent's must be enqueued (WithQueue).
 func WithShardKey(key string) WorkflowOption {
 	return func(p *workflowOptions) {
-		if key == "" {
-			p.err = errors.Join(p.err, models.NewInvalidOptionError("invalid shard key: a shard key must be a non-empty string"))
-			return
-		}
-		p.ShardKey = key
+		p.ShardKey = &key
 	}
 }
 
@@ -1181,7 +1177,7 @@ func RunWorkflow[P any, R any](ctx Context, fn Workflow[P, R], input P, opts ...
 	// If we got a polling handle, return its typed version
 	if pollingHandle, ok := handle.(*workflowPollingHandle[any]); ok {
 		// We need to convert the polling handle to a typed handle
-		typedPollingHandle := newWorkflowPollingHandle[R](pollingHandle.dbosContext, pollingHandle.workflowID)
+		typedPollingHandle := newWorkflowPollingHandle[R](pollingHandle.dbosContext, pollingHandle.workflowID, pollingHandle.shardKey)
 		return typedPollingHandle, nil
 	}
 
@@ -1246,7 +1242,7 @@ func RunWorkflow[P any, R any](ctx Context, fn Workflow[P, R], input P, opts ...
 			}
 		}()
 
-		typedHandle := newWorkflowHandle(handle.dbosContext, handle.workflowID, typedOutcomeChan)
+		typedHandle := newWorkflowHandle(handle.dbosContext, handle.workflowID, handle.shardKey, typedOutcomeChan)
 
 		return typedHandle, nil
 	}
@@ -1266,6 +1262,13 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	if params.err != nil {
 		c.logger.Error("invalid workflow options", "workflow_name", params.WorkflowName, "error", params.err)
 		return nil, params.err
+	}
+	var shardKey string
+	if params.ShardKey != nil {
+		if *params.ShardKey == "" {
+			return nil, models.NewInvalidOptionError("invalid shard key: a shard key must be a non-empty string")
+		}
+		shardKey = *params.ShardKey
 	}
 
 	// Lookup the registry for registration-time options
@@ -1377,12 +1380,34 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		}
 	}
 
+	// On a sharded system database, a workflow never inherits its caller's key.
+	sharded := c.systemDB.Sharded()
+	if shardKey != "" && !sharded {
+		return nil, models.NewInvalidOptionError("A shard key was given, but this system database is not sharded")
+	}
+	var parentShardKey string
+	if isChildWorkflow {
+		parentShardKey = parentWorkflowState.shardKey
+	}
+	// A child under another key commits apart from its parent's step, so it must not run here at once.
+	crossKey := sharded && isChildWorkflow && shardKey != "" && shardKey != parentShardKey
+	if crossKey && queueName == "" {
+		return nil, models.NewInvalidOptionError(fmt.Sprintf(
+			"Workflow %s can't start or call a child workflow under another shard key. On a sharded system database, "+
+				"a child runs under its parent's key unless it's enqueued", parentWorkflowState.workflowID))
+	}
+	if sharded && isChildWorkflow && params.WorkflowIDReuse == WorkflowIDReusePolicyReject {
+		// The replay after a crash between the child's insert and the parent's record would reject the parent's own child.
+		return nil, models.NewInvalidOptionError("On a sharded system database, WorkflowIDReusePolicyReject is not supported " +
+			"for a workflow started from inside another workflow; use it only outside workflows")
+	}
+
 	// Generate an ID for the workflow if not provided
 	var workflowID string
 	if params.WorkflowID == "" {
 		if isChildWorkflow {
 			stepID := parentWorkflowState.stepID
-			workflowID = fmt.Sprintf("%s-%d", parentWorkflowState.workflowID, stepID)
+			workflowID = sysdb.ChildWorkflowID(parentWorkflowState.workflowID, stepID, parentShardKey, shardKey)
 		} else {
 			workflowID = uuid.New().String()
 		}
@@ -1418,7 +1443,11 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		if childRecord != nil && childRecord.ChildWorkflowID != nil {
 			childWorkflowID := childRecord.ChildWorkflowID
 			c.logger.Info("child workflow already recorded", "workflow_name", params.WorkflowName, "parent_workflow_id", parentWorkflowState.workflowID, "step_id", parentWorkflowState.stepID, "child_workflow_id", *childWorkflowID)
-			return newWorkflowPollingHandle[any](uncancellableCtx, *childWorkflowID), nil
+			childKey := childRecord.ChildShardKey
+			if childKey == "" {
+				childKey = shardKey
+			}
+			return newWorkflowPollingHandle[any](uncancellableCtx, *childWorkflowID, childKey), nil
 		}
 	}
 
@@ -1500,9 +1529,11 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		DelayUntil:         delayUntil,
 		Attributes:         params.WorkflowAttributes,
 		Serialization:      serialization,
+		ShardKey:           shardKey,
 	}
 	if isChildWorkflow {
 		workflowStatus.ParentWorkflowID = parentWorkflowState.workflowID
+		workflowStatus.ParentShardKey = parentShardKey
 	}
 
 	var earlyReturnPollingHandle *workflowPollingHandle[any]
@@ -1510,8 +1541,57 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 	returnExisting := params.DeduplicationPolicy == DeduplicationPolicyReturnExisting
 	creatorXID := uuid.New().String() // Generated once for retries to recognize their own writes.
 
+	childRecordInput := func(childID string, tx Tx) sysdb.RecordChildWorkflowDBInput {
+		return sysdb.RecordChildWorkflowDBInput{
+			ParentWorkflowID: parentWorkflowState.workflowID,
+			ParentShardKey:   parentShardKey,
+			ParentOwnerXID:   parentWorkflowState.ownerXID,
+			ChildWorkflowID:  childID,
+			ChildShardKey:    shardKey,
+			StepName:         params.WorkflowName,
+			StepID:           parentWorkflowState.stepID,
+			StartedAt:        childStartTime,
+			Tx:               tx,
+		}
+	}
+
+	// A child under another key: the child commits first under its key, then the parent's
+	// step under the parent's. A crash in between leaves the child queued, and the parent's
+	// replay derives the same ID, finds it, and records it.
+	insertCrossKeyChild := func() error {
+		if err := c.systemDB.CheckOwner(uncancellableCtx, parentWorkflowState.workflowID, parentWorkflowState.ownerXID); err != nil {
+			return err
+		}
+		tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
+		if err != nil {
+			return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
+		}
+		defer tx.Rollback(uncancellableCtx)
+		insertStatusResult, err = c.systemDB.InsertWorkflowStatus(uncancellableCtx, sysdb.InsertWorkflowStatusDBInput{
+			Status:     workflowStatus,
+			Tx:         tx,
+			CreatorXID: &creatorXID,
+		})
+		if err != nil {
+			c.logger.Error("failed to insert workflow status", "error", err, "workflow_id", workflowID)
+			return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to insert workflow status: %w", err))
+		}
+		if err := tx.Commit(uncancellableCtx); err != nil {
+			return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
+		}
+		if err := c.systemDB.RecordChildWorkflow(uncancellableCtx, childRecordInput(workflowID, nil)); err != nil {
+			c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
+			return models.NewWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
+		}
+		earlyReturnPollingHandle = newWorkflowPollingHandle[any](uncancellableCtx, workflowStatus.ID, shardKey)
+		return nil
+	}
+
 	// Init status and record child workflow relationship in a single transaction
 	insertWorkflowStatusTx := func() error {
+		if crossKey {
+			return insertCrossKeyChild()
+		}
 		tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
 		if err != nil {
 			return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
@@ -1541,16 +1621,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		// We already have checked this earlier so this path should only be taken if the child is executing the first time
 		if isChildWorkflow {
 			// Get the step ID that was used for generating the child workflow ID
-			childInput := sysdb.RecordChildWorkflowDBInput{
-				ParentWorkflowID: parentWorkflowState.workflowID,
-				ParentOwnerXID:   parentWorkflowState.ownerXID,
-				ChildWorkflowID:  workflowID,
-				StepName:         params.WorkflowName,
-				StepID:           parentWorkflowState.stepID,
-				StartedAt:        childStartTime,
-				Tx:               tx,
-			}
-			err = c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput)
+			err = c.systemDB.RecordChildWorkflow(uncancellableCtx, childRecordInput(workflowID, tx))
 			if err != nil {
 				c.logger.Error("failed to record child workflow", "error", err, "parent_workflow_id", parentWorkflowState.workflowID, "child_workflow_id", workflowID)
 				return models.NewWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
@@ -1568,7 +1639,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 			if err := tx.Commit(uncancellableCtx); err != nil {
 				return models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to commit transaction: %w", err))
 			}
-			earlyReturnPollingHandle = newWorkflowPollingHandle[any](uncancellableCtx, workflowStatus.ID)
+			earlyReturnPollingHandle = newWorkflowPollingHandle[any](uncancellableCtx, workflowStatus.ID, shardKey)
 			return nil
 		}
 
@@ -1624,20 +1695,12 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 		// Attach to the existing workflow holding the deduplication slot. For a child workflow, record
 		// the parent->child mapping at the reserved step ID so replay resolves to the same workflow.
 		if isChildWorkflow {
-			childInput := sysdb.RecordChildWorkflowDBInput{
-				ParentWorkflowID: parentWorkflowState.workflowID,
-				ParentOwnerXID:   parentWorkflowState.ownerXID,
-				ChildWorkflowID:  *existingID,
-				StepName:         params.WorkflowName,
-				StepID:           parentWorkflowState.stepID,
-				StartedAt:        childStartTime,
-			}
-			if err := c.systemDB.RecordChildWorkflow(uncancellableCtx, childInput); err != nil {
+			if err := c.systemDB.RecordChildWorkflow(uncancellableCtx, childRecordInput(*existingID, nil)); err != nil {
 				return nil, models.NewWorkflowExecutionError(parentWorkflowState.workflowID, fmt.Errorf("recording child workflow: %w", err))
 			}
 		}
 		c.logger.Info("returning handle to existing deduplicated workflow", "workflow_name", params.WorkflowName, "queue_name", queueName, "deduplication_id", params.DeduplicationID, "existing_workflow_id", *existingID)
-		return newWorkflowPollingHandle[any](uncancellableCtx, *existingID), nil
+		return newWorkflowPollingHandle[any](uncancellableCtx, *existingID, shardKey), nil
 	}
 	if earlyReturnPollingHandle != nil {
 		return earlyReturnPollingHandle, nil
@@ -1645,6 +1708,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 
 	exec := workflowExecution{
 		workflowID:         workflowID,
+		shardKey:           shardKey,
 		ownerXID:           creatorXID,
 		timeout:            insertStatusResult.Timeout,
 		deadline:           insertStatusResult.WorkflowDeadline,
@@ -1666,6 +1730,7 @@ func (c *dbosContext) RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ..
 // or the queue's claim, wrote and this phase reads back.
 type workflowExecution struct {
 	workflowID         string
+	shardKey           string // empty on an unsharded system database
 	ownerXID           string
 	queueName          string
 	queuePartitionKey  string
@@ -1690,6 +1755,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 	// Create workflow state to track step execution
 	wfState := &workflowState{
 		workflowID:         workflowID,
+		shardKey:           exec.shardKey,
 		ownerXID:           exec.ownerXID,
 		stepID:             -1, // Steps are O-indexed
 		isPortableWorkflow: exec.isPortableWorkflow,
@@ -1706,6 +1772,12 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 	}
 
 	ctx := context.WithValue(c.ctx, workflowStateKey, wfState)
+	if c.systemDB.Sharded() {
+		// The body runs under its own key, with none of its caller's bindings or scope.
+		ctx = sysdb.WithWorkflowShardKey(ctx, workflowID, exec.shardKey)
+		// The run's own durable writes below address the workflow by its key.
+		uncancellableCtx = bindShardKey(uncancellableCtx, workflowID, exec.shardKey)
+	}
 	var cancelWorkflow context.CancelCauseFunc
 	if !wfState.deadline.IsZero() {
 		var cancel context.CancelFunc
@@ -1753,7 +1825,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 	// Note that a parked execution can return to the later much caller than the execution's context timout.
 	// That's because said timeout refers to the durable workflow, not its stateless executing vessel.
 	awaitExistingOutcome := func(cancelCause error) {
-		parkCtx := c.clone(c.rootCtx)
+		parkCtx := bindShardKey(c.clone(c.rootCtx), workflowID, exec.shardKey)
 		awaitOut, awaitErr := sysdb.RetryWithResult(parkCtx, func() (*sysdb.AwaitWorkflowResultOutput, error) {
 			return c.systemDB.AwaitWorkflowResult(parkCtx, workflowID, sysdb.DBRetryInterval, true)
 		}, sysdb.WithRetrierLogger(c.logger))
@@ -1860,6 +1932,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 			recorded, recordErr := sysdb.RetryWithResult(c, func() (bool, error) {
 				return c.systemDB.UpdateWorkflowOutcome(uncancellableCtx, sysdb.UpdateWorkflowOutcomeDBInput{
 					WorkflowID: workflowID,
+					ShardKey:   exec.shardKey,
 					Status:     status,
 					ErrStr:     serializedErr,
 					Output:     encodedOutput,
@@ -1887,7 +1960,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 		close(outcomeChan)
 	}()
 
-	return newWorkflowHandle(uncancellableCtx, workflowID, outcomeChan)
+	return newWorkflowHandle(uncancellableCtx, workflowID, exec.shardKey, outcomeChan)
 }
 
 // recoverPanic runs fn on a goroutine DBOS owns, converting a panic into a
@@ -1910,6 +1983,10 @@ const (
 // runWorkflowTimeoutsMonitor cancels this application's workflows past their deadline,
 // whichever executor runs them, and cancels the context of the ones running here.
 func (c *dbosContext) runWorkflowTimeoutsMonitor() {
+	if c.systemDB.Sharded() {
+		c.runShardedBackgroundJobs()
+		return
+	}
 	ticker := time.NewTicker(_WORKFLOW_TIMEOUTS_MONITOR_INTERVAL)
 	defer ticker.Stop()
 	for {
@@ -1918,6 +1995,47 @@ func (c *dbosContext) runWorkflowTimeoutsMonitor() {
 		case <-c.Done():
 			return
 		case <-ticker.C:
+		}
+	}
+}
+
+// runShardedBackgroundJobs runs the background jobs of a sharded system database once
+// per interval across all of this application's processes: their statements read every
+// shard, so whichever process takes the backend's lock runs them, holding it for the
+// rest of the interval. The holder tries again at once and so keeps the jobs; the
+// others poll for them.
+func (c *dbosContext) runShardedBackgroundJobs() {
+	interval := _WORKFLOW_TIMEOUTS_MONITOR_INTERVAL
+	for c.Err() == nil {
+		started := time.Now()
+		held := false
+		acquired, release, err := c.systemDB.BackgroundJobLock(c, "background_jobs")
+		if err != nil {
+			if c.Err() == nil {
+				c.logger.Warn("Exception taking the background jobs lock", "error", err)
+			}
+		} else if acquired {
+			if err := sysdb.Retry(c, func() error {
+				return c.systemDB.TransitionDelayedWorkflows(c)
+			}, sysdb.WithRetrierLogger(c.logger)); err != nil && c.Err() == nil {
+				c.logger.Warn("Exception transitioning delayed workflows", "error", err)
+			}
+			c.cancelTimedOutWorkflows()
+			select {
+			case <-c.Done():
+			case <-time.After(max(0, interval-time.Since(started))):
+			}
+			release()
+			held = true
+		}
+		wait := time.Duration(0)
+		if !held {
+			wait = time.Duration(float64(interval) * (0.9 + 0.2*rand.Float64())) // #nosec G404 -- non-crypto jitter
+		}
+		select {
+		case <-c.Done():
+			return
+		case <-time.After(wait):
 		}
 	}
 }
@@ -2110,8 +2228,7 @@ type enqueueOptions struct {
 	isPortableWorkflow  bool
 	tx                  any
 	txSet               bool
-	shardKey            string
-	shardKeyErr         error
+	shardKey            *string
 }
 
 // WithEnqueueShardKey sets the shard key the enqueued workflow lives under. It is
@@ -2120,11 +2237,7 @@ type enqueueOptions struct {
 // parent's key.
 func WithEnqueueShardKey(key string) EnqueueOption {
 	return func(opts *enqueueOptions) {
-		if key == "" {
-			opts.shardKeyErr = models.NewInvalidOptionError("invalid shard key: a shard key must be a non-empty string")
-			return
-		}
-		opts.shardKey = key
+		opts.shardKey = &key
 	}
 }
 
@@ -2186,6 +2299,16 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 	for _, opt := range opts {
 		opt(params)
 	}
+	var shardKey string
+	if params.shardKey != nil {
+		if *params.shardKey == "" {
+			return nil, models.NewInvalidOptionError("invalid shard key: a shard key must be a non-empty string")
+		}
+		shardKey = *params.shardKey
+	}
+	if shardKey != "" && !c.systemDB.Sharded() {
+		return nil, models.NewInvalidOptionError("A shard key was given, but this system database is not sharded")
+	}
 
 	// Default the version to this context's own only when the enqueueing context runs
 	// workflows (not a client) and the workflow is aimed at the enqueueing context's application;
@@ -2237,9 +2360,25 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 		}
 	}
 
+	// In a workflow on a sharded database, an enqueue under another key commits apart from
+	// the parent's step: its ID must be one a replay derives again.
+	crossKey := isWithinWorkflow && c.systemDB.Sharded() && shardKey != "" && shardKey != wfState.shardKey
+	var enqueueStepID int
+	if crossKey {
+		if params.workflowIDReuse == WorkflowIDReusePolicyReject {
+			return nil, models.NewInvalidOptionError("On a sharded system database, WorkflowIDReusePolicyReject is not supported " +
+				"for a workflow enqueued from inside another workflow; use it only outside workflows")
+		}
+		enqueueStepID = wfState.nextStepID()
+	}
+
 	workflowID := params.workflowID
 	if workflowID == "" {
-		workflowID = uuid.New().String()
+		if crossKey {
+			workflowID = sysdb.ChildWorkflowID(wfState.workflowID, enqueueStepID, wfState.shardKey, shardKey)
+		} else {
+			workflowID = uuid.New().String()
+		}
 	}
 
 	if params.priority > uint(math.MaxInt) {
@@ -2291,9 +2430,11 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 		Attributes:         params.attributes,
 		DebounceDeadline:   params.debounceDeadline,
 		IsDebounced:        params.isDebounced,
+		ShardKey:           shardKey,
 	}
 	if isWithinWorkflow {
 		status.ParentWorkflowID = wfState.workflowID
+		status.ParentShardKey = wfState.shardKey
 	}
 
 	uncancellableCtx := WithoutCancel(c)
@@ -2303,14 +2444,33 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 	for {
 		var enqueuedID string
 		var err error
-		if isWithinWorkflow {
+		if crossKey {
+			// Cross shards: commit the child insert, then record as a step in the parent, in different transactions.
+			enqueuedID, err = runAsTxnOrStep(c, true, func(ctx context.Context, _ Tx) (string, error) {
+				tx, err := c.systemDB.Pool().BeginTx(ctx, TxOptions{})
+				if err != nil {
+					return "", models.NewWorkflowExecutionError(workflowID, fmt.Errorf("failed to begin transaction: %w", err))
+				}
+				defer tx.Rollback(ctx)
+				enqueuedID, err := c.insertEnqueuedWorkflow(ctx, tx, status, creatorXID, queueName, params, false)
+				if err != nil {
+					return enqueuedID, err
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return "", fmt.Errorf("failed to commit transaction: %w", err)
+				}
+				return enqueuedID, nil
+			}, WithStepName("DBOS.enqueue"), withChildWorkflowIDOutput(), withChildShardKey(shardKey),
+				withNextStepID(enqueueStepID))
+		} else if isWithinWorkflow {
 			enqueuedID, err = runAsTxn(c, func(ctx context.Context, tx Tx) (string, error) {
 				return c.insertEnqueuedWorkflow(ctx, tx, status, creatorXID, queueName, params, returnExisting)
-			}, WithStepName("DBOS.enqueue"), withChildWorkflowIDOutput())
+			}, WithStepName("DBOS.enqueue"), withChildWorkflowIDOutput(), withChildShardKey(shardKey))
 		} else if userTx != nil {
 			// The caller owns the transaction: no commit, no retry.
 			enqueuedID, err = c.insertEnqueuedWorkflow(uncancellableCtx, userTx, status, creatorXID, queueName, params, false)
 		} else {
+			// Outside of a workflow.
 			enqueuedID, err = func() (string, error) {
 				tx, err := c.systemDB.Pool().BeginTx(uncancellableCtx, TxOptions{})
 				if err != nil {
@@ -2330,7 +2490,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 		if err != nil {
 			if returnExisting && errors.Is(err, ErrQueueDeduplicated) {
 				if enqueuedID != "" {
-					return newWorkflowPollingHandle[any](uncancellableCtx, enqueuedID), nil
+					return newWorkflowPollingHandle[any](uncancellableCtx, enqueuedID, shardKey), nil
 				}
 				// The dedup slot was freed before the holder lookup; enqueue again
 				continue
@@ -2340,7 +2500,7 @@ func (c *dbosContext) Enqueue(_ Client, queueName, workflowName string, input an
 			}
 			return nil, err
 		}
-		return newWorkflowPollingHandle[any](uncancellableCtx, enqueuedID), nil
+		return newWorkflowPollingHandle[any](uncancellableCtx, enqueuedID, shardKey), nil
 	}
 }
 
@@ -2476,6 +2636,8 @@ type stepOptions struct {
 	retryPredicate     func(error) bool // Optional predicate: nil = retry all errors up to maxRetries
 	completedAt        *time.Time       // Overrides the recorded completion time (see withCompletedAt)
 	outputIsChildID    bool             // Record the step's string output as its child workflow ID
+	childShardKey      string           // The shard key of the child workflow the step records (sharded only)
+	checkOwner         bool             // Check the workflow is still ours before running the step (see withOwnerCheck)
 }
 
 // setDefaults applies default values to stepOptions
@@ -2602,6 +2764,21 @@ func withChildWorkflowIDOutput() StepOption {
 	}
 }
 
+// withChildShardKey records the shard key of the child workflow a step starts.
+func withChildShardKey(key string) StepOption {
+	return func(opts *stepOptions) {
+		opts.childShardKey = key
+	}
+}
+
+// withOwnerCheck makes RunAsStep check the workflow is still this execution's before
+// running the step.
+func withOwnerCheck() StepOption {
+	return func(opts *stepOptions) {
+		opts.checkOwner = true
+	}
+}
+
 // StepOutcome holds the result and error from a step execution.
 // This struct is delivered on the channel returned by Go when running the step inside a goroutine.
 type StepOutcome[R any] struct {
@@ -2698,6 +2875,7 @@ func prepareStepExecution(c *dbosContext, opts []StepOption) (*preparedStep, err
 	}
 	stepState := workflowState{
 		workflowID:        wfState.workflowID,
+		shardKey:          wfState.shardKey,
 		ownerXID:          wfState.ownerXID,
 		stepID:            stepID,
 		isWithinStep:      true,
@@ -2911,6 +3089,11 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 		// This allows RunAsStep[R] to distinguish encoded values from direct values
 		return stepCheckpointedOutcome{value: recordedOutput.Output, serialization: recordedOutput.Serialization}, deserializeWorkflowError(recordedOutput.ErrStr)
 	}
+	if stepOpts.checkOwner {
+		if err := c.systemDB.CheckOwner(uncancellableCtx, stepState.workflowID, stepState.ownerXID); err != nil {
+			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, err)
+		}
+	}
 
 	stepCtx := WithValue(c, workflowStateKey, stepState)
 	stepOutput, stepError := executeStepWithRetry(c, stepState.workflowID, stepOpts, func() (any, error) {
@@ -2928,9 +3111,18 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 
 	// Serialize step output before recording
 	ser := resolveEncoder(c)
-	encodedStepOutput, serErr := ser.Encode(stepOutput)
-	if serErr != nil {
-		return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
+	serialization := ser.Name()
+	var encodedStepOutput *string
+	if raw, ok := stepOutput.(rawStepOutput); ok {
+		// Pre-serialized payload: record as-is under its own serialization name
+		encodedStepOutput = raw.value
+		serialization = raw.serialization
+	} else {
+		var serErr error
+		encodedStepOutput, serErr = ser.Encode(stepOutput)
+		if serErr != nil {
+			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize step output: %w", serErr))
+		}
 	}
 
 	// Record the final result
@@ -2951,8 +3143,14 @@ func (c *dbosContext) RunAsStep(_ Context, fn StepFunc, opts ...StepOption) (any
 		StartedAt:     stepStartTime,
 		CompletedAt:   stepCompletedTime,
 		Output:        encodedStepOutput,
-		Serialization: ser.Name(),
+		Serialization: serialization,
 		OwnerXID:      stepState.ownerXID,
+	}
+	if stepOpts.outputIsChildID {
+		if childID, ok := stepOutput.(string); ok {
+			dbInput.ChildWorkflowID = childID
+			dbInput.ChildShardKey = stepOpts.childShardKey
+		}
 	}
 	recErr := sysdb.Retry(c, func() error {
 		return c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
@@ -3124,6 +3322,7 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 		if stepOpts.outputIsChildID {
 			if childID, ok := stepOutput.(string); ok {
 				dbInput.ChildWorkflowID = childID
+				dbInput.ChildShardKey = stepOpts.childShardKey
 			}
 		}
 		recErr := c.systemDB.RecordOperationResult(uncancellableCtx, dbInput)
@@ -3138,6 +3337,39 @@ func (c *dbosContext) runAsTxn(_ Context, fn TxnFunc, opts ...StepOption) (any, 
 		}
 		return stepOutput, stepError
 	}, txnRetryOpts...)
+}
+
+// Small helper to decide whether the step function should be run as a tranasction or a step.
+// In a sharded database, DBOS steps that otherwise would run as a single transaction must run as two transaction, one per shard.
+func runAsTxnOrStep[R any](ctx Context, crossKey bool, fn Txn[R], opts ...StepOption) (R, error) {
+	c, ok := ctx.(*dbosContext)
+	if !crossKey || !ok {
+		// Delegate context check to runAsTxn
+		return runAsTxn(ctx, fn, opts...)
+	}
+	result, err := c.runAsTxnOrStep(crossKey, func(ctx context.Context, tx Tx) (any, error) { return fn(ctx, tx) }, opts...)
+	if result == nil {
+		return *new(R), err
+	}
+	typedResult, convertErr := convertStepResult[R](ctx, result)
+	if convertErr != nil {
+		return *new(R), convertErr
+	}
+	return typedResult, err
+}
+
+func (c *dbosContext) runAsTxnOrStep(crossKey bool, fn TxnFunc, opts ...StepOption) (any, error) {
+	wfState, _ := c.Value(workflowStateKey).(*workflowState)
+	if !crossKey || wfState == nil || wfState.isWithinStep {
+		// Delegate checks to runAsTxn
+		return c.runAsTxn(c, fn, opts...)
+	}
+	opts = append(opts, withOwnerCheck())
+	return c.RunAsStep(c, func(ctx context.Context) (any, error) {
+		return sysdb.RetryWithResult(c, func() (any, error) {
+			return fn(ctx, nil)
+		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
+	}, opts...)
 }
 
 // Go runs a step inside a Go routine and returns a channel to receive the result.
@@ -3386,8 +3618,7 @@ type sendOptions struct {
 	tx                    any
 	txSet                 bool
 	sendToForks           bool
-	shardKey              string
-	shardKeyErr           error
+	shardKey              *string
 }
 
 // SendOption is a functional option for configuring a Send call.
@@ -3408,11 +3639,7 @@ func WithSendToForks() SendOption {
 // Not valid on SendBulk: set SendMessage.ShardKey on each message instead.
 func WithSendShardKey(key string) SendOption {
 	return func(opts *sendOptions) {
-		if key == "" {
-			opts.shardKeyErr = models.NewInvalidOptionError("invalid shard key: a shard key must be a non-empty string")
-			return
-		}
-		opts.shardKey = key
+		opts.shardKey = &key
 	}
 }
 
@@ -3476,6 +3703,7 @@ type SendMessage struct {
 	Message        any
 	Topic          string
 	IdempotencyKey string
+	ShardKey       string
 }
 
 func (c *dbosContext) Send(_ Client, destinationID string, message any, topic string, opts ...SendOption) error {
@@ -3483,11 +3711,19 @@ func (c *dbosContext) Send(_ Client, destinationID string, message any, topic st
 	for _, opt := range opts {
 		opt(options)
 	}
+	var shardKey string
+	if options.shardKey != nil {
+		if *options.shardKey == "" {
+			return models.NewInvalidOptionError("invalid shard key: a shard key must be a non-empty string")
+		}
+		shardKey = *options.shardKey
+	}
 	return c.sendMessages([]SendMessage{{
 		DestinationID:  destinationID,
 		Message:        message,
 		Topic:          topic,
 		IdempotencyKey: options.idempotencyKey,
+		ShardKey:       shardKey,
 	}}, sendStepName, options)
 }
 
@@ -3498,6 +3734,9 @@ func (c *dbosContext) SendBulk(_ Client, messages []SendMessage, opts ...SendOpt
 	}
 	if options.idempotencyKey != "" {
 		return models.NewInvalidOptionError("WithIdempotencyKey is per-message; set SendMessage.IdempotencyKey when using SendBulk")
+	}
+	if options.shardKey != nil {
+		return models.NewInvalidOptionError("WithSendShardKey is per-message; set SendMessage.ShardKey when using SendBulk")
 	}
 	if len(messages) > MaxSendBulkMessages {
 		return models.NewInvalidOptionError(fmt.Sprintf("SendBulk accepts at most %d messages, got %d", MaxSendBulkMessages, len(messages)))
@@ -3573,6 +3812,7 @@ func (c *dbosContext) sendMessages(messages []SendMessage, stepName string, opti
 			Topic:          m.Topic,
 			Serialization:  sendSer.Name(),
 			IdempotencyKey: m.IdempotencyKey,
+			ShardKey:       m.ShardKey,
 		}
 	}
 	input := sysdb.WorkflowSendInput{Messages: rows, SendToForks: options.sendToForks}
@@ -3583,9 +3823,21 @@ func (c *dbosContext) sendMessages(messages []SendMessage, stepName string, opti
 		input.Tx = userTx
 		err = c.systemDB.Send(WithoutCancel(c), input)
 	} else if isWithinWorkflow {
-		_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
-			input.Tx = tx
-			return nil, ctx.(*dbosContext).systemDB.Send(ctx, input)
+		sharded := c.systemDB.Sharded()
+		_, err = runAsTxnOrStep(c, sharded, func(ctx context.Context, tx Tx) (any, error) {
+			stepInput := input
+			stepInput.Tx = tx
+			if sharded {
+				// In a sharded database, bake the destination shard keys as idempotency keys, if the later is not set.
+				stepState := ctx.Value(workflowStateKey).(*workflowState)
+				stepInput.Messages = slices.Clone(input.Messages)
+				for i := range stepInput.Messages {
+					if stepInput.Messages[i].IdempotencyKey == "" {
+						stepInput.Messages[i].IdempotencyKey = sysdb.MessageIdempotencyKey(stepState.shardKey, stepState.workflowID, stepState.stepID, i)
+					}
+				}
+			}
+			return nil, ctx.(*dbosContext).systemDB.Send(ctx, stepInput)
 		}, WithStepName(stepName))
 	} else {
 		uncancellableCtx := WithoutCancel(c)
@@ -3841,7 +4093,7 @@ func (c *dbosContext) SetEvent(_ Context, key string, message any, opts ...SetEv
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err == nil {
-			c.systemDB.SignalEventSet(wfState.workflowID, key)
+			c.systemDB.SignalEventSet(c, wfState.workflowID, key)
 		}
 		return err
 	}
@@ -3864,7 +4116,7 @@ func (c *dbosContext) SetEvent(_ Context, key string, message any, opts ...SetEv
 	}, WithStepName("DBOS.setEvent"))
 	// Signal only once the transaction has committed.
 	if err == nil && setWorkflowID != "" {
-		c.systemDB.SignalEventSet(setWorkflowID, key)
+		c.systemDB.SignalEventSet(c, setWorkflowID, key)
 	}
 	return err
 }
@@ -3982,7 +4234,7 @@ func (c *dbosContext) GetEvent(_ Client, targetWorkflowID, key string, timeout t
 
 	// Read the event value and checkpoint the getEvent result in a single transaction.
 	// If another executor already checkpointed this step, runAsTxn returns the recorded result.
-	out, err := c.runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+	out, err := c.runAsTxnOrStep(c.systemDB.Sharded(), func(ctx context.Context, tx Tx) (any, error) {
 		value, evtSerialization, err := c.systemDB.GetEventValue(ctx, tx, targetWorkflowID, key)
 		if err != nil {
 			return nil, err
@@ -4129,7 +4381,7 @@ func (c *dbosContext) WriteStream(_ Context, key string, value any, opts ...Writ
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err == nil {
-			c.systemDB.SignalStreamWrite(wfState.workflowID, key)
+			c.systemDB.SignalStreamWrite(c, wfState.workflowID, key)
 		}
 		return err
 	}
@@ -4151,7 +4403,7 @@ func (c *dbosContext) WriteStream(_ Context, key string, value any, opts ...Writ
 		})
 	}, WithStepName("DBOS.writeStream"))
 	if err == nil && writtenWorkflowID != "" {
-		c.systemDB.SignalStreamWrite(writtenWorkflowID, key)
+		c.systemDB.SignalStreamWrite(c, writtenWorkflowID, key)
 	}
 	return err
 }
@@ -4230,7 +4482,7 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 		// finish drops the registration for all of them. The bounded wait below
 		// remains the fallback: workflow completion fires no stream notification,
 		// and polling backends never signal (wakeCh stays nil there).
-		wakeCh, cleanupWake := c.systemDB.StreamWakeChannel(workflowID, key)
+		wakeCh, cleanupWake := c.systemDB.StreamWakeChannel(c, workflowID, key)
 		defer cleanupWake()
 
 		// Continue reading until workflow is inactive or stream is closed
@@ -4560,7 +4812,7 @@ func (c *dbosContext) CloseStream(_ Context, key string) error {
 		})
 	}, WithStepName("DBOS.closeStream"))
 	if err == nil && closedWorkflowID != "" {
-		c.systemDB.SignalStreamWrite(closedWorkflowID, key)
+		c.systemDB.SignalStreamWrite(c, closedWorkflowID, key)
 	}
 	return err
 }
@@ -4839,10 +5091,14 @@ func GetAuthenticatedUser(ctx Context) (string, error) {
 }
 
 func (c *dbosContext) RetrieveWorkflow(_ Client, workflowID string) (WorkflowHandle[any], error) {
+	// On a sharded database the caller names the workflow's key (BindShardKey), as an ID alone may live under several.
+	shardKey, err := c.systemDB.KeyHint(c, workflowID)
+	if err != nil {
+		return nil, err
+	}
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	var workflowStatus []WorkflowStatus
-	var err error
 	if isWithinWorkflow {
 		workflowStatus, err = RunAsStep(c, func(ctx context.Context) ([]WorkflowStatus, error) {
 			return sysdb.RetryWithResult(ctx, func() ([]WorkflowStatus, error) {
@@ -4868,7 +5124,7 @@ func (c *dbosContext) RetrieveWorkflow(_ Client, workflowID string) (WorkflowHan
 	if len(workflowStatus) == 0 {
 		return nil, models.NewNonExistentWorkflowError(workflowID)
 	}
-	return newWorkflowPollingHandle[any](c, workflowID), nil
+	return newWorkflowPollingHandle[any](c, workflowID, shardKey), nil
 }
 
 // RetrieveWorkflow returns a typed handle to an existing workflow.
@@ -4921,7 +5177,7 @@ func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...Cancel
 	}
 
 	if isWithinWorkflow {
-		found, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
+		found, err = runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) ([]string, error) {
 			return c.systemDB.CancelWorkflows(ctx, sysdb.CancelWorkflowsDBInput{
 				WorkflowIDs:    []string{workflowID},
 				CancelChildren: cwo.CancelChildren,
@@ -5000,7 +5256,7 @@ func (c *dbosContext) SetWorkflowAttributes(_ Client, workflowID string, attribu
 	}
 
 	if isWithinWorkflow {
-		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (struct{}, error) {
+		_, err := runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) (struct{}, error) {
 			return struct{}{}, call(ctx, tx)
 		}, WithStepName("DBOS.updateWorkflowAttributes"))
 		return err
@@ -5044,7 +5300,7 @@ func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...Ca
 	}
 
 	if isWithinWorkflow {
-		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
+		_, err := runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) ([]string, error) {
 			return c.systemDB.CancelWorkflows(ctx, sysdb.CancelWorkflowsDBInput{CancelChildren: cwo.CancelChildren, WorkflowIDs: workflowIDs, Tx: tx})
 		}, WithStepName("DBOS.cancelWorkflows"))
 		return err
@@ -5125,7 +5381,7 @@ func (c *dbosContext) SetWorkflowDelay(_ Client, workflowID string, opts ...SetW
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		_, err := runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) (any, error) {
 			input.Tx = tx
 			return nil, c.systemDB.SetWorkflowDelay(ctx, input)
 		}, WithStepName("DBOS.setWorkflowDelay"))
@@ -5161,7 +5417,7 @@ func (c *dbosContext) DeleteWorkflows(_ Client, workflowIDs []string, opts ...De
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
 	if isWithinWorkflow {
-		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		_, err := runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) (any, error) {
 			err := c.systemDB.DeleteWorkflows(ctx, sysdb.DeleteWorkflowsDBInput{
 				WorkflowIDs:    workflowIDs,
 				DeleteChildren: params.deleteChildren,
@@ -5253,7 +5509,7 @@ func (c *dbosContext) ResumeWorkflows(_ Client, workflowIDs []string, opts ...Re
 	var foundIDs []string
 	var err error
 	if isWithinWorkflow {
-		foundIDs, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
+		foundIDs, err = runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) ([]string, error) {
 			return c.systemDB.ResumeWorkflows(ctx, sysdb.ResumeWorkflowsDBInput{
 				WorkflowIDs: workflowIDs,
 				QueueName:   params.QueueName,
@@ -5274,7 +5530,8 @@ func (c *dbosContext) ResumeWorkflows(_ Client, workflowIDs []string, opts ...Re
 
 	handles := make([]WorkflowHandle[any], 0, len(foundIDs))
 	for _, id := range foundIDs {
-		handles = append(handles, newWorkflowPollingHandle[any](c, id))
+		key, _ := c.systemDB.KeyHint(c, id)
+		handles = append(handles, newWorkflowPollingHandle[any](c, id, key))
 	}
 	return handles, nil
 }
@@ -5428,7 +5685,7 @@ func (c *dbosContext) RewindWorkflow(_ Client, workflowID string, opts ...Rewind
 	isWithinWorkflow := ok && workflowState != nil
 	var err error
 	if isWithinWorkflow {
-		_, err = runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		_, err = runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) (any, error) {
 			if err := c.rewindDataSources(ctx, tx, dataSources, workflowID, startStep); err != nil {
 				return nil, err
 			}
@@ -5449,7 +5706,8 @@ func (c *dbosContext) RewindWorkflow(_ Client, workflowID string, opts ...Rewind
 	if err != nil {
 		return nil, err
 	}
-	return newWorkflowPollingHandle[any](c, workflowID), nil
+	key, _ := c.systemDB.KeyHint(c, workflowID)
+	return newWorkflowPollingHandle[any](c, workflowID, key), nil
 }
 
 // Drops the data sources' checkpoints. Refuses an active workflow before anything is deleted.
@@ -5473,8 +5731,13 @@ func (c *dbosContext) rewindDataSources(ctx context.Context, tx Tx, dataSources 
 			"cannot rewind workflow %s while it is %s: only a workflow in a terminal state can be rewound, so cancel it first",
 			workflowID, statuses[0].Status)
 	}
+	// A sharded database's checkpoint rows carry the workflow's key.
+	key, err := c.systemDB.KeyHint(ctx, workflowID)
+	if err != nil {
+		return err
+	}
 	for _, ds := range dataSources {
-		if err := ds.deleteCheckpoints(ctx, workflowID, startStep); err != nil {
+		if err := ds.deleteCheckpoints(ctx, sysdb.KeyedID(key, workflowID), startStep); err != nil {
 			return err
 		}
 	}
@@ -5615,6 +5878,12 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 		ReplacementChildren: input.ReplacementChildren,
 	}
 
+	// Forks live under their originals' shard key.
+	forkKey, err := c.systemDB.KeyHint(c, originalWorkflowIDs[0])
+	if err != nil {
+		return nil, err
+	}
+
 	// Call system database method
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
@@ -5622,12 +5891,23 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 		return c.systemDB.ForkWorkflows(ctx, dbInput)
 	}
 	var forkedIDs []string
-	var err error
 	if isWithinWorkflow {
-		forkedIDs, err = runAsTxn(c, func(ctx context.Context, tx Tx) ([]string, error) {
+		stepOpts := []StepOption{WithStepName("DBOS.forkWorkflow")}
+		if c.systemDB.Sharded() && !workflowState.isWithinStep {
+			// In a sharded db, fill missing fork IDs so they are deterministic.
+			stepID := workflowState.nextStepID()
+			stepOpts = append(stepOpts, withNextStepID(stepID))
+			for i, id := range dbInput.ForkedWorkflowIDs {
+				if id == "" {
+					name := fmt.Sprintf("%s:%d:%d", sysdb.KeyedID(workflowState.shardKey, workflowState.workflowID), stepID, i)
+					dbInput.ForkedWorkflowIDs[i] = uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String()
+				}
+			}
+		}
+		forkedIDs, err = runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) ([]string, error) {
 			dbInput.Tx = tx
 			return forkBatch(ctx)
-		}, WithStepName("DBOS.forkWorkflow"))
+		}, stepOpts...)
 	} else {
 		uncancellableCtx := WithoutCancel(c)
 		forkedIDs, err = sysdb.RetryWithResult(c, func() ([]string, error) {
@@ -5640,7 +5920,7 @@ func (c *dbosContext) ForkWorkflows(_ Client, input ForkWorkflowsInput) ([]Workf
 
 	handles := make([]WorkflowHandle[any], len(forkedIDs))
 	for i, id := range forkedIDs {
-		handles[i] = newWorkflowPollingHandle[any](c, id)
+		handles[i] = newWorkflowPollingHandle[any](c, id, forkKey)
 	}
 	return handles, nil
 }
@@ -5950,6 +6230,22 @@ func WithFilterScheduleName(scheduleName ...string) ListWorkflowsOption {
 	}
 }
 
+// WithFilterShardKeys lists workflows living under these shard keys. It requires a
+// sharded system database; with no keys it matches no workflow.
+func WithFilterShardKeys(shardKeys ...string) ListWorkflowsOption {
+	return func(p *models.ListWorkflowsInput) {
+		p.ShardKeys = append(make([]string, 0, len(shardKeys)), shardKeys...)
+	}
+}
+
+// WithFilterParentShardKeys lists workflows whose parent lives under these shard keys.
+// It requires a sharded system database; with no keys it matches no workflow.
+func WithFilterParentShardKeys(shardKeys ...string) ListWorkflowsOption {
+	return func(p *models.ListWorkflowsInput) {
+		p.ParentShardKeys = append(make([]string, 0, len(shardKeys)), shardKeys...)
+	}
+}
+
 // WithFilterApplicationName lists workflows owned by these applications (plus
 // unclaimed ones). By default only this handle's own application's workflows
 // are listed.
@@ -6014,6 +6310,8 @@ func (c *dbosContext) ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]Wo
 		ScheduleName:       params.ScheduleName,
 		ApplicationName:    params.ApplicationName,
 		IsDebounced:        params.IsDebounced,
+		ShardKeys:          params.ShardKeys,
+		ParentShardKeys:    params.ParentShardKeys,
 	}
 
 	// Call the context method to list workflows
@@ -6215,6 +6513,7 @@ func (c *dbosContext) GetWorkflowSteps(_ Client, workflowID string, opts ...GetW
 			StepName:        step.StepName,
 			Error:           stepErr,
 			ChildWorkflowID: step.ChildWorkflowID,
+			ChildShardKey:   step.ChildShardKey,
 			StartedAt:       step.StartedAt,
 			CompletedAt:     step.CompletedAt,
 		}
@@ -6547,10 +6846,11 @@ func (c *dbosContext) CreateSchedule(_ Client, spec ScheduleSpec) error {
 		CronTimezone:      spec.CronTimezone,
 		QueueName:         spec.QueueName,
 		ApplicationName:   c.requestedOwner(spec.ApplicationName),
+		ShardKey:          spec.ShardKey,
 	}
 
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
-		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		_, err := runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) (any, error) {
 			input := dbInput
 			input.Tx = tx
 			return nil, c.systemDB.CreateSchedule(ctx, input)
@@ -6645,6 +6945,7 @@ func (c *dbosContext) ApplySchedules(_ Client, schedules []ScheduleSpec) error {
 				CronTimezone:      spec.CronTimezone,
 				QueueName:         queueName,
 				ApplicationName:   c.requestedOwner(spec.ApplicationName),
+				ShardKey:          spec.ShardKey,
 				Tx:                tx,
 			}); err != nil {
 				return fmt.Errorf("failed to upsert schedule: %w", err)
@@ -6691,7 +6992,7 @@ func (c *dbosContext) PauseSchedule(_ Client, scheduleName string) error {
 	}
 
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
-		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		_, err := runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) (any, error) {
 			in := dbInput
 			in.Tx = tx
 			return nil, c.systemDB.UpdateSchedule(ctx, in)
@@ -6731,7 +7032,7 @@ func (c *dbosContext) ResumeSchedule(_ Client, scheduleName string) error {
 	}
 
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
-		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		_, err := runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) (any, error) {
 			in := dbInput
 			in.Tx = tx
 			return nil, c.systemDB.UpdateSchedule(ctx, in)
@@ -6762,7 +7063,7 @@ func (c *dbosContext) DeleteSchedule(_ Client, scheduleName string) error {
 	}
 
 	if state, inWorkflow := c.Value(workflowStateKey).(*workflowState); inWorkflow && state != nil {
-		_, err := runAsTxn(c, func(ctx context.Context, tx Tx) (any, error) {
+		_, err := runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) (any, error) {
 			return nil, c.systemDB.DeleteSchedule(ctx, sysdb.DeleteScheduleDBInput{ScheduleName: scheduleName, Tx: tx})
 		}, WithStepName("DBOS.deleteSchedule"))
 		return err
@@ -6948,11 +7249,11 @@ func (c *dbosContext) TriggerSchedule(_ Client, scheduleName string) (WorkflowHa
 		return nil, errors.New("DBOS.TriggerSchedule cannot be called from within a workflow")
 	}
 
-	workflowID, err := c.systemDB.TriggerSchedule(c, scheduleName)
+	workflowID, shardKey, err := c.systemDB.TriggerSchedule(c, scheduleName)
 	if err != nil {
 		return nil, err
 	}
-	return newWorkflowPollingHandle[any](c, workflowID), nil
+	return newWorkflowPollingHandle[any](c, workflowID, shardKey), nil
 }
 
 // TriggerSchedule triggers a schedule immediately, returning a typed handle to

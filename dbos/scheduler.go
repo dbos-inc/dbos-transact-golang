@@ -36,6 +36,7 @@ type ScheduleSpec struct {
 	CronTimezone      string // Optional IANA timezone used to interpret the cron expression
 	QueueName         string // Optional queue to route scheduled invocations to (defaults to the internal queue)
 	ApplicationName   string // Optional application that owns the schedule and runs its workflows (defaults to the caller's application)
+	ShardKey          string // The shard key the schedule's workflows run under: required on a sharded system database, an error otherwise
 }
 
 const (
@@ -175,8 +176,9 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 		wfID := fmt.Sprintf("sched-%s-%s", scheduleName, input.ScheduledTime.Format(time.RFC3339))
 
 		// Skip if this tick's workflow already exists. Another executor may have enqueued it.
+		keyed := bindShardKey(c, wfID, schedule.ShardKey)
 		existing, err := sysdb.RetryWithResult(c, func() ([]WorkflowStatus, error) {
-			return c.systemDB.ListWorkflows(c, sysdb.ListWorkflowsDBInput{WorkflowIDs: []string{wfID}})
+			return c.systemDB.ListWorkflows(keyed, sysdb.ListWorkflowsDBInput{WorkflowIDs: []string{wfID}})
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
 			c.logger.Error("failed to check existing scheduled workflow", "schedule", scheduleName, "workflow_id", wfID, "error", err)
@@ -218,6 +220,7 @@ func (c *dbosContext) buildDBScheduleFunc(schedule WorkflowSchedule) ScheduledWo
 			Serialization:      ser.Name(),
 			ScheduleName:       scheduleName,
 			ApplicationName:    scheduleOwner,
+			ShardKey:           schedule.ShardKey,
 		}
 
 		uncancellableCtx := WithoutCancel(c)
@@ -324,6 +327,7 @@ type scheduleSignature struct {
 	ContextJSON       string
 	CronTimezone      string
 	QueueName         string
+	ShardKey          string
 }
 
 func (c *dbosContext) calculateSignature(s WorkflowSchedule) scheduleSignature {
@@ -334,6 +338,7 @@ func (c *dbosContext) calculateSignature(s WorkflowSchedule) scheduleSignature {
 		ContextJSON:       string(s.Context),
 		CronTimezone:      s.CronTimezone,
 		QueueName:         s.QueueName,
+		ShardKey:          s.ShardKey,
 	}
 }
 

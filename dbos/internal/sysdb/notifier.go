@@ -209,14 +209,14 @@ func (s *SysDB) pushesNotifications() bool {
 
 // SignalStreamWrite wakes readers of the given stream, here and elsewhere. Call
 // it after the write commits.
-func (s *SysDB) SignalStreamWrite(workflowID, key string) {
-	s.streamNotifier.signal(workflowID + "::" + key)
+func (s *SysDB) SignalStreamWrite(ctx context.Context, workflowID, key string) {
+	s.streamNotifier.signal(waiterPayload(s.ownResolvedKey(ctx, workflowID), workflowID, key))
 }
 
 // SignalEventSet wakes GetEvent waiters on the given key, here and elsewhere.
 // Call it after the write commits.
-func (s *SysDB) SignalEventSet(workflowID, key string) {
-	s.EventNotifier.signal(workflowID + "::" + key)
+func (s *SysDB) SignalEventSet(ctx context.Context, workflowID, key string) {
+	s.EventNotifier.signal(waiterPayload(s.ownResolvedKey(ctx, workflowID), workflowID, key))
 }
 
 // notifierLoop pushes queued notifications until the context is canceled, then
