@@ -122,15 +122,6 @@ func OwnShardKey(ctx context.Context, workflowID string) string {
 	return own.key
 }
 
-// RunningShardKey is the running workflow's shard key, whatever its ID, or "".
-func RunningShardKey(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	own, _ := ctx.Value(shardOwnCtxKey{}).(ownShardKey)
-	return own.key
-}
-
 // KeyedID prefixes id with key, length first, so two (key, id) pairs never collide:
 // "<len(key)>:<key>:<id>". The length counts code points, as every DBOS SDK does, so
 // a key with non-ASCII characters derives the same ID in each language. An empty key
@@ -253,13 +244,13 @@ func (s *SysDB) globalKey() string {
 	return GlobalShardKey
 }
 
-// andKey returns " AND <column> = $n" binding key as the next argument, or "" for no key.
-func andKey(column, key string, args *[]any) string {
+// andKey returns " AND shard_key = $n" binding key as the next argument, or "" for no key.
+func andKey(key string, args *[]any) string {
 	if key == "" {
 		return ""
 	}
 	*args = append(*args, key)
-	return fmt.Sprintf(" AND %s = $%d", column, len(*args))
+	return fmt.Sprintf(" AND shard_key = $%d", len(*args))
 }
 
 // keyColumn returns the shard key column for an INSERT's column list, or "".
@@ -280,20 +271,13 @@ func keyValue(key string, args *[]any) string {
 	return fmt.Sprintf("$%d, ", len(*args))
 }
 
-// keyConflict prefixes a conflict target with shard_key when sharded.
-func (s *SysDB) keyConflict(columns string) string {
+// keyedColumns prefixes the columns identifying a row with shard_key when sharded, for a
+// conflict target or a join.
+func (s *SysDB) keyedColumns(columns string) string {
 	if !s.sharded {
 		return columns
 	}
 	return "shard_key, " + columns
-}
-
-// keyJoin returns " AND l.shard_key = r.shard_key" joining two aliases' rows of one workflow, or "".
-func (s *SysDB) keyJoin(left, right string) string {
-	if !s.sharded {
-		return ""
-	}
-	return fmt.Sprintf(" AND %s.shard_key = %s.shard_key", left, right)
 }
 
 // waiterPayload is the waiter-map entry for a workflow's topic or key, keyed by shard

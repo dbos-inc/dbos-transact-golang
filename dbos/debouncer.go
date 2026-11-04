@@ -270,7 +270,7 @@ func debounce[R any, P any](c *dbosContext, params debouncerParams, key string, 
 
 		switch classifyBounce(result, params.workflowName, c.ownerAppName()) {
 		case bounceReturn:
-			return newWorkflowPollingHandle[R](c, *result.BouncedWorkflowID), nil
+			return newWorkflowPollingHandle[R](c, *result.BouncedWorkflowID, ""), nil
 		case bounceRaise:
 			return nil, models.NewQueueDeduplicatedError(*result.HolderWorkflowID, queueName, deduplicationID)
 		case bounceRetry:

@@ -713,11 +713,14 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 	workerDone := make(map[string]chan struct{})
 
 	for ctx.Err() == nil { // While ctx is not cancelled
-		// Transition any DELAYED workflows whose delay has expired to ENQUEUED.
-		if err := sysdb.Retry(ctx, func() error {
-			return ctx.systemDB.TransitionDelayedWorkflows(ctx)
-		}, sysdb.WithRetrierLogger(qr.logger)); err != nil {
-			qr.logger.Warn("Exception transitioning delayed workflows", "error", err)
+		// Transition any DELAYED workflows whose delay has expired to ENQUEUED. On a
+		// sharded database one process per application does it, in its background jobs.
+		if !ctx.systemDB.Sharded() {
+			if err := sysdb.Retry(ctx, func() error {
+				return ctx.systemDB.TransitionDelayedWorkflows(ctx)
+			}, sysdb.WithRetrierLogger(qr.logger)); err != nil {
+				qr.logger.Warn("Exception transitioning delayed workflows", "error", err)
+			}
 		}
 
 		// Rebuild the listen set each tick so changes made via ListenQueues
@@ -841,59 +844,52 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 		}
 
 		hasBackoffError := false
-		skipDequeue := false
 
-		// Build list of partition keys to dequeue from
-		// Default to empty string for non-partitioned queues
-		partitionKeys := []string{""}
-		if queue.PartitionQueue {
-			partitions, err := sysdb.RetryWithResult(ctx, func() ([]string, error) {
-				return ctx.systemDB.GetQueuePartitions(ctx, queue.Name)
+		// Each scope dequeues independently; a sharded system database has one per shard
+		// key with work, discovered by its backend, and an unsharded one a single keyless scope.
+		var isLatestVersion *bool
+		scopes, err := ctx.systemDB.DequeueScopes(ctx, queue.Name)
+		if err != nil {
+			if ctx.Err() == nil {
+				queueLogger.Warn("Exception finding work for queue", "error", err)
+			}
+			scopes = nil
+		} else if len(scopes) > 0 && ctx.systemDB.Sharded() {
+			// A sharded database keeps the version row in one shard. Read it once per poll outside the dequeues.
+			latest, err := sysdb.RetryWithResult(ctx, func() (*VersionInfo, error) {
+				return ctx.systemDB.GetLatestApplicationVersion(ctx, nil, "")
 			}, sysdb.WithRetrierLogger(queueLogger))
-			if err != nil {
-				skipDequeue = true
-				if ctx.systemDB.IsContentionError(err) {
-					hasBackoffError = true
-				} else {
-					queueLogger.Error("Error getting queue partitions", "error", err)
-				}
-			} else {
-				partitionKeys = partitions
+			switch {
+			case err == nil:
+				isLatest := latest.Name == ctx.applicationVersion
+				isLatestVersion = &isLatest
+			case errors.Is(err, &models.Error{Code: models.ErrorCodeNoApplicationVersions}):
+				// No versions registered yet: treat this worker as the latest.
+				isLatest := true
+				isLatestVersion = &isLatest
+			default:
+				queueLogger.Warn("Exception finding work for queue", "error", err)
+				scopes = nil
 			}
 		}
-
-		// Dequeue from each partition (or once for non-partitioned queues)
-		if !skipDequeue {
-			// Give an equal chance to each partition to be dequeued to avoid starvation.
-			rand.Shuffle(len(partitionKeys), func(i, j int) { partitionKeys[i], partitionKeys[j] = partitionKeys[j], partitionKeys[i] }) // #nosec G404 -- non-crypto shuffle; acceptable
-			limits := queue.resolveLimits()
-			running := ctx.countActiveWorkflowsForQueue(queue.Name)
-			ownerXID := uuid.NewString()
-			var dequeuedIDs []string
-			for _, partitionKey := range partitionKeys {
-				if limits.WorkerConcurrency != nil && running+len(dequeuedIDs) >= *limits.WorkerConcurrency {
-					break
-				}
-				ids, err := qr.dequeueWorkflows(ctx, queue, partitionKey, running+len(dequeuedIDs), ownerXID)
-				if err != nil {
-					switch {
-					case !ctx.systemDB.IsContentionError(err):
-						queueLogger.Error("Error dequeuing workflows from queue", "partition_key", partitionKey, "error", err)
-					case partitionKey == "":
-						hasBackoffError = true
-					default:
-						// Another worker holds this partition or won its claim: skip it, no queue-wide backoff.
-						queueLogger.Debug("Partition is contended, skipping", "partition_key", partitionKey)
-					}
-					continue
-				}
-				dequeuedIDs = append(dequeuedIDs, ids...)
+		// Shuffle the shard keys
+		rand.Shuffle(len(scopes), func(i, j int) { scopes[i], scopes[j] = scopes[j], scopes[i] }) // #nosec G404 -- non-crypto shuffle; acceptable
+		limits := queue.resolveLimits()
+		// This worker's load for the whole poll: running workflows, snapshotted once, plus every claim since.
+		running := ctx.countActiveWorkflowsForQueue(queue.Name)
+		polled := 0
+		for _, scope := range scopes {
+			if ctx.Err() != nil || (limits.WorkerConcurrency != nil && running+polled >= *limits.WorkerConcurrency) {
+				break
 			}
-
-			if len(dequeuedIDs) > 0 {
-				queueLogger.Debug("Dequeued workflows from queue", "workflows", len(dequeuedIDs))
-				qr.startDequeuedWorkflows(ctx, queueLogger, dequeuedIDs, ownerXID)
+			scopeCtx := ctx
+			if scope != "" {
+				scopeCtx = ctx.clone(sysdb.WithShardKeyScope(ctx.ctx, scope))
 			}
+			claimed, backoff := qr.dequeueScope(scopeCtx, queueLogger, queue, running+polled, isLatestVersion)
+			polled += claimed
+			// Backed off once per poll below, however many scopes conflicted.
+			hasBackoffError = hasBackoffError || backoff
 		}
 
 		// Adjust polling interval for this queue based on errors
@@ -920,6 +916,59 @@ func (qr *queueRunner) runQueue(ctx *dbosContext, queue workflowQueue) {
 			// Continue to next iteration
 		}
 	}
+}
+
+// Run the dequeue query over a specific scope (shard and/or partition keys)
+func (qr *queueRunner) dequeueScope(ctx *dbosContext, queueLogger *slog.Logger, queue workflowQueue, running int, isLatestVersion *bool) (int, bool) {
+	hasBackoffError := false
+
+	// Build list of partition keys to dequeue from
+	// Default to empty string for non-partitioned queues
+	partitionKeys := []string{""}
+	if queue.PartitionQueue {
+		partitions, err := sysdb.RetryWithResult(ctx, func() ([]string, error) {
+			return ctx.systemDB.GetQueuePartitions(ctx, queue.Name)
+		}, sysdb.WithRetrierLogger(queueLogger))
+		if err != nil {
+			if ctx.systemDB.IsContentionError(err) {
+				return 0, true
+			}
+			queueLogger.Error("Error getting queue partitions", "error", err)
+			return 0, false
+		}
+		partitionKeys = partitions
+	}
+
+	// Give an equal chance to each partition to be dequeued to avoid starvation.
+	rand.Shuffle(len(partitionKeys), func(i, j int) { partitionKeys[i], partitionKeys[j] = partitionKeys[j], partitionKeys[i] }) // #nosec G404 -- non-crypto shuffle; acceptable
+	limits := queue.resolveLimits()
+	ownerXID := uuid.NewString()
+	var dequeuedIDs []string
+	for _, partitionKey := range partitionKeys {
+		if limits.WorkerConcurrency != nil && running+len(dequeuedIDs) >= *limits.WorkerConcurrency {
+			break
+		}
+		ids, err := qr.dequeueWorkflows(ctx, queue, partitionKey, running+len(dequeuedIDs), ownerXID, isLatestVersion)
+		if err != nil {
+			switch {
+			case !ctx.systemDB.IsContentionError(err):
+				queueLogger.Error("Error dequeuing workflows from queue", "partition_key", partitionKey, "error", err)
+			case partitionKey == "":
+				hasBackoffError = true
+			default:
+				// Another worker holds this partition or won its claim: skip it, no queue-wide backoff.
+				queueLogger.Debug("Partition is contended, skipping", "partition_key", partitionKey)
+			}
+			continue
+		}
+		dequeuedIDs = append(dequeuedIDs, ids...)
+	}
+
+	if len(dequeuedIDs) > 0 {
+		queueLogger.Debug("Dequeued workflows from queue", "workflows", len(dequeuedIDs))
+		qr.startDequeuedWorkflows(ctx, queueLogger, dequeuedIDs, ownerXID)
+	}
+	return len(dequeuedIDs), hasBackoffError
 }
 
 // startDequeuedWorkflows reads the claimed workflows' statuses in one round trip and
@@ -997,6 +1046,7 @@ func (qr *queueRunner) startDequeuedWorkflows(ctx *dbosContext, queueLogger *slo
 		})
 		ctx.executeWorkflow(fn, status.Input, workflowExecution{
 			workflowID:         id,
+			shardKey:           status.ShardKey,
 			ownerXID:           ownerXID,
 			queueName:          status.QueueName,
 			queuePartitionKey:  status.QueuePartitionKey,
@@ -1011,7 +1061,7 @@ func (qr *queueRunner) startDequeuedWorkflows(ctx *dbosContext, queueLogger *slo
 }
 
 // dequeueWorkflows claims workflows from one partition, or from the whole queue when partitionKey is empty.
-func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, partitionKey string, localRunning int, ownerXID string) ([]string, error) {
+func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, partitionKey string, localRunning int, ownerXID string, isLatestVersion *bool) ([]string, error) {
 	partitionRunning := 0
 	if partitionKey != "" {
 		partitionRunning = ctx.countActiveWorkflowsForPartition(queue.Name, partitionKey)
@@ -1025,6 +1075,7 @@ func (qr *queueRunner) dequeueWorkflows(ctx *dbosContext, queue workflowQueue, p
 			LocalRunningCount:          localRunning,
 			PartitionLocalRunningCount: partitionRunning,
 			OwnerXID:                   ownerXID,
+			IsLatestVersion:            isLatestVersion,
 		})
 	}, sysdb.WithRetrierLogger(qr.logger))
 }
