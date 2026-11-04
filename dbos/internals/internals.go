@@ -49,7 +49,21 @@ type (
 
 	Tx        = sysdb.Tx        // A transaction on the system database pool
 	TxOptions = sysdb.TxOptions // Options for Pool().BeginTx
+	Querier   = sysdb.Querier   // What a pool and a transaction both run queries on
+
+	// A sharded system database's commercial backend; see dbos.RegisterShardingBackend.
+	ShardingBackend        = sysdb.ShardingBackend
+	ShardingBackendInput   = sysdb.ShardingBackendInput
+	ShardingBackendFactory = sysdb.ShardingBackendFactory
 )
+
+// GlobalShardKey is the shard key of every row in a global table: queues, schedules,
+// application versions, and the migration version row.
+const GlobalShardKey = sysdb.GlobalShardKey
+
+// KeyedID prefixes id with key as every DBOS SDK does: "<len(key)>:<key>:<id>", the
+// length counted in code points. An empty key leaves id unchanged.
+func KeyedID(key, id string) string { return sysdb.KeyedID(key, id) }
 
 // Retry are not part of the SystemDatabase interface today
 type RetryOption = sysdb.RetryOption
