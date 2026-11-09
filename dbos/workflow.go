@@ -3642,7 +3642,16 @@ func (c *dbosContext) Recv(_ Context, topic string, timeout time.Duration) (any,
 	switch v := out.(type) {
 	case rawStepOutput: // executed now
 		return &recvResult{message: v.value, serialization: v.serialization}, err
-	case stepCheckpointedOutcome: // replayed from a recorded checkpoint
+	case stepCheckpointedOutcome: // replayed from a recorded checkpoint -- might have been writen by a newer execution
+		owner, ownerErr := sysdb.RetryWithResult(c, func() (*string, error) {
+			return c.systemDB.GetWorkflowOwner(WithoutCancel(c), workflowID)
+		}, sysdb.WithRetrierLogger(c.logger))
+		if ownerErr != nil {
+			return nil, models.NewStepExecutionError(workflowID, "DBOS.recv", fmt.Errorf("checking workflow owner: %w", ownerErr))
+		}
+		if owner == nil || *owner != wfState.ownerXID {
+			return nil, models.NewStepExecutionError(workflowID, "DBOS.recv", models.NewWorkflowConflictIDError(workflowID))
+		}
 		message, ok := v.value.(*string)
 		if !ok {
 			return nil, models.NewWorkflowExecutionError(workflowID, fmt.Errorf("recv checkpoint value is not *string, got %T", v.value))
