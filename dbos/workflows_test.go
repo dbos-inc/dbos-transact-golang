@@ -848,6 +848,57 @@ func sleepStepIDDriftWorkflow(ctx Context, _ string) (string, error) {
 	return "ok", nil
 }
 
+// cancelFaultPool wraps a Pool and, once armed for a workflow, makes the next
+// UPDATE that durably cancels that workflow fail with a retryable ("conn closed")
+// error. Postgres runs the cancel as a single data-modifying CTE through Query;
+// SQLite runs an UPDATE through a transaction's Exec. Both are intercepted. The
+// match is on the target's ID so the periodic timeout monitor, which also sets
+// CANCELLED, cannot consume the fault. Disarmed (the default) it is a transparent
+// pass-through.
+type cancelFaultPool struct {
+	Pool
+	target atomic.Value // string: workflow ID whose cancel should fault; "" disarms
+	fired  atomic.Bool
+}
+
+func (p *cancelFaultPool) arm(workflowID string) {
+	p.fired.Store(false)
+	p.target.Store(workflowID)
+}
+
+func (p *cancelFaultPool) isCancelUpdate(query string, args []any) bool {
+	target, _ := p.target.Load().(string)
+	return target != "" && strings.Contains(query, "workflow_status") && strings.Contains(query, "UPDATE") &&
+		len(args) > 1 && args[0] == any(WorkflowStatusCancelled) && strings.Contains(fmt.Sprint(args[1]), target)
+}
+
+func (p *cancelFaultPool) Query(ctx context.Context, query string, args ...any) (Rows, error) {
+	if p.isCancelUpdate(query, args) && p.fired.CompareAndSwap(false, true) {
+		return nil, errors.New("conn closed") // retryable per postgresDialect.IsRetryable
+	}
+	return p.Pool.Query(ctx, query, args...)
+}
+
+func (p *cancelFaultPool) BeginTx(ctx context.Context, opts TxOptions) (Tx, error) {
+	tx, err := p.Pool.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &cancelFaultTx{Tx: tx, p: p}, nil
+}
+
+type cancelFaultTx struct {
+	Tx
+	p *cancelFaultPool
+}
+
+func (t *cancelFaultTx) Exec(ctx context.Context, query string, args ...any) (Result, error) {
+	if t.p.isCancelUpdate(query, args) && t.p.fired.CompareAndSwap(false, true) {
+		return nil, errors.New("conn closed")
+	}
+	return t.Tx.Exec(ctx, query, args...)
+}
+
 // Transaction-level conflicts inside a transactional step. The step function fails
 // with a conflict that only a fresh transaction can clear; the step must run again in a
 // new transaction and record the eventual success, never the conflict.
@@ -8168,7 +8219,55 @@ func TestWorkflowCancel(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, blockingWorkflowNoError)
 
+	// Workflow that blocks until its context is cancelled.
+	blockUntilCancelled := func(ctx Context, _ string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	RegisterWorkflow(dbosCtx, blockUntilCancelled)
+
+	// Installed before Launch so no goroutine reads sysDB.Pool() concurrently with
+	// the swap; armed by TransientErrorDuringDurableCancel only.
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	cancelPool := &cancelFaultPool{Pool: sysDB.Pool()}
+	sysDB.SetPool(cancelPool)
+
 	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	t.Run("TransientErrorDuringDurableCancel", func(t *testing.T) {
+		// The workflow is cancelled through its context while the durable cancel's
+		// first attempt fails with a transient DB error. The cancel runs because that
+		// context is already cancelled, so its retry must not wait on it: a retry
+		// that gives up leaves the row PENDING, the cancelled run parks on it
+		// forever, and GetResult never returns.
+		wfID := uuid.NewString()
+		cancelPool.arm(wfID)
+		defer cancelPool.arm("")
+
+		cancelCtx, cancelFunc := WithCancel(dbosCtx)
+		defer cancelFunc()
+		handle, err := RunWorkflow(cancelCtx, blockUntilCancelled, "", WithWorkflowID(wfID))
+		require.NoError(t, err, "failed to start workflow")
+		cancelFunc()
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := handle.GetResult()
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			require.Error(t, err, "expected error from cancelled workflow")
+			require.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got: %v", err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("GetResult did not return: the durable cancel was dropped and the run parked on a PENDING row")
+		}
+		require.True(t, cancelPool.fired.Load(), "fault injection never triggered; the test did not exercise the cancel retry")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		assert.Equal(t, WorkflowStatusCancelled, status.Status, "the cancel must be retried until it is durable")
+	})
 
 	t.Run("TestWorkflowCancelWithRecvError", func(t *testing.T) {
 		topic := "cancel-test-topic"
