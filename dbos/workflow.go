@@ -1680,7 +1680,9 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 			return
 		}
 		c.logger.Info("Cancelling workflow", "workflow_id", workflowID)
-		err := sysdb.Retry(c, func() error {
+		// Derive the retry context from the root context, so it is detached from the workflow context and has a chance to run.
+		cancelCtx := c.clone(c.rootCtx)
+		err := sysdb.Retry(cancelCtx, func() error {
 			_, err := c.systemDB.CancelWorkflows(uncancellableCtx, sysdb.CancelWorkflowsDBInput{WorkflowIDs: []string{workflowID}, OwnerXID: exec.ownerXID})
 			return err
 		}, sysdb.WithRetrierLogger(c.logger))
