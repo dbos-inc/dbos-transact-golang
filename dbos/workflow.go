@@ -1892,7 +1892,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 
 		if errors.Is(err, ErrWorkflowSuspended) {
 			// The workflow is parked in the database and no longer owned by this execution.
-			stopFunc()
+			stopFunc() // Possible to drop a manual context cancellation here but it's ok
 			removeActive()
 			outcomeChan <- workflowOutcome[any]{suspended: true}
 			close(outcomeChan)
