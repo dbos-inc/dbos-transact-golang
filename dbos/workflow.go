@@ -3557,6 +3557,21 @@ func SendBulk(ctx Client, messages []SendMessage, opts ...SendOption) error {
 	return ctx.SendBulk(ctx, messages, opts...)
 }
 
+// checkpointStillOwned guards a waiting step to find if its checkpoint was already recorded by a newer execution.
+// Return appropriate step errors.
+func (c *dbosContext) checkpointStillOwned(wfState *workflowState, stepName string) error {
+	owner, err := sysdb.RetryWithResult(c, func() (*string, error) {
+		return c.systemDB.GetWorkflowOwner(WithoutCancel(c), wfState.workflowID)
+	}, sysdb.WithRetrierLogger(c.logger))
+	if err != nil {
+		return models.NewStepExecutionError(wfState.workflowID, stepName, fmt.Errorf("checking workflow owner: %w", err))
+	}
+	if owner == nil || *owner != wfState.ownerXID {
+		return models.NewStepExecutionError(wfState.workflowID, stepName, models.NewWorkflowConflictIDError(wfState.workflowID))
+	}
+	return nil
+}
+
 // recvResult carries the received message along with its serialization format from the notifications table.
 type recvResult struct {
 	message       *string
@@ -3642,15 +3657,9 @@ func (c *dbosContext) Recv(_ Context, topic string, timeout time.Duration) (any,
 	switch v := out.(type) {
 	case rawStepOutput: // executed now
 		return &recvResult{message: v.value, serialization: v.serialization}, err
-	case stepCheckpointedOutcome: // replayed from a recorded checkpoint -- might have been writen by a newer execution
-		owner, ownerErr := sysdb.RetryWithResult(c, func() (*string, error) {
-			return c.systemDB.GetWorkflowOwner(WithoutCancel(c), workflowID)
-		}, sysdb.WithRetrierLogger(c.logger))
-		if ownerErr != nil {
-			return nil, models.NewStepExecutionError(workflowID, "DBOS.recv", fmt.Errorf("checking workflow owner: %w", ownerErr))
-		}
-		if owner == nil || *owner != wfState.ownerXID {
-			return nil, models.NewStepExecutionError(workflowID, "DBOS.recv", models.NewWorkflowConflictIDError(workflowID))
+	case stepCheckpointedOutcome: // replayed from a recorded checkpoint -- might have been written by a newer execution
+		if err := c.checkpointStillOwned(wfState, "DBOS.recv"); err != nil {
+			return nil, err
 		}
 		message, ok := v.value.(*string)
 		if !ok {
@@ -3933,7 +3942,10 @@ func (c *dbosContext) GetEvent(_ Client, targetWorkflowID, key string, timeout t
 	switch v := out.(type) {
 	case rawStepOutput: // executed now
 		return &getEventResult{value: v.value, serialization: v.serialization}, err
-	case stepCheckpointedOutcome: // replayed from a recorded checkpoint
+	case stepCheckpointedOutcome: // replayed from a recorded checkpoint -- might have been written by a newer execution
+		if err := c.checkpointStillOwned(wfState, "DBOS.getEvent"); err != nil {
+			return nil, err
+		}
 		value, ok := v.value.(*string)
 		if !ok {
 			return nil, models.NewWorkflowExecutionError(workflowID, fmt.Errorf("getEvent checkpoint value is not *string, got %T", v.value))

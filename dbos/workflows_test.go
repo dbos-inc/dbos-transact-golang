@@ -6038,6 +6038,85 @@ func TestRecvStaleExecutionRefusesOwnerCheckpoint(t *testing.T) {
 	require.Equal(t, "owner-done", result)
 }
 
+// Same as TestRecvStaleExecutionRefusesOwnerCheckpoint, for GetEvent: a stale execution
+// waiting for an event wakes to find the owner's getEvent checkpoint and must get a
+// conflict rather than replay it.
+func TestGetEventStaleExecutionRefusesOwnerCheckpoint(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+
+	key := "stale-checkpoint-key"
+	release := make(chan struct{})
+	setterWorkflow := func(ctx Context, _ string) (string, error) {
+		<-release
+		return "set", SetEvent(ctx, key, "owner-event")
+	}
+	getEventErrs := make(chan error, 1)
+	getterWorkflow := func(ctx Context, target string) (string, error) {
+		value, err := GetEvent[string](ctx, target, key, 60*time.Second)
+		getEventErrs <- err
+		return value, err
+	}
+	RegisterWorkflow(dbosCtx, setterWorkflow)
+	RegisterWorkflow(dbosCtx, getterWorkflow)
+	require.NoError(t, Launch(dbosCtx))
+	ctx := context.Background()
+
+	setter, err := RunWorkflow(dbosCtx, setterWorkflow, "")
+	require.NoError(t, err, "failed to start setter workflow")
+	targetID := setter.GetWorkflowID()
+	payload := fmt.Sprintf("%s::%s", targetID, key)
+
+	workflowID := uuid.NewString()
+	handle, err := RunWorkflow(dbosCtx, getterWorkflow, targetID, WithWorkflowID(workflowID))
+	require.NoError(t, err, "failed to start getter workflow")
+	require.Eventually(t, func() bool {
+		return sysDB.EventNotifier.WaiterCount(payload) == 1
+	}, 5*time.Second, 10*time.Millisecond, "the execution never registered as event waiter")
+
+	// Hand the getter over: the waiting execution is stale from here on. The new owner
+	// reads the event and checkpoints the getEvent (step 0; the timeout sleep is step 1).
+	live := setWorkflowOwner(t, sysDB, workflowID)
+	ownerValue := `"owner-event"`
+	require.NoError(t, sysDB.RecordOperationResult(ctx, sysdb.RecordOperationResultDBInput{
+		WorkflowID: workflowID, StepID: 0, StepName: "DBOS.getEvent", Output: &ownerValue, Serialization: "DBOS_JSON",
+		StartedAt: time.Now(), CompletedAt: time.Now(), OwnerXID: live,
+	}))
+
+	// Set the event, waking the stale waiter: it finds the owner's checkpoint where it would have read.
+	close(release)
+	_, err = setter.GetResult()
+	require.NoError(t, err)
+	select {
+	case err := <-getEventErrs:
+		require.ErrorIs(t, err, ErrConflictingWorkflowID, "the stale execution must not be handed the owner's event value")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stale execution never returned from GetEvent")
+	}
+
+	// The stale execution parks without touching the row.
+	require.Eventually(t, func() bool {
+		return len(dbosCtx.(*dbosContext).activeExecutionsOf(workflowID)) == 0
+	}, 10*time.Second, 10*time.Millisecond, "the stale execution never parked")
+	status, err := handle.GetStatus()
+	require.NoError(t, err)
+	require.Equal(t, WorkflowStatusPending, status.Status, "the stale execution's failure must not become the outcome")
+	owner, err := sysDB.GetWorkflowOwner(ctx, workflowID)
+	require.NoError(t, err)
+	require.NotNil(t, owner)
+	require.Equal(t, live, *owner)
+
+	// The owner completes the workflow; the stale execution's handle adopts that outcome.
+	ownerResult, err := resolveEncoder(dbosCtx).Encode("owner-done")
+	require.NoError(t, err)
+	ok, err := sysDB.UpdateWorkflowOutcome(ctx, sysdb.UpdateWorkflowOutcomeDBInput{WorkflowID: workflowID, Status: WorkflowStatusSuccess, Output: ownerResult, OwnerXID: live})
+	require.NoError(t, err)
+	require.True(t, ok)
+	result, err := handle.GetResult()
+	require.NoError(t, err, "the stale execution must adopt the owner's outcome")
+	require.Equal(t, "owner-done", result)
+}
+
 // receiveTwiceShortWorkflow receives one message (blocking up to 30s), then attempts a
 // second Recv with a short timeout. The second slot is "<timeout>" when no further message
 // arrives, letting a test observe whether a duplicate Send was deduplicated.
