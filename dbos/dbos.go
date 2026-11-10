@@ -70,6 +70,7 @@ type Config struct {
 	NotificationCoalesceInterval   time.Duration   // Controls how often stream-write and set-event notifications are batched
 	SkipMigrations                 bool            // Verify the system database schema on launch instead of creating and migrating it
 	Sharding                       bool            // Use a sharded system database, a Transact Enterprise feature: every workflow lives under an explicit shard key (see WithShardKey)
+	SuspendMode                    bool            // Let Recv and Sleep park a waiting workflow in the system database instead of holding it in memory, a Transact Enterprise feature (default: false)
 	namelessOwner                  bool            // Act for no specific application: write unclaimed rows, matches all. Used by clients without an AppName.
 	isClient                       bool            // Client handle: runs no workflows, so enqueues leave the version unset by default.
 }
@@ -133,6 +134,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		SystemDBIdleTransactionTimeout: inputConfig.SystemDBIdleTransactionTimeout,
 		NotificationCoalesceInterval:   inputConfig.NotificationCoalesceInterval,
 		Sharding:                       inputConfig.Sharding,
+		SuspendMode:                    inputConfig.SuspendMode,
 		namelessOwner:                  inputConfig.namelessOwner,
 		isClient:                       inputConfig.isClient,
 	}
@@ -293,11 +295,11 @@ type Context interface {
 	RunWorkflow(_ Context, fn WorkflowFunc, input any, opts ...WorkflowOption) (WorkflowHandle[any], error) // Start a new workflow execution
 	Go(_ Context, fn StepFunc, opts ...StepOption) (<-chan StepOutcome[any], error)                         // Starts a step inside a Go routine and returns a channel to receive the result
 	Select(_ Context, channels []<-chan StepOutcome[any]) (any, error)                                      // Performs a durable select over a slice of channels, checkpointing the selected channel and value
-	Recv(_ Context, topic string, timeout time.Duration) (any, error)                                       // Receive a message sent to this workflow
+	Recv(_ Context, topic string, timeout time.Duration, opts ...RecvOption) (any, error)                   // Receive a message sent to this workflow
 	SetEvent(_ Context, key string, message any, opts ...SetEventOption) error                              // Set a key-value event for this workflow
 	WriteStream(_ Context, key string, value any, opts ...WriteStreamOption) error                          // Write a value to a durable stream
 	CloseStream(_ Context, key string) error                                                                // Close a durable stream
-	Sleep(_ Context, duration time.Duration) (time.Duration, error)                                         // Durable sleep that survives workflow recovery
+	Sleep(_ Context, duration time.Duration, opts ...SleepOption) (time.Duration, error)                    // Durable sleep that survives workflow recovery
 	Patch(_ Context, patchName string) (bool, error)                                                        // Check if workflow should use patched code
 	DeprecatePatch(_ Context, patchName string) error                                                       // Deprecate a patch
 	GetWorkflowID() (string, error)                                                                         // Get the current workflow ID (only available within workflows)
@@ -351,6 +353,9 @@ type dbosContext struct {
 
 	// Auto-upgrade, started by Launch when a workflow enrolled
 	autoUpgrader *autoUpgradeLoop
+
+	// Suspend mode's database operations; nil unless Config.SuspendMode is set
+	suspend SuspendBackend
 
 	// Application metadata
 	applicationVersion string
@@ -477,6 +482,7 @@ func (c *dbosContext) clone(ctx context.Context) *dbosContext {
 		serializer:              c.serializer,
 		launched:                c.launched,
 		dataSources:             c.dataSources,
+		suspend:                 c.suspend,
 	}
 	return childCtx
 }
@@ -749,6 +755,12 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 			return nil, enterpriseUnavailableError(autoUpgradeFeature.description)
 		}
 	}
+	var suspendFactory SuspendBackendFactory
+	if config.SuspendMode {
+		if suspendFactory = registeredSuspendBackendFactory(); suspendFactory == nil {
+			return nil, enterpriseUnavailableError(suspendFeature.description)
+		}
+	}
 	var shardingFactory sysdb.ShardingBackendFactory
 	if config.Sharding {
 		if shardingFactory = registeredShardingBackendFactory(); shardingFactory == nil {
@@ -797,6 +809,18 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 
 	// Initialize the queue runner (which owns the DBOS internal queue)
 	initExecutor.queueRunner = newQueueRunner(initExecutor.logger)
+
+	if suspendFactory != nil {
+		suspend, err := suspendFactory(initExecutor)
+		if err != nil {
+			// Leave nothing behind: the system database is already open.
+			systemDB.Shutdown(initExecutor, config.SystemDBStartupTimeout)
+			cancelFunc(err)
+			return nil, models.NewInitializationError(fmt.Sprintf("failed to initialize suspend mode: %v", err))
+		}
+		initExecutor.suspend = suspend
+		initExecutor.logger.Debug("Suspend mode initialized")
+	}
 
 	if conductorOpts != nil {
 		conductor, err := conductorFactory(initExecutor, *conductorOpts)

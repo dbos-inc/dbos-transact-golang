@@ -59,6 +59,7 @@ type workflowOutcome[R any] struct {
 	err           error
 	needsDecoding bool   // true if result came from awaitWorkflowResult (ID conflict path) and needs decoding
 	serialization string // serialization format of the encoded result (only used when needsDecoding is true)
+	suspended     bool   // the execution parked the workflow; its outcome will be recorded by a later execution
 }
 
 type stepCheckpointedOutcome struct {
@@ -300,6 +301,18 @@ func (h *workflowHandle[R]) GetResult(opts ...GetResultOption) (R, error) {
 		if !ok {
 			// Return error if channel closed (happens when GetResult() called twice)
 			return *new(R), errors.New("workflow result channel is already closed. Did you call GetResult() twice on the same workflow handle?")
+		}
+		if outcome.suspended {
+			// The workflow was suspended. Fall back to polling.
+			if options.timeout > 0 {
+				remaining := options.timeout - time.Since(startTime)
+				if remaining <= 0 {
+					return *new(R), models.NewTimeoutError(h.workflowID, "", fmt.Sprintf("workflow result timeout after %v", options.timeout), context.DeadlineExceeded)
+				}
+				opts = append(opts, WithHandleTimeout(remaining))
+			}
+			polling := &workflowPollingHandle[R]{baseWorkflowHandle: h.baseWorkflowHandle}
+			return polling.GetResult(opts...)
 		}
 		completedTime := time.Now()
 		return h.processOutcome(outcome, startTime, completedTime)
@@ -1188,6 +1201,10 @@ func RunWorkflow[P any, R any](ctx Context, fn Workflow[P, R], input P, opts ...
 		go func() {
 			defer close(typedOutcomeChan)
 			outcome := <-handle.outcomeChan
+			if outcome.suspended {
+				typedOutcomeChan <- workflowOutcome[R]{suspended: true}
+				return
+			}
 
 			resultErr := outcome.err
 			var typedResult R
@@ -1873,6 +1890,15 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 
 		result, err = c.recoverPanic(workflowID, func() (any, error) { return fn(workflowCtx, input) })
 
+		if errors.Is(err, ErrWorkflowSuspended) {
+			// The workflow is parked in the database and no longer owned by this execution.
+			stopFunc()
+			removeActive()
+			outcomeChan <- workflowOutcome[any]{suspended: true}
+			close(outcomeChan)
+			return
+		}
+
 		// Handle DBOS ID conflict errors by waiting workflow result
 		if errors.Is(err, ErrConflictingWorkflowID) {
 			// This run lost the ID conflict: it does not own the workflow, so its
@@ -2020,6 +2046,7 @@ func (c *dbosContext) runShardedBackgroundJobs() {
 			}, sysdb.WithRetrierLogger(c.logger)); err != nil && c.Err() == nil {
 				c.logger.Warn("Exception transitioning delayed workflows", "error", err)
 			}
+			c.transitionSuspendedWorkflows()
 			c.cancelTimedOutWorkflows()
 			select {
 			case <-c.Done():
@@ -2037,6 +2064,18 @@ func (c *dbosContext) runShardedBackgroundJobs() {
 			return
 		case <-time.After(wait):
 		}
+	}
+}
+
+// transitionSuspendedWorkflows re-enqueues the SUSPENDED workflows that are due, when suspend mode is on.
+func (c *dbosContext) transitionSuspendedWorkflows() {
+	if c.suspend == nil {
+		return
+	}
+	if err := sysdb.Retry(c, func() error {
+		return c.suspend.TransitionSuspendedWorkflows(c)
+	}, sysdb.WithRetrierLogger(c.logger)); err != nil && c.Err() == nil {
+		c.logger.Warn("Exception transitioning suspended workflows", "error", err)
 	}
 }
 
@@ -3892,7 +3931,38 @@ type recvResult struct {
 	serialization string
 }
 
-func (c *dbosContext) Recv(_ Context, topic string, timeout time.Duration) (any, error) {
+// RecvOption is a functional option for configuring Recv.
+type RecvOption func(*recvOptions)
+
+type recvOptions struct {
+	suspend bool
+}
+
+// WithRecvSuspend makes a Recv that has to wait park the workflow in the system database
+// instead of holding it in memory: Recv returns an error matching ErrWorkflowSuspended,
+// which the workflow function must return, and a message on the topic or the timeout
+// re-enqueues the workflow. Requires Config.SuspendMode, a Transact Enterprise feature.
+func WithRecvSuspend() RecvOption {
+	return func(o *recvOptions) {
+		o.suspend = true
+	}
+}
+
+// minSuspendDuration is the shortest sleep worth parking: re-enqueueing costs a background pass and a dequeue.
+const minSuspendDuration = time.Second
+
+func suspendModeOffError(operation string) error {
+	return models.NewInvalidOptionError(fmt.Sprintf("%s with suspend requires suspend mode, a Transact Enterprise feature: set SuspendMode in the DBOS configuration", operation))
+}
+
+func (c *dbosContext) Recv(_ Context, topic string, timeout time.Duration, opts ...RecvOption) (any, error) {
+	var options recvOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	if options.suspend && c.suspend == nil {
+		return nil, suspendModeOffError("Recv")
+	}
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return nil, models.NewStepExecutionError("", "DBOS.recv", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
@@ -3925,27 +3995,48 @@ func (c *dbosContext) Recv(_ Context, topic string, timeout time.Duration) (any,
 		return &recvResult{message: recorded.Output, serialization: recorded.Serialization}, deserializeWorkflowError(recorded.ErrStr)
 	}
 
-	// Register as the receiver for this workflow/topic.
-	waiter, err := c.systemDB.StartRecvListener(c, workflowID, topic)
-	if err != nil {
-		return nil, err
-	}
-	defer waiter.Release()
-
-	var timeoutOccurred bool
-	if !waiter.Pending {
-		// Checkpoint the timeout deadline as a "DBOS.sleep" step before waiting. On
-		// re-execution the recorded deadline is returned, so only the remaining time is waited.
+	// Checkpoint the timeout deadline as a "DBOS.sleep" step before waiting. On
+	// re-execution the recorded deadline is returned, so only the remaining time is waited.
+	recordDeadline := func() (time.Time, error) {
 		deadlineMs, err := runAsTxn(c, func(ctx context.Context, tx Tx) (int64, error) {
 			return time.Now().Add(timeout).UnixMilli(), nil
 		}, WithStepName("DBOS.sleep"), withNextStepID(sleepStepID))
+		return time.UnixMilli(deadlineMs), err
+	}
+
+	var timeoutOccurred bool
+	if options.suspend {
+		deadline, err := recordDeadline()
 		if err != nil {
 			return nil, err
 		}
-		// Wait for a pending message with no transaction open.
-		timeoutOccurred, err = waiter.Wait(time.UnixMilli(deadlineMs))
+		if timeoutOccurred = !time.Now().Before(deadline); !timeoutOccurred {
+			parked, err := c.suspend.ParkRecv(c, SuspendRecvInput{WorkflowID: workflowID, OwnerXID: wfState.ownerXID, Topic: topic, WakeAt: deadline})
+			if err != nil {
+				return nil, err
+			}
+			if parked {
+				return nil, models.NewWorkflowSuspendedError(workflowID, &topic)
+			}
+		}
+	} else {
+		// Register as the receiver for this workflow/topic.
+		waiter, err := c.systemDB.StartRecvListener(c, workflowID, topic)
 		if err != nil {
 			return nil, err
+		}
+		defer waiter.Release()
+
+		if !waiter.Pending {
+			deadline, err := recordDeadline()
+			if err != nil {
+				return nil, err
+			}
+			// Wait for a pending message with no transaction open.
+			timeoutOccurred, err = waiter.Wait(deadline)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -3998,11 +4089,11 @@ func (c *dbosContext) Recv(_ Context, topic string, timeout time.Duration) (any,
 //	    return err
 //	}
 //	log.Printf("Received: %s", message)
-func Recv[R any](ctx Context, topic string, timeout time.Duration) (R, error) {
+func Recv[R any](ctx Context, topic string, timeout time.Duration, opts ...RecvOption) (R, error) {
 	if ctx == nil {
 		return *new(R), errors.New("ctx cannot be nil")
 	}
-	msg, err := ctx.Recv(ctx, topic, timeout)
+	msg, err := ctx.Recv(ctx, topic, timeout, opts...)
 	if err != nil {
 		return *new(R), err
 	}
@@ -4546,7 +4637,7 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 				continue
 			}
 
-			// Check if workflow is still active (PENDING or ENQUEUED)
+			// Check if workflow is still active (PENDING, ENQUEUED, DELAYED, or SUSPENDED)
 			status, err := sysdb.RetryWithResult(c, func() (WorkflowStatusType, error) {
 				workflows, err := c.systemDB.ListWorkflows(c, sysdb.ListWorkflowsDBInput{
 					WorkflowIDs: []string{workflowID},
@@ -4572,7 +4663,7 @@ func (c *dbosContext) readStream(workflowID string, key string, snapshot bool, f
 			// all of its writes are committed, so make one more read pass to drain
 			// to the end of the stream before closing, rather than returning here
 			// and dropping a value written just before completion.
-			if status != WorkflowStatusPending && status != WorkflowStatusEnqueued {
+			if status != WorkflowStatusPending && status != WorkflowStatusEnqueued && status != WorkflowStatusDelayed && status != WorkflowStatusSuspended {
 				finalRead = true
 				continue
 			}
@@ -4631,7 +4722,7 @@ func (c *dbosContext) ReadStream(_ Client, workflowID string, key string, opts .
 
 // ReadStream reads values from a durable stream.
 // This method blocks until the stream is closed or an error occurs.
-// The stream is considered closed when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED).
+// The stream is considered closed when the sentinel value is found or the workflow becomes inactive (status is not PENDING, ENQUEUED, DELAYED, or SUSPENDED).
 //
 // Returns the values, whether the stream is closed, and any error.
 //
@@ -4697,7 +4788,7 @@ func (c *dbosContext) ReadStreamAsync(_ Client, workflowID string, key string) (
 //
 // This method returns immediately with a channel. Values will be sent to the channel
 // as they're read from the stream. The channel will be closed when the stream is closed or an error occurs.
-// The stream is considered closed when the sentinel value is found or the workflow becomes inactive (status is not PENDING or ENQUEUED).
+// The stream is considered closed when the sentinel value is found or the workflow becomes inactive (status is not PENDING, ENQUEUED, DELAYED, or SUSPENDED).
 //
 // Example:
 //
@@ -4834,7 +4925,31 @@ func CloseStream(ctx Context, key string) error {
 	return ctx.CloseStream(ctx, key)
 }
 
-func (c *dbosContext) Sleep(_ Context, duration time.Duration) (time.Duration, error) {
+// SleepOption is a functional option for configuring Sleep.
+type SleepOption func(*sleepOptions)
+
+type sleepOptions struct {
+	suspend bool
+}
+
+// WithSleepSuspend makes Sleep park the workflow in the system database instead of holding
+// it in memory: Sleep returns an error matching ErrWorkflowSuspended, which the workflow
+// function must return, and the workflow is re-enqueued when the sleep ends. A sleep of
+// one second or less stays in memory. Requires Config.SuspendMode, a Transact Enterprise feature.
+func WithSleepSuspend() SleepOption {
+	return func(o *sleepOptions) {
+		o.suspend = true
+	}
+}
+
+func (c *dbosContext) Sleep(_ Context, duration time.Duration, opts ...SleepOption) (time.Duration, error) {
+	var options sleepOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	if options.suspend && c.suspend == nil {
+		return 0, suspendModeOffError("Sleep")
+	}
 	wfState, ok := c.Value(workflowStateKey).(*workflowState)
 	if !ok || wfState == nil {
 		return 0, models.NewStepExecutionError("", "DBOS.sleep", fmt.Errorf("workflow state not found in context: are you running this step within a workflow?"))
@@ -4852,6 +4967,13 @@ func (c *dbosContext) Sleep(_ Context, duration time.Duration) (time.Duration, e
 		return 0, err
 	}
 	remainingDuration := max(0, time.Until(time.UnixMilli(deadlineMs)))
+
+	if options.suspend && remainingDuration > minSuspendDuration {
+		if err := c.suspend.ParkSleep(c, SuspendSleepInput{WorkflowID: wfState.workflowID, OwnerXID: wfState.ownerXID, WakeAt: time.UnixMilli(deadlineMs)}); err != nil {
+			return 0, err
+		}
+		return 0, models.NewWorkflowSuspendedError(wfState.workflowID, nil)
+	}
 
 	// Sleep for the remaining duration, but wake early if the context is cancelled.
 	// If interrupted, return the duration actually slept.
@@ -4877,11 +4999,11 @@ func (c *dbosContext) Sleep(_ Context, duration time.Duration) (time.Duration, e
 //	if err != nil {
 //	    return err
 //	}
-func Sleep(ctx Context, duration time.Duration) (time.Duration, error) {
+func Sleep(ctx Context, duration time.Duration, opts ...SleepOption) (time.Duration, error) {
 	if ctx == nil {
 		return 0, errors.New("ctx cannot be nil")
 	}
-	return ctx.Sleep(ctx, duration)
+	return ctx.Sleep(ctx, duration, opts...)
 }
 
 const _DBOS_PATCH_PREFIX = "DBOS.patch-"
@@ -5454,7 +5576,7 @@ func WithDeleteChildren() DeleteWorkflowOption {
 }
 
 // DeleteWorkflows permanently deletes one or more workflows and all their associated data
-// from the database, regardless of their current status. This includes active (PENDING, ENQUEUED) workflows.
+// from the database, regardless of their current status. This includes active (PENDING, ENQUEUED, DELAYED, SUSPENDED) workflows.
 //
 // This operation is irreversible and removes the workflow status, operation outputs,
 // events, event history, and streams associated with each workflow.
@@ -5726,7 +5848,7 @@ func (c *dbosContext) rewindDataSources(ctx context.Context, tx Tx, dataSources 
 		return models.NewNonExistentWorkflowError(workflowID)
 	}
 	switch statuses[0].Status {
-	case models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed:
+	case models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, models.WorkflowStatusSuspended:
 		return fmt.Errorf(
 			"cannot rewind workflow %s while it is %s: only a workflow in a terminal state can be rewound, so cancel it first",
 			workflowID, statuses[0].Status)
@@ -6273,9 +6395,9 @@ func (c *dbosContext) ListWorkflows(_ Client, opts ...ListWorkflowsOption) ([]Wo
 		opt(params)
 	}
 
-	// If we are asked to retrieve only queue workflows with no status, only fetch ENQUEUED, PENDING, and DELAYED tasks
+	// If we are asked to retrieve only queue workflows with no status, only fetch ENQUEUED, PENDING, DELAYED, and SUSPENDED tasks
 	if params.QueuesOnly && len(params.Status) == 0 {
-		params.Status = []WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending, WorkflowStatusDelayed}
+		params.Status = []WorkflowStatusType{WorkflowStatusEnqueued, WorkflowStatusPending, WorkflowStatusDelayed, WorkflowStatusSuspended}
 	}
 
 	// Convert to system database input structure

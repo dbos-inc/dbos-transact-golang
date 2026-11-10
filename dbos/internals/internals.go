@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
+	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/models"
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
 )
 
@@ -61,9 +62,18 @@ type (
 // application versions, and the migration version row.
 const GlobalShardKey = sysdb.GlobalShardKey
 
+// InternalQueueName is the queue DBOS runs its own work on: recovery, schedules, and
+// the workflows suspend mode re-enqueues when they ran on no queue.
+const InternalQueueName = models.InternalQueueName
+
 // KeyedID prefixes id with key as every DBOS SDK does: "<len(key)>:<key>:<id>", the
 // length counted in code points. An empty key leaves id unchanged.
 func KeyedID(key, id string) string { return sysdb.KeyedID(key, id) }
+
+// KeyClause is the predicate confining a statement to the rows under key: " AND
+// shard_key = $n", binding key as the next argument of args, or "" for no key. It
+// follows a predicate on the workflow ID, so a router sends the statement to one shard.
+func KeyClause(key string, args *[]any) string { return sysdb.KeyClause(key, args) }
 
 // Retry are not part of the SystemDatabase interface today
 type RetryOption = sysdb.RetryOption

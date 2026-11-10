@@ -37,6 +37,7 @@ const (
 	ErrorCodeWorkflowPanic
 	ErrorCodeStepNondeterminism
 	ErrorCodeWorkflowIDInUse
+	ErrorCodeWorkflowSuspended
 
 	// _errorCodeSentinel must remain the last value: it bounds parseErrorCode.
 	_errorCodeSentinel
@@ -91,6 +92,8 @@ func (c ErrorCode) String() string {
 		return "StepNondeterminism"
 	case ErrorCodeWorkflowIDInUse:
 		return "WorkflowIDInUse"
+	case ErrorCodeWorkflowSuspended:
+		return "WorkflowSuspended"
 	default:
 		return fmt.Sprintf("ErrorCode(%d)", int(c))
 	}
@@ -385,6 +388,19 @@ func NewWorkflowIDInUseError(workflowID string, status WorkflowStatusType, workf
 		Code:         ErrorCodeWorkflowIDInUse,
 		WorkflowID:   workflowID,
 		RecordedName: workflowName,
+	}
+}
+
+// NewWorkflowSuspendedError takes the topic the workflow waits on, or nil when it sleeps.
+func NewWorkflowSuspendedError(workflowID string, topic *string) *Error {
+	waiting := "sleeping"
+	if topic != nil {
+		waiting = "waiting on topic " + *topic
+	}
+	return &Error{
+		Message:    fmt.Sprintf("Workflow %s suspended %s", workflowID, waiting),
+		Code:       ErrorCodeWorkflowSuspended,
+		WorkflowID: workflowID,
 	}
 }
 

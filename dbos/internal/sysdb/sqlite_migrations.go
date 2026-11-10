@@ -217,9 +217,21 @@ var sqliteMigration124SQL string
 //go:embed migrations/sqlite/125_create_application_versions_owner_timestamp_index.sql
 var sqliteMigration125SQL string
 
+//go:embed migrations/sqlite/126_add_workflow_status_suspend_key.sql
+var sqliteMigration126SQL string
+
+//go:embed migrations/sqlite/127_create_workflow_status_suspended_index.sql
+var sqliteMigration127SQL string
+
+//go:embed migrations/sqlite/128_create_workflow_status_deadline_index_v2.sql
+var sqliteMigration128SQL string
+
+//go:embed migrations/sqlite/129_drop_workflow_status_deadline_index.sql
+var sqliteMigration129SQL string
+
 // BuildSqliteMigrations returns the SQLite migration list. Versions mirror pg
 // numbering (matching Python's sqlite_migrations); pg migrations 10, 14, 20,
-// 38, 39, 43, 44, 105, and 113 have no SQLite counterpart and are omitted.
+// 38, 39, 43, 44, 105, 113, and 130 have no SQLite counterpart and are omitted.
 func BuildSqliteMigrations() []MigrationFile {
 	return []MigrationFile{
 		{Version: 1, SQL: sqliteMigration1SQL},
@@ -288,6 +300,10 @@ func BuildSqliteMigrations() []MigrationFile {
 		{Version: 123, SQL: sqliteMigration123SQL},
 		{Version: 124, SQL: sqliteMigration124SQL},
 		{Version: 125, SQL: sqliteMigration125SQL},
+		{Version: 126, SQL: sqliteMigration126SQL},
+		{Version: 127, SQL: sqliteMigration127SQL},
+		{Version: 128, SQL: sqliteMigration128SQL},
+		{Version: 129, SQL: sqliteMigration129SQL},
 	}
 }
 
