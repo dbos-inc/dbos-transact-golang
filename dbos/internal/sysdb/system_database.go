@@ -4744,6 +4744,22 @@ func (s *SysDB) checkpointName(ctx context.Context, q Querier, input PatchDBInpu
 	return functionName, q.QueryRow(ctx, query, args...).Scan(&functionName)
 }
 
+func (s *SysDB) checkpointAtOrAfter(ctx context.Context, q Querier, input PatchDBInput) (int, string, error) {
+	var functionID int
+	var functionName string
+	query := s.RenderSQL(`SELECT function_id, function_name FROM %soperation_outputs
+		WHERE workflow_uuid = $1 AND function_id >= $2
+		ORDER BY function_id LIMIT 1`, s.dialect.SchemaPrefix(s.schema))
+	err := q.QueryRow(ctx, query, input.WorkflowID, input.StepID).Scan(&functionID, &functionName)
+	return functionID, functionName, err
+}
+
+// Patch decides whether the execution takes the patched path at input.StepID.
+// If the history ends before this point, it inserts the patch marker and returns true.
+// If the history goes at or beyond this point, it checks whether the step recorded
+// at input.StepID matches the patch name: if that's the case, we are dealing with a new, patched
+// execution being replayed and say so. Otherwise, we return "false", so the higher level API
+// knows we are dealing with an older version of the code, and skips the patch step.
 func (s *SysDB) Patch(ctx context.Context, input PatchDBInput) (bool, error) {
 	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
@@ -4751,11 +4767,11 @@ func (s *SysDB) Patch(ctx context.Context, input PatchDBInput) (bool, error) {
 	}
 	defer tx.Rollback(ctx)
 
-	functionName, err := s.checkpointName(ctx, tx, input)
+	functionID, functionName, err := s.checkpointAtOrAfter(ctx, tx, input)
 	if err != nil {
 		// No result means this is a new workflow, or an existing workflow that has not reached this step yet
 		// Insert the patch marker and return true
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			if err := s.checkOwner(ctx, tx, input.WorkflowID, input.OwnerXID); err != nil {
 				return false, err
 			}
@@ -4773,9 +4789,9 @@ func (s *SysDB) Patch(ctx context.Context, input PatchDBInput) (bool, error) {
 		return false, fmt.Errorf("failed to check for patch: %w", err)
 	}
 
-	// If functionName != patchName, this is a workflow that existed before the patch was applied
-	// Else this a new (patched) workflow that is being re-executed (e.g., recovery, or forked at a later step)
-	return functionName == input.PatchName, nil
+	// A step that matches the patch name is a replay of a new, patched execution.
+	// Otherwise this is an old execution.
+	return functionID == input.StepID && functionName == input.PatchName, nil
 }
 
 /****************************************/

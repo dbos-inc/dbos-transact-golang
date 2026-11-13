@@ -848,6 +848,57 @@ func sleepStepIDDriftWorkflow(ctx Context, _ string) (string, error) {
 	return "ok", nil
 }
 
+// cancelFaultPool wraps a Pool and, once armed for a workflow, makes the next
+// UPDATE that durably cancels that workflow fail with a retryable ("conn closed")
+// error. Postgres runs the cancel as a single data-modifying CTE through Query;
+// SQLite runs an UPDATE through a transaction's Exec. Both are intercepted. The
+// match is on the target's ID so the periodic timeout monitor, which also sets
+// CANCELLED, cannot consume the fault. Disarmed (the default) it is a transparent
+// pass-through.
+type cancelFaultPool struct {
+	Pool
+	target atomic.Value // string: workflow ID whose cancel should fault; "" disarms
+	fired  atomic.Bool
+}
+
+func (p *cancelFaultPool) arm(workflowID string) {
+	p.fired.Store(false)
+	p.target.Store(workflowID)
+}
+
+func (p *cancelFaultPool) isCancelUpdate(query string, args []any) bool {
+	target, _ := p.target.Load().(string)
+	return target != "" && strings.Contains(query, "workflow_status") && strings.Contains(query, "UPDATE") &&
+		len(args) > 1 && args[0] == any(WorkflowStatusCancelled) && strings.Contains(fmt.Sprint(args[1]), target)
+}
+
+func (p *cancelFaultPool) Query(ctx context.Context, query string, args ...any) (Rows, error) {
+	if p.isCancelUpdate(query, args) && p.fired.CompareAndSwap(false, true) {
+		return nil, errors.New("conn closed") // retryable per postgresDialect.IsRetryable
+	}
+	return p.Pool.Query(ctx, query, args...)
+}
+
+func (p *cancelFaultPool) BeginTx(ctx context.Context, opts TxOptions) (Tx, error) {
+	tx, err := p.Pool.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &cancelFaultTx{Tx: tx, p: p}, nil
+}
+
+type cancelFaultTx struct {
+	Tx
+	p *cancelFaultPool
+}
+
+func (t *cancelFaultTx) Exec(ctx context.Context, query string, args ...any) (Result, error) {
+	if t.p.isCancelUpdate(query, args) && t.p.fired.CompareAndSwap(false, true) {
+		return nil, errors.New("conn closed")
+	}
+	return t.Tx.Exec(ctx, query, args...)
+}
+
 // Transaction-level conflicts inside a transactional step. The step function fails
 // with a conflict that only a fresh transaction can clear; the step must run again in a
 // new transaction and record the eventual success, never the conflict.
@@ -5980,6 +6031,160 @@ func TestRecvStepConflict(t *testing.T) {
 	require.Equal(t, 1, consumed, "the message must be consumed exactly once")
 }
 
+// A stale execution must not act on the owner's recv checkpoint. While the original
+// execution waits in Recv, ownership moves to another execution, which consumes the
+// message and checkpoints the recv step. The original then wakes, finds the checkpoint,
+// and must get a conflict rather than the owner's message, which would let it run on
+// past the recv concurrently with the owner until its next checkpoint is refused.
+func TestRecvStaleExecutionRefusesOwnerCheckpoint(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+
+	recvErrs := make(chan error, 1)
+	recvStaleWorkflow := func(ctx Context, topic string) (string, error) {
+		msg, err := Recv[string](ctx, topic, 60*time.Second)
+		recvErrs <- err
+		return msg, err
+	}
+	RegisterWorkflow(dbosCtx, recvStaleWorkflow)
+	require.NoError(t, Launch(dbosCtx))
+
+	topic := "recv-stale-checkpoint-topic"
+	workflowID := uuid.NewString()
+	payload := fmt.Sprintf("%s::%s", workflowID, topic)
+	ctx := context.Background()
+
+	handle, err := RunWorkflow(dbosCtx, recvStaleWorkflow, topic, WithWorkflowID(workflowID))
+	require.NoError(t, err, "failed to start recv workflow")
+	require.Eventually(t, func() bool {
+		return sysDB.RecvNotifier.WaiterCount(payload) == 1
+	}, 5*time.Second, 10*time.Millisecond, "the execution never registered as receiver")
+
+	// Hand the workflow over: the waiting execution is stale from here on. The new owner
+	// consumes a message and checkpoints the recv (step 0; the timeout sleep is step 1).
+	live := setWorkflowOwner(t, sysDB, workflowID)
+	ownerMessage := `"owner-message"`
+	require.NoError(t, sysDB.RecordOperationResult(ctx, sysdb.RecordOperationResultDBInput{
+		WorkflowID: workflowID, StepID: 0, StepName: "DBOS.recv", Output: &ownerMessage, Serialization: "DBOS_JSON",
+		StartedAt: time.Now(), CompletedAt: time.Now(), OwnerXID: live,
+	}))
+
+	// Wake the stale waiter: it finds the owner's checkpoint where it would have consumed.
+	require.NoError(t, Send(dbosCtx, workflowID, "late", topic), "failed to send message")
+	select {
+	case err := <-recvErrs:
+		require.ErrorIs(t, err, ErrConflictingWorkflowID, "the stale execution must not be handed the owner's message")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stale execution never returned from Recv")
+	}
+
+	// The stale execution parks without touching the message or the row.
+	require.Eventually(t, func() bool {
+		return len(dbosCtx.(*dbosContext).activeExecutionsOf(workflowID)) == 0
+	}, 10*time.Second, 10*time.Millisecond, "the stale execution never parked")
+	query := sysDB.Dialect().RewriteQuery(fmt.Sprintf(`SELECT COUNT(*) FROM %snotifications WHERE destination_uuid = $1 AND consumed = true`,
+		sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
+	var consumed int
+	require.NoError(t, sysDB.Pool().QueryRow(ctx, query, workflowID).Scan(&consumed))
+	require.Equal(t, 0, consumed, "the stale execution must not consume the message")
+	status, err := handle.GetStatus()
+	require.NoError(t, err)
+	require.Equal(t, WorkflowStatusPending, status.Status, "the stale execution's failure must not become the outcome")
+	owner, err := sysDB.GetWorkflowOwner(ctx, workflowID)
+	require.NoError(t, err)
+	require.NotNil(t, owner)
+	require.Equal(t, live, *owner)
+
+	// The owner completes the workflow; the stale execution's handle adopts that outcome.
+	ownerResult, err := resolveEncoder(dbosCtx).Encode("owner-done")
+	require.NoError(t, err)
+	ok, err := sysDB.UpdateWorkflowOutcome(ctx, sysdb.UpdateWorkflowOutcomeDBInput{WorkflowID: workflowID, Status: WorkflowStatusSuccess, Output: ownerResult, OwnerXID: live})
+	require.NoError(t, err)
+	require.True(t, ok)
+	result, err := handle.GetResult()
+	require.NoError(t, err, "the stale execution must adopt the owner's outcome")
+	require.Equal(t, "owner-done", result)
+}
+
+// Same as TestRecvStaleExecutionRefusesOwnerCheckpoint, for GetEvent: a stale execution
+// waiting for an event wakes to find the owner's getEvent checkpoint and must get a
+// conflict rather than replay it.
+func TestGetEventStaleExecutionRefusesOwnerCheckpoint(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+
+	key := "stale-checkpoint-key"
+	release := make(chan struct{})
+	setterWorkflow := func(ctx Context, _ string) (string, error) {
+		<-release
+		return "set", SetEvent(ctx, key, "owner-event")
+	}
+	getEventErrs := make(chan error, 1)
+	getterWorkflow := func(ctx Context, target string) (string, error) {
+		value, err := GetEvent[string](ctx, target, key, 60*time.Second)
+		getEventErrs <- err
+		return value, err
+	}
+	RegisterWorkflow(dbosCtx, setterWorkflow)
+	RegisterWorkflow(dbosCtx, getterWorkflow)
+	require.NoError(t, Launch(dbosCtx))
+	ctx := context.Background()
+
+	setter, err := RunWorkflow(dbosCtx, setterWorkflow, "")
+	require.NoError(t, err, "failed to start setter workflow")
+	targetID := setter.GetWorkflowID()
+	payload := fmt.Sprintf("%s::%s", targetID, key)
+
+	workflowID := uuid.NewString()
+	handle, err := RunWorkflow(dbosCtx, getterWorkflow, targetID, WithWorkflowID(workflowID))
+	require.NoError(t, err, "failed to start getter workflow")
+	require.Eventually(t, func() bool {
+		return sysDB.EventNotifier.WaiterCount(payload) == 1
+	}, 5*time.Second, 10*time.Millisecond, "the execution never registered as event waiter")
+
+	// Hand the getter over: the waiting execution is stale from here on. The new owner
+	// reads the event and checkpoints the getEvent (step 0; the timeout sleep is step 1).
+	live := setWorkflowOwner(t, sysDB, workflowID)
+	ownerValue := `"owner-event"`
+	require.NoError(t, sysDB.RecordOperationResult(ctx, sysdb.RecordOperationResultDBInput{
+		WorkflowID: workflowID, StepID: 0, StepName: "DBOS.getEvent", Output: &ownerValue, Serialization: "DBOS_JSON",
+		StartedAt: time.Now(), CompletedAt: time.Now(), OwnerXID: live,
+	}))
+
+	// Set the event, waking the stale waiter: it finds the owner's checkpoint where it would have read.
+	close(release)
+	_, err = setter.GetResult()
+	require.NoError(t, err)
+	select {
+	case err := <-getEventErrs:
+		require.ErrorIs(t, err, ErrConflictingWorkflowID, "the stale execution must not be handed the owner's event value")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stale execution never returned from GetEvent")
+	}
+
+	// The stale execution parks without touching the row.
+	require.Eventually(t, func() bool {
+		return len(dbosCtx.(*dbosContext).activeExecutionsOf(workflowID)) == 0
+	}, 10*time.Second, 10*time.Millisecond, "the stale execution never parked")
+	status, err := handle.GetStatus()
+	require.NoError(t, err)
+	require.Equal(t, WorkflowStatusPending, status.Status, "the stale execution's failure must not become the outcome")
+	owner, err := sysDB.GetWorkflowOwner(ctx, workflowID)
+	require.NoError(t, err)
+	require.NotNil(t, owner)
+	require.Equal(t, live, *owner)
+
+	// The owner completes the workflow; the stale execution's handle adopts that outcome.
+	ownerResult, err := resolveEncoder(dbosCtx).Encode("owner-done")
+	require.NoError(t, err)
+	ok, err := sysDB.UpdateWorkflowOutcome(ctx, sysdb.UpdateWorkflowOutcomeDBInput{WorkflowID: workflowID, Status: WorkflowStatusSuccess, Output: ownerResult, OwnerXID: live})
+	require.NoError(t, err)
+	require.True(t, ok)
+	result, err := handle.GetResult()
+	require.NoError(t, err, "the stale execution must adopt the owner's outcome")
+	require.Equal(t, "owner-done", result)
+}
+
 // receiveTwiceShortWorkflow receives one message (blocking up to 30s), then attempts a
 // second Recv with a short timeout. The second slot is "<timeout>" when no further message
 // arrives, letting a test observe whether a duplicate Send was deduplicated.
@@ -8253,7 +8458,55 @@ func TestWorkflowCancel(t *testing.T) {
 	}
 	RegisterWorkflow(dbosCtx, blockingWorkflowNoError)
 
+	// Workflow that blocks until its context is cancelled.
+	blockUntilCancelled := func(ctx Context, _ string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	RegisterWorkflow(dbosCtx, blockUntilCancelled)
+
+	// Installed before Launch so no goroutine reads sysDB.Pool() concurrently with
+	// the swap; armed by TransientErrorDuringDurableCancel only.
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	cancelPool := &cancelFaultPool{Pool: sysDB.Pool()}
+	sysDB.SetPool(cancelPool)
+
 	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS")
+
+	t.Run("TransientErrorDuringDurableCancel", func(t *testing.T) {
+		// The workflow is cancelled through its context while the durable cancel's
+		// first attempt fails with a transient DB error. The cancel runs because that
+		// context is already cancelled, so its retry must not wait on it: a retry
+		// that gives up leaves the row PENDING, the cancelled run parks on it
+		// forever, and GetResult never returns.
+		wfID := uuid.NewString()
+		cancelPool.arm(wfID)
+		defer cancelPool.arm("")
+
+		cancelCtx, cancelFunc := WithCancel(dbosCtx)
+		defer cancelFunc()
+		handle, err := RunWorkflow(cancelCtx, blockUntilCancelled, "", WithWorkflowID(wfID))
+		require.NoError(t, err, "failed to start workflow")
+		cancelFunc()
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := handle.GetResult()
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			require.Error(t, err, "expected error from cancelled workflow")
+			require.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got: %v", err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("GetResult did not return: the durable cancel was dropped and the run parked on a PENDING row")
+		}
+		require.True(t, cancelPool.fired.Load(), "fault injection never triggered; the test did not exercise the cancel retry")
+
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		assert.Equal(t, WorkflowStatusCancelled, status.Status, "the cancel must be retried until it is durable")
+	})
 
 	t.Run("TestWorkflowCancelWithRecvError", func(t *testing.T) {
 		topic := "cancel-test-topic"
@@ -9395,6 +9648,243 @@ func TestPatching(t *testing.T) {
 		require.NotContains(t, err.Error(), fmt.Sprintf("DBOS Error %s", ErrorCodeUnexpectedStep), "step IDs drifted into the patch marker's slot")
 	})
 
+	t.Run("PatchBeforeWaitingRecv", func(t *testing.T) {
+		// Recv records its timeout sleep, at the step ID after its own, while it
+		// waits. A patch added before that Recv finds the Recv's step ID empty on
+		// recovery; it must read the sleep past it as "already passed", not insert
+		// a marker that shifts the Recv onto the sleep's step ID.
+		databaseURL := backendDatabaseURL(t)
+		resetTestDatabase(t, databaseURL)
+		dbosCtx, err := NewContext(context.Background(), Config{
+			DatabaseURL:        databaseURL,
+			AppName:            "test-app-patch-before-recv",
+			ApplicationVersion: "test-version",
+		})
+		require.NoError(t, err, "failed to create DBOS context")
+		t.Cleanup(func() {
+			Shutdown(dbosCtx, 30*time.Second)
+		})
+
+		stepOne := func(ctx context.Context) (int, error) {
+			return 1, nil
+		}
+		wf := func(ctx Context, _ string) (string, error) {
+			if _, err := RunAsStep(ctx, stepOne, WithStepName("stepOne")); err != nil {
+				return "", err
+			}
+			return Recv[string](ctx, "approval", time.Minute)
+		}
+		RegisterWorkflow(dbosCtx, wf, WithWorkflowName("wf"))
+		require.NoError(t, Launch(dbosCtx))
+
+		// v1: stepOne at 0, Recv at 1, its timeout sleep at 2.
+		v1ID := uuid.NewString()
+		handle, err := RunWorkflow(dbosCtx, wf, "", WithWorkflowID(v1ID))
+		require.NoError(t, err, "failed to start workflow")
+		waitForStepName(t, dbosCtx, v1ID, "DBOS.sleep")
+		require.NoError(t, Send(dbosCtx, v1ID, "first", "approval"))
+		result, err := handle.GetResult()
+		require.NoError(t, err, "failed to get result")
+		require.Equal(t, "first", result)
+		require.Equal(t, []string{"stepOne", "DBOS.recv", "DBOS.sleep"}, workflowStepNames(t, dbosCtx, v1ID))
+
+		// The process died while the Recv waited: steps 0 and 2 recorded, 1 not.
+		deleteStepCheckpoint(t, dbosCtx, v1ID, 1)
+		setWorkflowStatusPending(t, dbosCtx, v1ID)
+
+		// v2 adds a patch between the step and the Recv.
+		var mu sync.Mutex
+		var patchedRuns []string
+		wfPatched := func(ctx Context, _ string) (string, error) {
+			if _, err := RunAsStep(ctx, stepOne, WithStepName("stepOne")); err != nil {
+				return "", err
+			}
+			patched, err := Patch(ctx, "before-wait")
+			if err != nil {
+				return "", err
+			}
+			if patched {
+				wfID, err := GetWorkflowID(ctx)
+				if err != nil {
+					return "", err
+				}
+				mu.Lock()
+				patchedRuns = append(patchedRuns, wfID)
+				mu.Unlock()
+			}
+			return Recv[string](ctx, "approval", time.Minute)
+		}
+		dbosCtx.(*dbosContext).launched.Store(false)
+		clearRegistries(dbosCtx)
+		RegisterWorkflow(dbosCtx, wfPatched, WithWorkflowName("wf"))
+		dbosCtx.(*dbosContext).launched.Store(true)
+
+		// Recovery resumes the v1 execution, which stays on the old path.
+		recovered, err := recoverPendingWorkflows(dbosCtx.(*dbosContext), []string{"local"})
+		require.NoError(t, err, "failed to recover pending workflows")
+		require.Len(t, recovered, 1)
+		require.Equal(t, v1ID, recovered[0].GetWorkflowID())
+		require.NoError(t, Send(dbosCtx, v1ID, "second", "approval"))
+		recoveredHandle, err := RetrieveWorkflow[string](dbosCtx, v1ID)
+		require.NoError(t, err, "failed to retrieve workflow")
+		result, err = recoveredHandle.GetResult()
+		require.NoError(t, err, "the recovered execution must not hit a non-determinism error")
+		require.Equal(t, "second", result)
+		mu.Lock()
+		require.Empty(t, patchedRuns, "the recovered execution must not take the patch")
+		mu.Unlock()
+		require.Equal(t, []string{"stepOne", "DBOS.recv", "DBOS.sleep"}, workflowStepNames(t, dbosCtx, v1ID))
+
+		// A new execution takes the patch and records its marker before the Recv.
+		v2ID := uuid.NewString()
+		handle, err = RunWorkflow(dbosCtx, wfPatched, "", WithWorkflowID(v2ID))
+		require.NoError(t, err, "failed to start workflow")
+		waitForStepName(t, dbosCtx, v2ID, "DBOS.sleep")
+		require.NoError(t, Send(dbosCtx, v2ID, "third", "approval"))
+		result, err = handle.GetResult()
+		require.NoError(t, err, "failed to get result")
+		require.Equal(t, "third", result)
+		mu.Lock()
+		require.Equal(t, []string{v2ID}, patchedRuns)
+		mu.Unlock()
+		require.Equal(t, []string{"stepOne", "DBOS.patch-before-wait", "DBOS.recv", "DBOS.sleep"}, workflowStepNames(t, dbosCtx, v2ID))
+	})
+
+	t.Run("PatchBeforeConcurrentSteps", func(t *testing.T) {
+		// Steps started with Go take their step IDs up front and checkpoint in any
+		// order, so an execution can stop with a later step ID recorded and an
+		// earlier one empty. A patch added before them must read the later
+		// checkpoint as proof the execution passed that point on the old code.
+		databaseURL := backendDatabaseURL(t)
+		resetTestDatabase(t, databaseURL)
+		dbosCtx, err := NewContext(context.Background(), Config{
+			DatabaseURL:        databaseURL,
+			AppName:            "test-app-patch-before-go",
+			ApplicationVersion: "test-version",
+		})
+		require.NoError(t, err, "failed to create DBOS context")
+		t.Cleanup(func() {
+			Shutdown(dbosCtx, 30*time.Second)
+		})
+
+		stepOneStarted := NewEvent()
+		stepOneRelease := make(chan struct{})
+		stepOne := func(ctx context.Context) (int, error) {
+			stepOneStarted.Set()
+			select {
+			case <-stepOneRelease:
+				return 1, nil
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}
+		stepTwo := func(ctx context.Context) (int, error) {
+			return 2, nil
+		}
+		runConcurrently := func(ctx Context) (int, error) {
+			ch1, err := Go(ctx, stepOne, WithStepName("stepOne"))
+			if err != nil {
+				return 0, err
+			}
+			ch2, err := Go(ctx, stepTwo, WithStepName("stepTwo"))
+			if err != nil {
+				return 0, err
+			}
+			o1, o2 := <-ch1, <-ch2
+			if err := errors.Join(o1.Err, o2.Err); err != nil {
+				return 0, err
+			}
+			return o1.Result + o2.Result, nil
+		}
+		wf := func(ctx Context, _ string) (int, error) {
+			return runConcurrently(ctx)
+		}
+		RegisterWorkflow(dbosCtx, wf, WithWorkflowName("wf"))
+		require.NoError(t, Launch(dbosCtx))
+
+		// v1: stepOne takes step ID 0 and stepTwo 1. stepTwo checkpoints while
+		// stepOne is still running, then the workflow is cancelled, which
+		// interrupts stepOne: step ID 0 stays empty. CancelWorkflow only marks
+		// the row and does not interrupt a running step, so cancel the context
+		// the workflow runs under, which also cancels it durably.
+		cancelCtx, cancelFunc := WithCancel(dbosCtx)
+		defer cancelFunc()
+		v1ID := uuid.NewString()
+		handle, err := RunWorkflow(cancelCtx, wf, "", WithWorkflowID(v1ID))
+		require.NoError(t, err, "failed to start workflow")
+		stepOneStarted.Wait()
+		waitForStepName(t, dbosCtx, v1ID, "stepTwo")
+		cancelFunc()
+		_, err = handle.GetResult()
+		require.Error(t, err, "expected error from cancelled workflow")
+		require.ErrorIs(t, err, context.Canceled)
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			require.NoError(t, err, "failed to get workflow status")
+			return status.Status == WorkflowStatusCancelled
+		}, 5*time.Second, 50*time.Millisecond, "workflow did not reach cancelled status in time")
+		steps, err := GetWorkflowSteps(dbosCtx, v1ID)
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 1, "only stepTwo must be recorded")
+		require.Equal(t, 1, steps[0].StepID)
+		require.Equal(t, "stepTwo", steps[0].StepName)
+
+		// v2 adds a patch before the concurrent steps.
+		var mu sync.Mutex
+		var patchedRuns []string
+		wfPatched := func(ctx Context, _ string) (int, error) {
+			patched, err := Patch(ctx, "before-steps")
+			if err != nil {
+				return 0, err
+			}
+			if patched {
+				wfID, err := GetWorkflowID(ctx)
+				if err != nil {
+					return 0, err
+				}
+				mu.Lock()
+				patchedRuns = append(patchedRuns, wfID)
+				mu.Unlock()
+			}
+			return runConcurrently(ctx)
+		}
+		dbosCtx.(*dbosContext).launched.Store(false)
+		clearRegistries(dbosCtx)
+		RegisterWorkflow(dbosCtx, wfPatched, WithWorkflowName("wf"))
+		dbosCtx.(*dbosContext).launched.Store(true)
+
+		// Resumed on v2, the v1 execution stays on the old path: stepOne runs
+		// again at 0 and stepTwo replays at 1.
+		close(stepOneRelease)
+		resumed, err := ResumeWorkflow[int](dbosCtx, v1ID)
+		require.NoError(t, err, "failed to resume workflow")
+		result, err := resumed.GetResult()
+		require.NoError(t, err, "the resumed execution must not hit a non-determinism error")
+		require.Equal(t, 3, result)
+		mu.Lock()
+		require.Empty(t, patchedRuns, "the resumed execution must not take the patch")
+		mu.Unlock()
+		steps, err = GetWorkflowSteps(dbosCtx, v1ID)
+		require.NoError(t, err, "failed to get workflow steps")
+		require.Len(t, steps, 2)
+		require.Equal(t, 0, steps[0].StepID)
+		require.Equal(t, "stepOne", steps[0].StepName)
+		require.Equal(t, 1, steps[1].StepID)
+		require.Equal(t, "stepTwo", steps[1].StepName)
+
+		// A new execution takes the patch and records its marker first.
+		v2ID := uuid.NewString()
+		handle, err = RunWorkflow(dbosCtx, wfPatched, "", WithWorkflowID(v2ID))
+		require.NoError(t, err, "failed to start workflow")
+		result, err = handle.GetResult()
+		require.NoError(t, err, "failed to get result")
+		require.Equal(t, 3, result)
+		mu.Lock()
+		require.Equal(t, []string{v2ID}, patchedRuns)
+		mu.Unlock()
+		require.Equal(t, []string{"DBOS.patch-before-steps", "stepOne", "stepTwo"}, workflowStepNames(t, dbosCtx, v2ID))
+	})
+
 	t.Run("PatchingNeedsNoFlag", func(t *testing.T) {
 		// Patch and DeprecatePatch work without EnablePatching: a fixed ApplicationVersion
 		// is enough for every deployment to recover and dequeue each other's workflows.
@@ -9494,6 +9984,38 @@ func TestPatching(t *testing.T) {
 			})
 		})
 	})
+}
+
+// workflowStepNames returns the names of a workflow's recorded steps, in step ID order.
+func workflowStepNames(t *testing.T, dbosCtx Context, workflowID string) []string {
+	t.Helper()
+	steps, err := GetWorkflowSteps(dbosCtx, workflowID)
+	require.NoError(t, err, "failed to get workflow steps")
+	names := make([]string, len(steps))
+	for i, s := range steps {
+		names[i] = s.StepName
+	}
+	return names
+}
+
+// waitForStepName waits until the workflow has a step with this name recorded.
+func waitForStepName(t *testing.T, dbosCtx Context, workflowID, stepName string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return slices.Contains(workflowStepNames(t, dbosCtx, workflowID), stepName)
+	}, 10*time.Second, 20*time.Millisecond, "no %s step recorded for %s", stepName, workflowID)
+}
+
+// deleteStepCheckpoint removes one step's checkpoint, as if the process had died
+// before recording it.
+func deleteStepCheckpoint(t *testing.T, dbosCtx Context, workflowID string, stepID int) {
+	t.Helper()
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	query := sysDB.Dialect().RewriteQuery(fmt.Sprintf(
+		`DELETE FROM %soperation_outputs WHERE workflow_uuid = $1 AND function_id = $2`,
+		sysDB.Dialect().SchemaPrefix(sysDB.Schema())))
+	_, err := sysDB.Pool().Exec(context.Background(), query, workflowID, stepID)
+	require.NoError(t, err, "failed to delete step checkpoint")
 }
 
 func TestEnablePatchingIsDeprecated(t *testing.T) {
