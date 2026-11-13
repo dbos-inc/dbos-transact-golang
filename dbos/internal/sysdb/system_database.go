@@ -5969,7 +5969,7 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 	if len(input.ScheduleNamePrefixes) > 0 {
 		patterns := make([]string, len(input.ScheduleNamePrefixes))
 		for i, p := range input.ScheduleNamePrefixes {
-			patterns[i] = p + "%"
+			patterns[i] = escapeLikePattern(p) + "%"
 		}
 		encoded, err := encodeArrayParam(s.dialect, patterns)
 		if err != nil {
@@ -6882,8 +6882,8 @@ func (qb *queryBuilder) addWhereLikeAny(column string, prefixes []string, suffix
 	ors := make([]string, len(prefixes))
 	for i, p := range prefixes {
 		qb.argCounter++
-		ors[i] = fmt.Sprintf("%s LIKE $%d", column, qb.argCounter)
-		qb.args = append(qb.args, p+suffix)
+		ors[i] = fmt.Sprintf("%s LIKE $%d ESCAPE '\\'", column, qb.argCounter)
+		qb.args = append(qb.args, escapeLikePattern(p)+suffix)
 	}
 	qb.whereClauses = append(qb.whereClauses, "("+strings.Join(ors, " OR ")+")")
 }
