@@ -3884,7 +3884,7 @@ func (c *dbosContext) sendMessages(messages []SendMessage, stepName string, opti
 		uncancellableCtx := WithoutCancel(c)
 		err = sysdb.Retry(c, func() error {
 			return c.systemDB.Send(uncancellableCtx, input)
-		}, sysdb.WithRetrierLogger(c.logger))
+		}, sysdb.WithRetrierLogger(c.logger), sysdb.WithRetryCondition(c.systemDB.Dialect().IsRetryableTransaction))
 	}
 	return err
 }
