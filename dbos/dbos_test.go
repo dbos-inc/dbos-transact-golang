@@ -156,7 +156,7 @@ func TestConfig(t *testing.T) {
 			assert.Equal(t, "config-executor-123", ctx.GetExecutorID())
 		})
 
-		t.Run("EnvVarsOverrideConfigValues", func(t *testing.T) {
+		t.Run("ConfigValuesOverrideEnvVars", func(t *testing.T) {
 			t.Setenv("DBOS__APPVERSION", "env-v2.0.0")
 			t.Setenv("DBOS__VMID", "env-executor-456")
 
@@ -173,9 +173,9 @@ func TestConfig(t *testing.T) {
 				}
 			}()
 
-			// Env vars should override config values
-			assert.Equal(t, "env-v2.0.0", ctx.GetApplicationVersion())
-			assert.Equal(t, "env-executor-456", ctx.GetExecutorID())
+			// In-code config values take precedence over env vars
+			assert.Equal(t, "config-v1.2.3", ctx.GetApplicationVersion())
+			assert.Equal(t, "config-executor-123", ctx.GetExecutorID())
 		})
 
 		t.Run("UsesDefaultsWhenEmpty", func(t *testing.T) {
@@ -470,6 +470,70 @@ func TestConfig(t *testing.T) {
 		})
 	})
 
+}
+
+func TestApplicationVersionAndExecutorIDPrecedence(t *testing.T) {
+	base := func() *Config {
+		return &Config{AppName: "test", DatabaseURL: "sqlite::memory:"}
+	}
+
+	t.Run("ConfigWinsOverEnv", func(t *testing.T) {
+		t.Setenv("DBOS__CLOUD", "")
+		t.Setenv("DBOS__APPVERSION", "env-version")
+		t.Setenv("DBOS__VMID", "env-executor")
+		in := base()
+		in.ApplicationVersion = "config-version"
+		in.ExecutorID = "config-executor"
+		config, err := processConfig(in)
+		require.NoError(t, err)
+		assert.Equal(t, "config-version", config.ApplicationVersion)
+		assert.Equal(t, "config-executor", config.ExecutorID)
+	})
+
+	t.Run("EnvFillsEmptyConfig", func(t *testing.T) {
+		t.Setenv("DBOS__CLOUD", "")
+		t.Setenv("DBOS__APPVERSION", "env-version")
+		t.Setenv("DBOS__VMID", "env-executor")
+		config, err := processConfig(base())
+		require.NoError(t, err)
+		assert.Equal(t, "env-version", config.ApplicationVersion)
+		assert.Equal(t, "env-executor", config.ExecutorID)
+	})
+
+	t.Run("EnvWinsOnDBOSCloud", func(t *testing.T) {
+		t.Setenv("DBOS__CLOUD", "true")
+		t.Setenv("DBOS__APPVERSION", "cloud-version")
+		t.Setenv("DBOS__VMID", "cloud-executor")
+		in := base()
+		in.ApplicationVersion = "config-version"
+		in.ExecutorID = "config-executor"
+		config, err := processConfig(in)
+		require.NoError(t, err)
+		assert.Equal(t, "cloud-version", config.ApplicationVersion)
+		assert.Equal(t, "cloud-executor", config.ExecutorID)
+	})
+
+	t.Run("EnvBeatsPatchingDefault", func(t *testing.T) {
+		t.Setenv("DBOS__CLOUD", "")
+		t.Setenv("DBOS__APPVERSION", "env-version")
+		t.Setenv("DBOS__VMID", "")
+		in := base()
+		in.EnablePatching = true
+		config, err := processConfig(in)
+		require.NoError(t, err)
+		assert.Equal(t, "env-version", config.ApplicationVersion)
+		assert.Equal(t, "local", config.ExecutorID)
+	})
+
+	t.Run("DefaultsWhenNothingSet", func(t *testing.T) {
+		t.Setenv("DBOS__CLOUD", "")
+		t.Setenv("DBOS__APPVERSION", "")
+		t.Setenv("DBOS__VMID", "")
+		config, err := processConfig(base())
+		require.NoError(t, err)
+		assert.NotEmpty(t, config.ApplicationVersion)
+		assert.Equal(t, "local", config.ExecutorID)
+	})
 }
 
 func TestSystemDBStartupTimeoutConfig(t *testing.T) {

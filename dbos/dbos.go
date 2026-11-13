@@ -60,8 +60,8 @@ type Config struct {
 	AutoUpgrade                    bool            // Auto-upgrade the workflows this application registers to the latest application version, a Transact Enterprise feature (default: false; see WithAutoUpgrade to enroll workflows one by one)
 	AutoUpgradeInterval            time.Duration   // Time between two auto-upgrade passes (defaults to 30 seconds)
 	AutoUpgradeGracePeriod         time.Duration   // How long the latest application version must have been the latest before auto-upgrade re-enqueues PENDING workflows left on older versions, giving executors on those versions time to drain. ENQUEUED and DELAYED workflows are upgraded without waiting (defaults to 0)
-	ApplicationVersion             string          // Application version (optional, overridden by DBOS__APPVERSION env var)
-	ExecutorID                     string          // Executor ID (optional, overridden by DBOS__VMID env var)
+	ApplicationVersion             string          // Application version (optional; DBOS__APPVERSION is used when empty, and always on DBOS Cloud)
+	ExecutorID                     string          // Executor ID (optional; DBOS__VMID is used when empty, and always on DBOS Cloud)
 	EnablePatching                 bool            // Deprecated: pins the application version to "PATCHING_ENABLED" so every deployment shares one version. Patch and DeprecatePatch no longer require it
 	Serializer                     Serializer[any] // Custom serializer for encoding/decoding workflow inputs, outputs, and events (defaults to JSON serializer)
 	SchedulerPollingInterval       time.Duration   // controls how often dynamic schedules are reconciled with the database (defaults to 30 seconds)
@@ -176,17 +176,19 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		dbosConfig.AutoUpgradeInterval = _DEFAULT_AUTO_UPGRADE_INTERVAL
 	}
 
+	// In-code values take precedence over the environment variables, except on DBOS Cloud,
+	// which sets DBOS__APPVERSION and DBOS__VMID itself and must win.
+	onCloud := os.Getenv("DBOS__CLOUD") == "true"
+	if envAppVersion := os.Getenv("DBOS__APPVERSION"); envAppVersion != "" && (onCloud || dbosConfig.ApplicationVersion == "") {
+		dbosConfig.ApplicationVersion = envAppVersion
+	}
+	if envExecutorID := os.Getenv("DBOS__VMID"); envExecutorID != "" && (onCloud || dbosConfig.ExecutorID == "") {
+		dbosConfig.ExecutorID = envExecutorID
+	}
+
 	// If patching is enabled and application version is not set, fix the application version
 	if dbosConfig.EnablePatching && dbosConfig.ApplicationVersion == "" {
 		dbosConfig.ApplicationVersion = "PATCHING_ENABLED"
-	}
-
-	// Override with environment variables if set
-	if envAppVersion := os.Getenv("DBOS__APPVERSION"); envAppVersion != "" {
-		dbosConfig.ApplicationVersion = envAppVersion
-	}
-	if envExecutorID := os.Getenv("DBOS__VMID"); envExecutorID != "" {
-		dbosConfig.ExecutorID = envExecutorID
 	}
 
 	// Apply defaults for empty values
