@@ -176,7 +176,7 @@ List workflows for your application.
 **Options:**
 - `-l, --limit <number>` - Limit the results returned (default: 10)
 - `-o, --offset <number>` - Offset for pagination
-- `-S, --status <status>` - Filter by status (PENDING, SUCCESS, ERROR, ENQUEUED, CANCELLED, or MAX_RECOVERY_ATTEMPTS_EXCEEDED)
+- `-S, --status <status>` - Filter by status (PENDING, ENQUEUED, DELAYED, SUSPENDED, SUCCESS, ERROR, CANCELLED, or MAX_RECOVERY_ATTEMPTS_EXCEEDED)
 - `-n, --name <name>` - Retrieve workflows with this name
 - `-u, --user <user>` - Retrieve workflows run by this user
 - `-v, --application-version <version>` - Retrieve workflows with this application version

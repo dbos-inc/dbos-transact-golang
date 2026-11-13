@@ -8,7 +8,8 @@ package dbos
 //	import _ "go.dbos.dev/dbos-enterprise-go"
 //
 // The commercial module's init() function registers a Conductor constructor, an
-// auto-upgrade pass constructor, and a sharded system database backend.
+// auto-upgrade pass constructor, a sharded system database backend, and a suspend
+// mode backend.
 //
 // The other direction, what the enterprise module may use from OSS beyond the
 // public API, is declared in package dbos/internals.
@@ -126,6 +127,44 @@ func registeredShardingBackendFactory() ShardingBackendFactory {
 	shardingBackendFactoryMu.RLock()
 	defer shardingBackendFactoryMu.RUnlock()
 	return shardingBackendFactory
+}
+
+type SuspendRecvInput struct {
+	WorkflowID string
+	OwnerXID   string    // The execution's ownership token: only the execution owning the workflow parks it
+	Topic      string    // The topic the workflow waits on, as stored in the notifications table
+	WakeAt     time.Time // The Recv deadline, when the workflow is re-enqueued if no message came
+}
+
+type SuspendSleepInput struct {
+	WorkflowID string
+	OwnerXID   string    // The execution's ownership token: only the execution owning the workflow parks it
+	WakeAt     time.Time // The end of the sleep, when the workflow is re-enqueued
+}
+
+type SuspendBackend interface {
+	ParkRecv(ctx context.Context, input SuspendRecvInput) (bool, error)
+	ParkSleep(ctx context.Context, input SuspendSleepInput) error
+	TransitionSuspendedWorkflows(ctx context.Context) error
+}
+
+type SuspendBackendFactory func(ctx Context) (SuspendBackend, error)
+
+var (
+	suspendBackendFactoryMu sync.RWMutex
+	suspendBackendFactory   SuspendBackendFactory
+)
+
+func RegisterSuspendBackend(f SuspendBackendFactory) {
+	suspendBackendFactoryMu.Lock()
+	defer suspendBackendFactoryMu.Unlock()
+	suspendBackendFactory = f
+}
+
+func registeredSuspendBackendFactory() SuspendBackendFactory {
+	suspendBackendFactoryMu.RLock()
+	defer suspendBackendFactoryMu.RUnlock()
+	return suspendBackendFactory
 }
 
 // enterpriseUnavailableError says what needed the commercial module, and how to add it.

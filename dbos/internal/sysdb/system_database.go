@@ -80,6 +80,7 @@ type SystemDatabase interface {
 	GetWorkflowSteps(ctx context.Context, input GetWorkflowStepsInput) ([]StepRow, error)
 	GetWorkflowOwner(ctx context.Context, workflowID string) (*string, error)
 	CheckOwner(ctx context.Context, workflowID, ownerXID string) error
+	LockOwner(ctx context.Context, q Querier, workflowID, ownerXID, key string) error
 
 	// Aggregates
 	GetWorkflowAggregates(ctx context.Context, input GetWorkflowAggregatesDBInput) ([]WorkflowAggregateRow, error)
@@ -505,6 +506,24 @@ var migration124SQL string
 //go:embed migrations/125_create_application_versions_owner_timestamp_index.sql
 var migration125SQL string
 
+//go:embed migrations/126_add_workflow_status_suspend_key.sql
+var migration126SQL string
+
+//go:embed migrations/127_create_workflow_status_suspended_index.sql
+var migration127SQL string
+
+//go:embed migrations/128_create_workflow_status_deadline_index_v2.sql
+var migration128SQL string
+
+//go:embed migrations/129_drop_workflow_status_deadline_index.sql
+var migration129SQL string
+
+//go:embed migrations/130_update_send_message.sql
+var migration130SQL string
+
+//go:embed migrations/130_set_send_message_search_path.sql
+var migration130SearchPathSQL string
+
 type MigrationFile struct {
 	Version int64
 	SQL     string
@@ -617,6 +636,11 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 		migration113SQLProcessed = migration113SQLProcessed + "\n" + fmt.Sprintf(migration113SearchPathSQL, sanitizedSchema)
 	}
 
+	migration130SQLProcessed := fmt.Sprintf(migration130SQL, sanitizedSchema, sanitizedSchema, sanitizedSchema)
+	if !isCockroach {
+		migration130SQLProcessed = migration130SQLProcessed + "\n" + fmt.Sprintf(migration130SearchPathSQL, sanitizedSchema)
+	}
+
 	return []MigrationFile{
 		{Version: 1, SQL: migration1SQLProcessed},
 		{Version: 2, SQL: fmt.Sprintf(migration2SQL, sanitizedSchema)},
@@ -693,6 +717,11 @@ func BuildMigrations(schema string, isCockroach bool) []MigrationFile {
 		{Version: 123, SQL: fmt.Sprintf(migration123SQL, sanitizedSchema)},
 		{Version: 124, SQL: fmt.Sprintf(migration124SQL, c, sanitizedSchema), Online: !isCockroach},
 		{Version: 125, SQL: fmt.Sprintf(migration125SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 126, SQL: fmt.Sprintf(migration126SQL, sanitizedSchema)},
+		{Version: 127, SQL: fmt.Sprintf(migration127SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 128, SQL: fmt.Sprintf(migration128SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 129, SQL: fmt.Sprintf(migration129SQL, c, sanitizedSchema), Online: !isCockroach},
+		{Version: 130, SQL: migration130SQLProcessed},
 	}
 }
 
@@ -2441,7 +2470,7 @@ func (s *SysDB) cancelWorkflowIDs(ctx context.Context, tx Tx, workflowIDs []stri
 	if !s.dialect.SupportsDataModifyingCTE() {
 		updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
 			SET status = $1, updated_at = %s, completed_at = %s, started_at_epoch_ms = NULL,
-			    queue_name = NULL, deduplication_id = NULL, owner_xid = NULL
+			    queue_name = NULL, deduplication_id = NULL, owner_xid = NULL, suspend_key = NULL
 			WHERE %s AND status NOT IN ($3, $4, $5)%s`, schemaPrefix, nowMs, nowMs, anyClause, ownerClause)
 		selectAnyClause := dialectAnyClause(s.dialect, "workflow_uuid", 1)
 		selectQuery := s.RenderSQL(`SELECT workflow_uuid FROM %sworkflow_status WHERE %s`, schemaPrefix, selectAnyClause)
@@ -2498,7 +2527,7 @@ func (s *SysDB) cancelWorkflowIDs(ctx context.Context, tx Tx, workflowIDs []stri
 		), updated AS (
 			UPDATE %sworkflow_status
 			SET status = $1, updated_at = %s, completed_at = %s, started_at_epoch_ms = NULL,
-			    queue_name = NULL, deduplication_id = NULL, owner_xid = NULL
+			    queue_name = NULL, deduplication_id = NULL, owner_xid = NULL, suspend_key = NULL
 			WHERE %s AND status NOT IN ($3, $4, $5)%s
 			RETURNING workflow_uuid
 		)
@@ -2881,7 +2910,7 @@ func (s *SysDB) ResumeWorkflows(ctx context.Context, input ResumeWorkflowsDBInpu
 	if !s.dialect.SupportsDataModifyingCTE() {
 		updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
 			SET status = $1, queue_name = $2, recovery_attempts = $3,
-			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, owner_xid = NULL,
+			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, owner_xid = NULL, suspend_key = NULL,
 			    started_at_epoch_ms = NULL, updated_at = %s, completed_at = NULL
 			WHERE %s AND status NOT IN ($5, $6)`, schemaPrefix, nowMs, anyClause)
 		selectAnyClause := dialectAnyClause(s.dialect, "workflow_uuid", 1)
@@ -2939,7 +2968,7 @@ func (s *SysDB) ResumeWorkflows(ctx context.Context, input ResumeWorkflowsDBInpu
 		), updated AS (
 			UPDATE %sworkflow_status
 			SET status = $1, queue_name = $2, recovery_attempts = $3,
-			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, owner_xid = NULL,
+			    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, owner_xid = NULL, suspend_key = NULL,
 			    started_at_epoch_ms = NULL, updated_at = %s, completed_at = NULL
 			WHERE %s AND status NOT IN ($5, $6)
 			RETURNING workflow_uuid
@@ -3399,7 +3428,7 @@ func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput)
 	}
 	// Only a terminal workflow can be rewound.
 	switch models.WorkflowStatusType(currentStatus) {
-	case models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed:
+	case models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, models.WorkflowStatusSuspended:
 		return fmt.Errorf(
 			"cannot rewind workflow %s while it is %s: only a workflow in a terminal state can be rewound, so cancel it first",
 			input.WorkflowID, currentStatus)
@@ -3490,7 +3519,7 @@ func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput)
 	}
 	updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
 		SET status = $1, queue_name = $2, queue_partition_key = $3, recovery_attempts = 0,
-		    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, owner_xid = NULL,
+		    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, owner_xid = NULL, suspend_key = NULL,
 		    started_at_epoch_ms = NULL, completed_at = NULL, updated_at = $4`+setVersion+`
 		WHERE workflow_uuid = $5 AND status = $6`+andKey(key, &args), schemaPrefix)
 	result, err := tx.Exec(ctx, updateQuery, args...)
@@ -3604,9 +3633,17 @@ func (s *SysDB) AwaitWorkflowResult(ctx context.Context, workflowID string, poll
 }
 
 // checkOwner fails with a conflicting-ID error unless ownerXID still owns the workflow.
-// The row stays locked until commit, so a hand-off (cancel, resume, recovery) cannot
+// The row stays locked for no key update, until commit, so a hand-off (cancel, resume, recovery) cannot
 // land between this check and the caller's write.
 func (s *SysDB) checkOwner(ctx context.Context, q Querier, workflowID, ownerXID string, key ...string) error {
+	return s.checkOwnerLocked(ctx, q, workflowID, ownerXID, s.dialect.LockNoKeyUpdate(), key...)
+}
+
+func (s *SysDB) LockOwner(ctx context.Context, q Querier, workflowID, ownerXID, key string) error {
+	return s.checkOwnerLocked(ctx, q, workflowID, ownerXID, s.dialect.LockUpdate(), key)
+}
+
+func (s *SysDB) checkOwnerLocked(ctx context.Context, q Querier, workflowID, ownerXID, lock string, key ...string) error {
 	ownKey := ""
 	if len(key) > 0 {
 		ownKey = key[0]
@@ -3618,9 +3655,7 @@ func (s *SysDB) checkOwner(ctx context.Context, q Querier, workflowID, ownerXID 
 		}
 	}
 	args := []any{workflowID}
-	// Take FOR NO KEY UPDATE, which serializes all concurrent checkers: FOR SHARE is regression-prone.
-	// If we later add a write in q's transaction, it would cause deadlocks.
-	query := s.RenderSQL(`SELECT owner_xid FROM %sworkflow_status WHERE workflow_uuid = $1`+andKey(ownKey, &args)+` `+s.dialect.LockNoKeyUpdate(), s.dialect.SchemaPrefix(s.schema))
+	query := s.RenderSQL(`SELECT owner_xid FROM %sworkflow_status WHERE workflow_uuid = $1`+andKey(ownKey, &args)+` `+lock, s.dialect.SchemaPrefix(s.schema))
 	var current *string
 	if err := q.QueryRow(ctx, query, args...).Scan(&current); err != nil && err != pgx.ErrNoRows {
 		return fmt.Errorf("failed to check workflow owner: %w", err)
@@ -4979,8 +5014,8 @@ type WorkflowSendInput struct {
 	SendToForks bool
 }
 
-// Send inserts one or more notifications. SQLite chunks them in one transaction;
-// with SendToForks the fork lookup and the insert share one as well.
+// Send inserts one or more notifications and wakes the suspended receivers among their
+// destinations, in one transaction.
 // Can be called both within a workflow (as a step) or outside a workflow (directly).
 // When called within a workflow: durability and the function run in the same transaction, and we forbid nested step execution.
 func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
@@ -5010,13 +5045,8 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		key = k
 	}
 
-	// Without a caller transaction, open one when the fork lookup must see the
-	// same rows as the insert, or when SQLite inserts the batch in several chunks.
-	// PG and CockroachDB insert every row in one array-parameter query.
 	tx := input.Tx
-	chunked := !s.dialect.SupportsArrayParameters() && len(input.Messages) > _SEND_CHUNK_SIZE
-	rowByRow := key != "" && len(input.Messages) > 1
-	if tx == nil && (input.SendToForks || chunked || rowByRow) {
+	if tx == nil {
 		var err error
 		tx, err = s.pool.BeginTx(ctx, TxOptions{})
 		if err != nil {
@@ -5024,11 +5054,7 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		}
 		defer tx.Rollback(ctx)
 	}
-
-	var exec Querier = s.pool
-	if tx != nil {
-		exec = tx
-	}
+	var exec Querier = tx
 
 	if input.SendToForks {
 		var err error
@@ -5061,12 +5087,53 @@ func (s *SysDB) Send(ctx context.Context, input WorkflowSendInput) error {
 		}
 	}
 
-	if input.Tx == nil && tx != nil {
+	if err := s.wakeReceivers(ctx, exec, input.Messages, key); err != nil {
+		return err
+	}
+
+	if input.Tx == nil {
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("failed to commit send transaction: %w", err)
 		}
 	}
 	return nil
+}
+
+// Signal SUSPENDED receivers can be resumed by setting their delayed_until epoch to 0
+func (s *SysDB) wakeReceivers(ctx context.Context, exec Querier, msgs []WorkflowSendRow, key string) error {
+	query, args, err := s.wakeReceiversQuery(msgs, key)
+	if err != nil {
+		return err
+	}
+	if _, err := exec.Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("failed to wake suspended receivers: %w", err)
+	}
+	return nil
+}
+
+func (s *SysDB) wakeReceiversQuery(msgs []WorkflowSendRow, key string) (string, []any, error) {
+	dests := make([]string, 0, len(msgs))
+	topics := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		dests = append(dests, m.DestinationID)
+		topics = append(topics, notificationTopic(m))
+	}
+	slices.Sort(dests)
+	slices.Sort(topics)
+	encodedDests, err := encodeArrayParam(s.dialect, slices.Compact(dests))
+	if err != nil {
+		return "", nil, fmt.Errorf("wake receivers: %w", err)
+	}
+	encodedTopics, err := encodeArrayParam(s.dialect, slices.Compact(topics))
+	if err != nil {
+		return "", nil, fmt.Errorf("wake receivers: %w", err)
+	}
+	args := []any{encodedDests, encodedTopics, models.WorkflowStatusSuspended}
+	// Status is tested in SET, not WHERE, so the planner cannot scan idx_workflow_status_suspended.
+	query := s.RenderSQL(`UPDATE %sworkflow_status SET delay_until_epoch_ms = CASE WHEN status = $3 THEN 0 ELSE delay_until_epoch_ms END
+		WHERE `+dialectAnyClause(s.dialect, "workflow_uuid", 1)+` AND `+dialectAnyClause(s.dialect, "suspend_key", 2)+andKey(key, &args),
+		s.dialect.SchemaPrefix(s.schema))
+	return query, args, nil
 }
 
 // expandToForks returns msgs with, after each message, one copy per workflow
@@ -5092,11 +5159,15 @@ func (s *SysDB) expandToForks(ctx context.Context, exec Querier, msgs []Workflow
 	return expanded, nil
 }
 
-func notificationKey(m WorkflowSendRow) (topic, messageUUID string) {
-	topic = NullTopic
+func notificationTopic(m WorkflowSendRow) string {
 	if len(m.Topic) > 0 {
-		topic = m.Topic
+		return m.Topic
 	}
+	return NullTopic
+}
+
+func notificationKey(m WorkflowSendRow) (topic, messageUUID string) {
+	topic = notificationTopic(m)
 	messageUUID = uuid.NewString()
 	if m.IdempotencyKey != "" {
 		messageUUID = fmt.Sprintf("%s::%s", m.IdempotencyKey, m.DestinationID)
@@ -5639,13 +5710,13 @@ func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOu
 		args = append(args, s.appName)
 		filterClause += " AND " + nameFilterSQL("application_name", len(args))
 	}
-	// Status literals: bound parameters would stop a generic plan from proving idx_workflow_status_deadline's predicate.
+	// Status literals: bound parameters would stop a generic plan from proving idx_workflow_status_deadline_v2's predicate.
 	query := s.RenderSQL(`UPDATE %sworkflow_status
 		SET status = $1, updated_at = `+nowMs+`, completed_at = `+nowMs+`,
-		    started_at_epoch_ms = NULL, queue_name = NULL, deduplication_id = NULL, owner_xid = NULL
+		    started_at_epoch_ms = NULL, queue_name = NULL, deduplication_id = NULL, owner_xid = NULL, suspend_key = NULL
 		WHERE workflow_uuid IN (
 		    SELECT workflow_uuid FROM %sworkflow_status
-		    WHERE status IN ('`+string(models.WorkflowStatusEnqueued)+`', '`+string(models.WorkflowStatusPending)+`', '`+string(models.WorkflowStatusDelayed)+`')
+		    WHERE status IN ('`+string(models.WorkflowStatusEnqueued)+`', '`+string(models.WorkflowStatusPending)+`', '`+string(models.WorkflowStatusDelayed)+`', '`+string(models.WorkflowStatusSuspended)+`')
 		      AND workflow_deadline_epoch_ms IS NOT NULL
 		      AND workflow_deadline_epoch_ms <= `+nowMs+filterClause+`
 		    ORDER BY workflow_deadline_epoch_ms
@@ -5676,14 +5747,14 @@ func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOu
 // cancels them key by key.
 func (s *SysDB) cancelTimedOutShardedWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]string, error) {
 	nowMs := time.Now().UnixMilli()
-	active := `('` + string(models.WorkflowStatusEnqueued) + `', '` + string(models.WorkflowStatusPending) + `', '` + string(models.WorkflowStatusDelayed) + `')`
+	active := `('` + string(models.WorkflowStatusEnqueued) + `', '` + string(models.WorkflowStatusPending) + `', '` + string(models.WorkflowStatusDelayed) + `', '` + string(models.WorkflowStatusSuspended) + `')`
 	args := []any{nowMs, input.Limit}
 	filterClause := ""
 	if s.appName != "" {
 		args = append(args, s.appName)
 		filterClause = " AND " + nameFilterSQL("application_name", len(args))
 	}
-	// Status literals: bound parameters would stop a generic plan from proving idx_workflow_status_deadline's predicate.
+	// Status literals: bound parameters would stop a generic plan from proving idx_workflow_status_deadline_v2's predicate.
 	// The deadline is selected because a router merging shards orders by it: PgDog adds an
 	// ORDER BY column missing from the select list, which breaks a prepared statement.
 	findQuery := s.RenderSQL(`SELECT workflow_uuid, shard_key, workflow_deadline_epoch_ms FROM %sworkflow_status
@@ -5699,7 +5770,7 @@ func (s *SysDB) cancelTimedOutShardedWorkflows(ctx context.Context, input Cancel
 	}
 	cancelQuery := s.RenderSQL(`UPDATE %sworkflow_status
 		SET status = $1, updated_at = $2, completed_at = $2,
-		    started_at_epoch_ms = NULL, queue_name = NULL, deduplication_id = NULL, owner_xid = NULL
+		    started_at_epoch_ms = NULL, queue_name = NULL, deduplication_id = NULL, owner_xid = NULL, suspend_key = NULL
 		WHERE shard_key = $3 AND workflow_uuid = ANY($4)
 		  AND status IN `+active+` AND workflow_deadline_epoch_ms <= $2
 		RETURNING workflow_uuid`, s.dialect.SchemaPrefix(s.schema))
@@ -7702,8 +7773,8 @@ func (s *SysDB) RenameApplication(ctx context.Context, input RenameApplicationDB
 	// application dequeues work whose version row it can no longer see.
 	args := []any{input.NewName}
 	predicate := renameSourceSQL(input.OldName, input.AdoptUnclaimedRows, &args)
-	statusClause := fmt.Sprintf(" AND status IN ($%d, $%d, $%d)", len(args)+1, len(args)+2, len(args)+3)
-	args = append(args, models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed)
+	statusClause := fmt.Sprintf(" AND status IN ($%d, $%d, $%d, $%d)", len(args)+1, len(args)+2, len(args)+3, len(args)+4)
+	args = append(args, models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, models.WorkflowStatusSuspended)
 	query := s.RenderSQL(`UPDATE %sworkflow_status SET application_name = $1 WHERE `+predicate+statusClause, schemaPrefix)
 	tag, err := tx.Exec(ctx, s.dialect.RewriteQuery(query), args...)
 	if err != nil {

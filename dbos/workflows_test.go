@@ -5913,6 +5913,74 @@ func TestSendRecv(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow status")
 		require.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 	})
+
+	// A send makes a SUSPENDED receiver of its topic due (delay_until_epoch_ms = 0) and
+	// leaves receivers of other topics and suspended sleeps alone, whether it is sent
+	// from outside a workflow, from a workflow, or in bulk.
+	t.Run("SendWakesSuspendedReceivers", func(t *testing.T) {
+		far := time.Now().Add(time.Hour).UnixMilli()
+		topic, other := "wake-topic", "other-topic"
+		waiting := insertSuspendedWorkflow(t, dbosCtx, &topic, far, nil)
+		onOtherTopic := insertSuspendedWorkflow(t, dbosCtx, &other, far, nil)
+		sleeping := insertSuspendedWorkflow(t, dbosCtx, nil, far, nil)
+		require.NoError(t, Send(dbosCtx, waiting, "wake", topic))
+		assert.Zero(t, wakeTimeOf(t, dbosCtx, waiting), "the receiver of the topic is due")
+		assert.Equal(t, far, wakeTimeOf(t, dbosCtx, onOtherTopic), "a receiver of another topic is not")
+		assert.Equal(t, far, wakeTimeOf(t, dbosCtx, sleeping), "a suspended sleep is not")
+
+		require.NoError(t, Send(dbosCtx, sleeping, "wake", topic))
+		assert.Equal(t, far, wakeTimeOf(t, dbosCtx, sleeping), "a message to a suspended sleep does not wake it")
+
+		fromWorkflow := insertSuspendedWorkflow(t, dbosCtx, &topic, far, nil)
+		handle, err := RunWorkflow(dbosCtx, sendWorkflow, sendWorkflowInput{DestinationID: fromWorkflow, Topic: topic})
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+		assert.Zero(t, wakeTimeOf(t, dbosCtx, fromWorkflow), "a send from a workflow wakes too")
+
+		// The bulk match is destinations x topics: onOtherTopic is woken by a batch that
+		// sends it on topic and sends someone else on its topic. A spurious wake re-parks.
+		bulkWaiting := insertSuspendedWorkflow(t, dbosCtx, &other, far, nil)
+		require.NoError(t, SendBulk(dbosCtx, []SendMessage{
+			{DestinationID: bulkWaiting, Message: "wake", Topic: other},
+			{DestinationID: onOtherTopic, Message: "wake", Topic: topic},
+		}))
+		assert.Zero(t, wakeTimeOf(t, dbosCtx, bulkWaiting))
+		assert.Zero(t, wakeTimeOf(t, dbosCtx, onOtherTopic))
+		assert.Equal(t, far, wakeTimeOf(t, dbosCtx, sleeping))
+	})
+	// Cancelling, resuming and timing out a SUSPENDED workflow each clear its suspend_key,
+	// so a later send on that topic no longer matches the row.
+	t.Run("LeavingSuspendedClearsSuspendKey", func(t *testing.T) {
+		sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+		row := func(workflowID string) (status WorkflowStatusType, suspendKey *string) {
+			require.NoError(t, sysDB.Pool().QueryRow(context.Background(), sysDB.RenderSQL(
+				`SELECT status, suspend_key FROM %sworkflow_status WHERE workflow_uuid = $1`, sysDB.Dialect().SchemaPrefix(sysDB.Schema())), workflowID).Scan(&status, &suspendKey))
+			return status, suspendKey
+		}
+		far := time.Now().Add(time.Hour).UnixMilli()
+		topic := "approve"
+
+		cancelled := insertSuspendedWorkflow(t, dbosCtx, &topic, far, nil)
+		require.NoError(t, CancelWorkflow(dbosCtx, cancelled))
+		status, suspendKey := row(cancelled)
+		assert.Equal(t, WorkflowStatusCancelled, status)
+		assert.Nil(t, suspendKey)
+
+		resumed := insertSuspendedWorkflow(t, dbosCtx, &topic, far, nil)
+		_, err := ResumeWorkflow[any](dbosCtx, resumed)
+		require.NoError(t, err)
+		_, suspendKey = row(resumed)
+		assert.Nil(t, suspendKey)
+		require.NoError(t, CancelWorkflow(dbosCtx, resumed))
+
+		deadline := int64(1)
+		timedOut := insertSuspendedWorkflow(t, dbosCtx, &topic, far, &deadline)
+		require.Eventually(t, func() bool {
+			status, suspendKey := row(timedOut)
+			return status == WorkflowStatusCancelled && suspendKey == nil
+		}, 10*time.Second, 50*time.Millisecond)
+	})
 }
 
 // TestRecvStepConflict verifies that two executions of the same workflow can wait
@@ -7950,6 +8018,23 @@ func TestWorkflowTimeout(t *testing.T) {
 	t.Run("ShorterStepTimeout", runShorterStepTimeout)
 	t.Run("DetachedStepWorkflow", runDetachedStepWorkflow)
 	t.Run("ChildWorkflowTimesout", runChildWorkflowTimesout)
+
+	t.Run("SuspendedWorkflowTimesOut", func(t *testing.T) {
+		// The timeouts monitor sweeps SUSPENDED workflows past their deadline like the running ones.
+		topic := "suspended-topic"
+		farAway := time.Now().Add(24 * time.Hour).UnixMilli()
+		past := time.Now().Add(-time.Minute).UnixMilli()
+		timedOut := insertSuspendedWorkflow(t, dbosCtx, &topic, farAway, &past)
+		inTime := insertSuspendedWorkflow(t, dbosCtx, &topic, farAway, &farAway)
+		statusOf := func(workflowID string) WorkflowStatusType {
+			statuses, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID), WithFilterLoadInput(false), WithFilterLoadOutput(false))
+			require.NoError(t, err)
+			require.Len(t, statuses, 1)
+			return statuses[0].Status
+		}
+		require.Eventually(t, func() bool { return statusOf(timedOut) == WorkflowStatusCancelled }, 10*time.Second, 100*time.Millisecond)
+		assert.Equal(t, WorkflowStatusSuspended, statusOf(inTime))
+	})
 
 	t.Run("ChildWorkflowDetached", func(t *testing.T) {
 		timeout := 500 * time.Millisecond
