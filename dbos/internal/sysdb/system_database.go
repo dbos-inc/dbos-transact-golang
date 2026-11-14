@@ -4709,13 +4709,14 @@ func (s *SysDB) checkpointName(ctx context.Context, q Querier, input PatchDBInpu
 	return functionName, q.QueryRow(ctx, query, args...).Scan(&functionName)
 }
 
-func (s *SysDB) checkpointAtOrAfter(ctx context.Context, q Querier, input PatchDBInput) (int, string, error) {
+func (s *SysDB) checkpointAtOrAfter(ctx context.Context, q Querier, input PatchDBInput, key string) (int, string, error) {
 	var functionID int
 	var functionName string
+	args := []any{input.WorkflowID, input.StepID}
 	query := s.RenderSQL(`SELECT function_id, function_name FROM %soperation_outputs
-		WHERE workflow_uuid = $1 AND function_id >= $2
+		WHERE workflow_uuid = $1 AND function_id >= $2`+andKey(key, &args)+`
 		ORDER BY function_id LIMIT 1`, s.dialect.SchemaPrefix(s.schema))
-	err := q.QueryRow(ctx, query, input.WorkflowID, input.StepID).Scan(&functionID, &functionName)
+	err := q.QueryRow(ctx, query, args...).Scan(&functionID, &functionName)
 	return functionID, functionName, err
 }
 
@@ -4726,22 +4727,22 @@ func (s *SysDB) checkpointAtOrAfter(ctx context.Context, q Querier, input PatchD
 // execution being replayed and say so. Otherwise, we return "false", so the higher level API
 // knows we are dealing with an older version of the code, and skips the patch step.
 func (s *SysDB) Patch(ctx context.Context, input PatchDBInput) (bool, error) {
+	key, err := s.ownKeyOf(ctx, input.WorkflowID)
+	if err != nil {
+		return false, err
+	}
 	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
 		return false, fmt.Errorf("failed to begin patch transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	functionID, functionName, err := s.checkpointAtOrAfter(ctx, tx, input)
+	functionID, functionName, err := s.checkpointAtOrAfter(ctx, tx, input, key)
 	if err != nil {
 		// No result means this is a new workflow, or an existing workflow that has not reached this step yet
 		// Insert the patch marker and return true
 		if errors.Is(err, pgx.ErrNoRows) {
-			if err := s.checkOwner(ctx, tx, input.WorkflowID, input.OwnerXID); err != nil {
-				return false, err
-			}
-			key, err := s.ownKeyOf(ctx, input.WorkflowID)
-			if err != nil {
+			if err := s.checkOwner(ctx, tx, input.WorkflowID, input.OwnerXID, key); err != nil {
 				return false, err
 			}
 			args := []any{input.WorkflowID, input.StepID, input.PatchName}
