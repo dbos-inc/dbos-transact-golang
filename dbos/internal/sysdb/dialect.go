@@ -501,7 +501,16 @@ func dialectLikeAnyClause(d Dialect, column string, placeholderIdx int) string {
 	if d.SupportsArrayParameters() {
 		return fmt.Sprintf("%s LIKE ANY($%d)", column, placeholderIdx)
 	}
-	return fmt.Sprintf("EXISTS (SELECT 1 FROM json_each($%d) WHERE %s LIKE value ESCAPE '\\')", placeholderIdx, column)
+	return fmt.Sprintf("EXISTS (SELECT 1 FROM json_each($%d) WHERE %s LIKE value%s)", placeholderIdx, column, dialectLikeEscapeClause(d))
+}
+
+// dialectLikeEscapeClause declares backslash as the LIKE escape character on
+// SQLite, which has no default. Postgres already defaults to backslash.
+func dialectLikeEscapeClause(d Dialect) string {
+	if d != nil && d.Name() == DialectSQLite {
+		return ` ESCAPE '\'`
+	}
+	return ""
 }
 
 // dialectNoLimitClause returns the LIMIT clause that must precede an OFFSET when
