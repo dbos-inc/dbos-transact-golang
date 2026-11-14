@@ -1545,6 +1545,25 @@ func TestListWorkflows(t *testing.T) {
 		dequeuedBefore, err := client.ListWorkflows(client, WithFilterWorkflowIDs(parentID), WithFilterDequeuedBefore(testStartTime))
 		require.NoError(t, err)
 		assert.Len(t, dequeuedBefore, 0, "parent not dequeued before test start")
+
+		// Test 18: Workflow ID prefixes are literal: "_" and "%" are not
+		// wildcards, and a backslash is not an escape character.
+		for _, id := range []string{`customer_1-job`, `customerA1-job`, `customer%2-job`, `customerZZ2-job`, `back\slash-job`, `backXslash-job`} {
+			h, err := RunWorkflow(serverCtx, simpleWorkflow, testInput{Value: 1, ID: id}, WithWorkflowID(id))
+			require.NoError(t, err, "failed to run workflow %s", id)
+			_, err = h.GetResult()
+			require.NoError(t, err, "workflow %s should succeed", id)
+		}
+		for prefix, want := range map[string]string{
+			`customer_1`: `customer_1-job`,
+			`customer%2`: `customer%2-job`,
+			`back\slash`: `back\slash-job`,
+		} {
+			literal, err := client.ListWorkflows(client, WithFilterWorkflowIDPrefix(prefix))
+			require.NoError(t, err, "failed to list workflows by prefix %q", prefix)
+			require.Len(t, literal, 1, "prefix %q", prefix)
+			assert.Equal(t, want, literal[0].ID)
+		}
 	})
 	// Verify all queue entries are cleaned up
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after list workflows tests")
