@@ -204,6 +204,22 @@ func TestScheduleCRUD(t *testing.T) {
 		none, err = ListSchedules(dbosCtx, WithScheduleNamePrefixes("does-not-exist"))
 		require.NoError(t, err)
 		require.Empty(t, none)
+
+		// Schedule name prefixes are literal: "_" and "%" are not wildcards
+		for _, name := range []string{`sched_1-a`, `schedA1-a`, `sched%2-a`, `schedZZ2-a`} {
+			require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
+				ScheduleName: name,
+				Schedule:     "0 0 * * * *",
+				Workflow:     testWorkflowForSchedule,
+			}))
+			t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, name) })
+		}
+		for prefix, want := range map[string]string{`sched_1`: `sched_1-a`, `sched%2`: `sched%2-a`} {
+			literal, err := ListSchedules(dbosCtx, WithScheduleNamePrefixes(prefix))
+			require.NoError(t, err)
+			require.Len(t, literal, 1, "prefix %q", prefix)
+			require.Equal(t, want, literal[0].ScheduleName)
+		}
 	})
 
 	t.Run("DuplicateName", func(t *testing.T) {
