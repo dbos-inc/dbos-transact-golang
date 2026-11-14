@@ -112,7 +112,7 @@ type SystemDatabase interface {
 	// Queues
 	SetWorkflowDelay(ctx context.Context, input SetWorkflowDelayDBInput) error
 	TransitionDelayedWorkflows(ctx context.Context) error
-	CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]string, error)
+	CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]TimedOutWorkflow, error)
 	DebounceDelayedWorkflow(ctx context.Context, input DebounceDelayedWorkflowDBInput) (*DebounceResult, error)
 	DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]string, error)
 	DeadLetterWorkflows(ctx context.Context, workflowIDs []string, minAttempts int) error
@@ -5626,9 +5626,15 @@ type CancelTimedOutWorkflowsDBInput struct {
 	Limit int
 }
 
+// TimedOutWorkflow is a workflow CancelTimedOutWorkflows cancelled.
+type TimedOutWorkflow struct {
+	ID       string
+	ShardKey string // empty on an unsharded system database
+}
+
 // CancelTimedOutWorkflows cancels up to Limit of this application's active workflows whose
-// deadline has passed, oldest deadline first, and returns their IDs.
-func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]string, error) {
+// deadline has passed, oldest deadline first, and returns them.
+func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]TimedOutWorkflow, error) {
 	if s.sharded {
 		return s.cancelTimedOutShardedWorkflows(ctx, input)
 	}
@@ -5658,13 +5664,13 @@ func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOu
 		return nil, fmt.Errorf("failed to cancel timed-out workflows: %w", err)
 	}
 	defer rows.Close()
-	var cancelled []string
+	var cancelled []TimedOutWorkflow
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("failed to scan timed-out workflow ID: %w", err)
 		}
-		cancelled = append(cancelled, id)
+		cancelled = append(cancelled, TimedOutWorkflow{ID: id})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("failed to read timed-out workflow IDs: %w", err)
@@ -5674,7 +5680,7 @@ func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOu
 
 // cancelTimedOutShardedWorkflows finds timed-out workflows with a keyless read, then
 // cancels them key by key.
-func (s *SysDB) cancelTimedOutShardedWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]string, error) {
+func (s *SysDB) cancelTimedOutShardedWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]TimedOutWorkflow, error) {
 	nowMs := time.Now().UnixMilli()
 	active := `('` + string(models.WorkflowStatusEnqueued) + `', '` + string(models.WorkflowStatusPending) + `', '` + string(models.WorkflowStatusDelayed) + `')`
 	args := []any{nowMs, input.Limit}
@@ -5703,7 +5709,7 @@ func (s *SysDB) cancelTimedOutShardedWorkflows(ctx context.Context, input Cancel
 		WHERE shard_key = $3 AND workflow_uuid = ANY($4)
 		  AND status IN `+active+` AND workflow_deadline_epoch_ms <= $2
 		RETURNING workflow_uuid`, s.dialect.SchemaPrefix(s.schema))
-	var cancelled []string
+	var cancelled []TimedOutWorkflow
 	cancelKey := func(key string) error {
 		rows, err := s.pool.Query(ctx, cancelQuery, models.WorkflowStatusCancelled, nowMs, key, byKey[key])
 		if err != nil {
@@ -5715,7 +5721,7 @@ func (s *SysDB) cancelTimedOutShardedWorkflows(ctx context.Context, input Cancel
 			if err := rows.Scan(&id); err != nil {
 				return err
 			}
-			cancelled = append(cancelled, id)
+			cancelled = append(cancelled, TimedOutWorkflow{ID: id, ShardKey: key})
 		}
 		return rows.Err()
 	}

@@ -860,6 +860,7 @@ type WorkflowFunc func(ctx Context, input any) (any, error)
 
 type activeWorkflowEntry struct {
 	workflowID        string
+	shardKey          string
 	queueName         string
 	queuePartitionKey string
 	cancel            context.CancelCauseFunc
@@ -1864,7 +1865,7 @@ func (c *dbosContext) executeWorkflow(fn WorkflowFunc, input any, exec workflowE
 		removeActive := func() {}
 		if c.activeExecutions != nil {
 			key := executionKey{workflowID: workflowID, ownerXID: exec.ownerXID}
-			c.activeExecutions.Store(key, activeWorkflowEntry{workflowID: workflowID, queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey, cancel: cancelWorkflow})
+			c.activeExecutions.Store(key, activeWorkflowEntry{workflowID: workflowID, shardKey: exec.shardKey, queueName: exec.queueName, queuePartitionKey: exec.queuePartitionKey, cancel: cancelWorkflow})
 			var removeOnce sync.Once
 			removeActive = func() { removeOnce.Do(func() { c.activeExecutions.Delete(key) }) }
 		}
@@ -2044,7 +2045,7 @@ func (c *dbosContext) runShardedBackgroundJobs() {
 
 func (c *dbosContext) cancelTimedOutWorkflows() {
 	for {
-		cancelled, err := sysdb.RetryWithResult(c, func() ([]string, error) {
+		cancelled, err := sysdb.RetryWithResult(c, func() ([]sysdb.TimedOutWorkflow, error) {
 			return c.systemDB.CancelTimedOutWorkflows(c, sysdb.CancelTimedOutWorkflowsDBInput{Limit: _WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE})
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
@@ -2053,15 +2054,15 @@ func (c *dbosContext) cancelTimedOutWorkflows() {
 			}
 			return
 		}
-		timedOut := make(map[string]struct{}, len(cancelled))
-		for _, workflowID := range cancelled {
-			c.logger.Info("Workflow timed out", "workflow_id", workflowID)
-			timedOut[workflowID] = struct{}{}
+		timedOut := make(map[sysdb.TimedOutWorkflow]struct{}, len(cancelled))
+		for _, workflow := range cancelled {
+			c.logger.Info("Workflow timed out", "workflow_id", workflow.ID)
+			timedOut[workflow] = struct{}{}
 		}
 		if c.activeExecutions != nil {
 			c.activeExecutions.Range(func(_, value any) bool {
 				entry, ok := value.(activeWorkflowEntry)
-				if _, hit := timedOut[entry.workflowID]; ok && hit && entry.cancel != nil {
+				if _, hit := timedOut[sysdb.TimedOutWorkflow{ID: entry.workflowID, ShardKey: entry.shardKey}]; ok && hit && entry.cancel != nil {
 					entry.cancel(errDBOSContextTimeout)
 				}
 				return true
