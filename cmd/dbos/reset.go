@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,16 +25,25 @@ func init() {
 	resetCmd.Flags().BoolVarP(&skipConfirmation, "yes", "y", false, "Skip confirmation prompt")
 }
 
-func runReset(cmd *cobra.Command, args []string) error {
-	// Get confirmation unless skipped
-	if !skipConfirmation {
-		prompt := "This command resets your DBOS system database, deleting metadata about past workflows and steps. Are you sure you want to proceed?"
-		if !confirmAction(prompt) {
-			logger.Info("Operation cancelled.")
-			return nil
-		}
+// holdsShardedSchema reports whether the database holds a sharded DBOS system schema.
+// A database that cannot be reached, or does not exist yet, holds none: the reset reports that.
+func holdsShardedSchema(ctx context.Context, config *pgx.ConnConfig) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		return false, nil
 	}
+	defer conn.Close(ctx)
+	var found bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_name = 'workflow_status' AND column_name = 'shard_key')`).Scan(&found); err != nil {
+		return false, fmt.Errorf("failed to check whether the system database is sharded: %w", err)
+	}
+	return found, nil
+}
 
+func runReset(cmd *cobra.Command, args []string) error {
 	// Get database URL
 	dbURL, err := getDBURL()
 	if err != nil {
@@ -45,6 +56,24 @@ func runReset(cmd *cobra.Command, args []string) error {
 	config, err := pgxpool.ParseConfig(dbURL)
 	if err != nil {
 		return fmt.Errorf("failed to parse database URL: %w", err)
+	}
+
+	// Dropping the database a router or a shard points at would take every tenant's rows with it.
+	sharded, err := holdsShardedSchema(ctx, config.ConnConfig)
+	if err != nil {
+		return err
+	}
+	if sharded {
+		return errors.New("resetting a sharded system database is not supported: drop or empty its schema through the router instead")
+	}
+
+	// Get confirmation unless skipped
+	if !skipConfirmation {
+		prompt := "This command resets your DBOS system database, deleting metadata about past workflows and steps. Are you sure you want to proceed?"
+		if !confirmAction(prompt) {
+			logger.Info("Operation cancelled.")
+			return nil
+		}
 	}
 
 	// Get the database name from the config
