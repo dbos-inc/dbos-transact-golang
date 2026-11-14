@@ -76,22 +76,22 @@ func pushingSysDB(interval time.Duration) *SysDB {
 
 func TestSignalWakesLocalWaiterAndQueuesOnePush(t *testing.T) {
 	s := pushingSysDB(time.Hour) // never ticks: the queue is inspected by hand
-	ch, release := s.StreamWakeChannel("wf", "key")
+	ch, release := s.StreamWakeChannel(context.Background(), "wf", "key")
 	defer release()
 
 	// Repeated writes to the same stream wake the reader now and collapse into a
 	// single wakeup for other processes: that collapsing is the point of
 	// coalescing.
 	for range 100 {
-		s.SignalStreamWrite("wf", "key")
+		s.SignalStreamWrite(context.Background(), "wf", "key")
 	}
 	select {
 	case <-ch:
 	default:
 		t.Fatal("local stream reader was not woken")
 	}
-	s.SignalStreamWrite("wf", "other")
-	s.SignalEventSet("wf", "event")
+	s.SignalStreamWrite(context.Background(), "wf", "other")
+	s.SignalEventSet(context.Background(), "wf", "event")
 
 	if got := len(s.streamNotifier.drainPending()); got != 2 {
 		t.Errorf("expected 2 deduplicated stream payloads, got %d", got)
@@ -117,10 +117,10 @@ func TestRegistriesThatDoNotPushOnlyWakeLocalWaiters(t *testing.T) {
 	if s.pushesNotifications() {
 		t.Fatal("a backend that pushes nothing should not need a notifier loop")
 	}
-	ch, release := s.StreamWakeChannel("wf", "key")
+	ch, release := s.StreamWakeChannel(context.Background(), "wf", "key")
 	defer release()
 
-	s.SignalStreamWrite("wf", "key")
+	s.SignalStreamWrite(context.Background(), "wf", "key")
 	select {
 	case <-ch:
 	default:
@@ -186,7 +186,7 @@ func TestFlushRetriesTransientErrorsAndDropsTheRest(t *testing.T) {
 	s := pushingSysDB(time.Hour)
 	pool := s.pool.(*flushRecorderPool)
 	pool.errs = []error{&pgconn.PgError{Code: pgerrcode.ConnectionFailure}}
-	s.SignalStreamWrite("wf", "key")
+	s.SignalStreamWrite(context.Background(), "wf", "key")
 
 	s.flushNotifications(context.Background())
 	if got := pool.calls(); got != 2 {
@@ -201,7 +201,7 @@ func TestFlushRetriesTransientErrorsAndDropsTheRest(t *testing.T) {
 	s = pushingSysDB(time.Hour)
 	pool = s.pool.(*flushRecorderPool)
 	pool.errs = []error{errors.New("malformed payload")}
-	s.SignalStreamWrite("wf", "key")
+	s.SignalStreamWrite(context.Background(), "wf", "key")
 
 	s.flushNotifications(context.Background())
 	if got := pool.calls(); got != 1 {
@@ -216,7 +216,7 @@ func TestNotifierLoopFlushesAfterCancel(t *testing.T) {
 	// The final push lets values written just before shutdown wake waiters in
 	// other processes instead of waiting out their fallback poll.
 	s := pushingSysDB(time.Hour) // never ticks; only the final flush can fire
-	s.SignalStreamWrite("wf", "key")
+	s.SignalStreamWrite(context.Background(), "wf", "key")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

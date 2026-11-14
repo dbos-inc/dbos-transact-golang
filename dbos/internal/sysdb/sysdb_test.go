@@ -54,7 +54,7 @@ func TestStreamWakeChannelCleanupPreservesConcurrentReaders(t *testing.T) {
 	}
 	subs := make([]subscription, readers)
 	for i := range subs {
-		subs[i].ch, subs[i].cleanup = s.StreamWakeChannel("workflow", "key")
+		subs[i].ch, subs[i].cleanup = s.StreamWakeChannel(context.Background(), "workflow", "key")
 	}
 
 	var cleanupWG sync.WaitGroup

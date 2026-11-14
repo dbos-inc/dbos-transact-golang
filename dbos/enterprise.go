@@ -7,8 +7,8 @@ package dbos
 //
 //	import _ "go.dbos.dev/dbos-enterprise-go"
 //
-// The commercial module's init() function registers a Conductor constructor and
-// an auto-upgrade pass constructor.
+// The commercial module's init() function registers a Conductor constructor, an
+// auto-upgrade pass constructor, and a sharded system database backend.
 //
 // The other direction, what the enterprise module may use from OSS beyond the
 // public API, is declared in package dbos/internals.
@@ -102,6 +102,30 @@ func registeredAutoUpgradeFactory() AutoUpgradeFactory {
 	autoUpgradeFactoryMu.RLock()
 	defer autoUpgradeFactoryMu.RUnlock()
 	return autoUpgradeFactory
+}
+
+// ShardingBackendFactory builds the commercial half of a sharded system database:
+// its schema and migrations, and its router- and coordinator-specific behaviour.
+// Its input and result types are declared in dbos/internals.
+type ShardingBackendFactory = sysdb.ShardingBackendFactory
+
+var (
+	shardingBackendFactoryMu sync.RWMutex
+	shardingBackendFactory   ShardingBackendFactory
+)
+
+// RegisterShardingBackend makes sharded system databases available to every Context
+// created afterwards. The commercial module calls it from its init function.
+func RegisterShardingBackend(f ShardingBackendFactory) {
+	shardingBackendFactoryMu.Lock()
+	defer shardingBackendFactoryMu.Unlock()
+	shardingBackendFactory = f
+}
+
+func registeredShardingBackendFactory() ShardingBackendFactory {
+	shardingBackendFactoryMu.RLock()
+	defer shardingBackendFactoryMu.RUnlock()
+	return shardingBackendFactory
 }
 
 // enterpriseUnavailableError says what needed the commercial module, and how to add it.
