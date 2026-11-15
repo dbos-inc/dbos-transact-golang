@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 )
@@ -38,6 +40,11 @@ func holdsShardedSchema(ctx context.Context, config *pgx.ConnConfig) (bool, erro
 	var found bool
 	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
 		WHERE table_name = 'workflow_status' AND column_name = 'shard_key')`).Scan(&found); err != nil {
+		// CockroachDB accepts a connection to a database that does not exist and fails the first query instead.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.InvalidCatalogName {
+			return false, nil
+		}
 		return false, fmt.Errorf("failed to check whether the system database is sharded: %w", err)
 	}
 	return found, nil
