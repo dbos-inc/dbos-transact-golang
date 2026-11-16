@@ -52,6 +52,7 @@ const (
 	WorkflowStatusPending                     = models.WorkflowStatusPending                     // Workflow is running or ready to run
 	WorkflowStatusEnqueued                    = models.WorkflowStatusEnqueued                    // Workflow is queued and waiting for execution
 	WorkflowStatusDelayed                     = models.WorkflowStatusDelayed                     // Workflow is delayed and will transition to ENQUEUED after the delay expires
+	WorkflowStatusSuspended                   = models.WorkflowStatusSuspended                   // Workflow is parked in the database by a suspended Recv or Sleep, until a Send or its timer re-enqueues it
 	WorkflowStatusSuccess                     = models.WorkflowStatusSuccess                     // Workflow completed successfully
 	WorkflowStatusError                       = models.WorkflowStatusError                       // Workflow completed with an error
 	WorkflowStatusCancelled                   = models.WorkflowStatusCancelled                   // Workflow was cancelled (manually or due to timeout)
@@ -95,6 +96,7 @@ const (
 	ErrorCodeWorkflowPanic            = models.ErrorCodeWorkflowPanic            // Workflow function panicked; the panic was recovered and recorded as the workflow's error
 	ErrorCodeStepNondeterminism       = models.ErrorCodeStepNondeterminism       // The execution recorded a step ID it had already recorded differently (non-deterministic workflow)
 	ErrorCodeWorkflowIDInUse          = models.ErrorCodeWorkflowIDInUse          // Workflow ID already exists and the reuse policy rejects it
+	ErrorCodeWorkflowSuspended        = models.ErrorCodeWorkflowSuspended        // A suspending Recv or Sleep parked the workflow in the database; the workflow function must return this error
 )
 
 // The portable SQL surface DBOS writes through, one implementation per backend

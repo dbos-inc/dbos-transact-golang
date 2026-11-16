@@ -13,6 +13,7 @@ const (
 	WorkflowStatusPending                     WorkflowStatusType = "PENDING"
 	WorkflowStatusEnqueued                    WorkflowStatusType = "ENQUEUED"
 	WorkflowStatusDelayed                     WorkflowStatusType = "DELAYED"
+	WorkflowStatusSuspended                   WorkflowStatusType = "SUSPENDED"
 	WorkflowStatusSuccess                     WorkflowStatusType = "SUCCESS"
 	WorkflowStatusError                       WorkflowStatusType = "ERROR"
 	WorkflowStatusCancelled                   WorkflowStatusType = "CANCELLED"

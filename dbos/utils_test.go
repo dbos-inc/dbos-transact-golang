@@ -377,3 +377,31 @@ func startDuplicateExecution[P any, R any](t *testing.T, ctx Context, fn Workflo
 	}, input, workflowExecution{workflowID: workflowID, ownerXID: ownerXID})
 	return typedHandle[R](c, handle)
 }
+
+// insertSuspendedWorkflow inserts a workflow_status row parked as a suspended recv on
+// suspendKey (a suspended sleep when nil) until wakeAt, with an optional deadline.
+// Nothing runs it: no execution owns it and it is on no queue.
+func insertSuspendedWorkflow(t *testing.T, ctx Context, suspendKey *string, wakeAt int64, deadline *int64) string {
+	t.Helper()
+	c := ctx.(*dbosContext)
+	sysDB := c.systemDB.(*sysdb.SysDB)
+	workflowID := uuid.NewString()
+	now := time.Now().UnixMilli()
+	_, err := sysDB.Pool().Exec(context.Background(), sysDB.RenderSQL(`INSERT INTO %sworkflow_status (
+		workflow_uuid, status, name, created_at, updated_at, recovery_attempts, application_name,
+		suspend_key, delay_until_epoch_ms, workflow_deadline_epoch_ms
+	) VALUES ($1, $2, $3, $4, $4, 0, $5, $6, $7, $8)`, sysDB.Dialect().SchemaPrefix(sysDB.Schema())),
+		workflowID, WorkflowStatusSuspended, "suspended-workflow", now, c.config.AppName, suspendKey, wakeAt, deadline)
+	require.NoError(t, err)
+	return workflowID
+}
+
+// wakeTimeOf reads a workflow's delay_until_epoch_ms.
+func wakeTimeOf(t *testing.T, ctx Context, workflowID string) int64 {
+	t.Helper()
+	sysDB := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	var wakeAt int64
+	require.NoError(t, sysDB.Pool().QueryRow(context.Background(), sysDB.RenderSQL(
+		`SELECT delay_until_epoch_ms FROM %sworkflow_status WHERE workflow_uuid = $1`, sysDB.Dialect().SchemaPrefix(sysDB.Schema())), workflowID).Scan(&wakeAt))
+	return wakeAt
+}

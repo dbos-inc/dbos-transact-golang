@@ -463,4 +463,18 @@ func TestPgsqlClient(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, message, result)
 	})
+
+	t.Run("SendWakesASuspendedRecv", func(t *testing.T) {
+		topic, otherTopic := "suspended-topic", "other-topic"
+		farAway := time.Now().Add(24 * time.Hour).UnixMilli()
+		waiting := insertSuspendedWorkflow(t, serverCtx, &topic, farAway, nil)
+		waitingElsewhere := insertSuspendedWorkflow(t, serverCtx, &otherTopic, farAway, nil)
+		sleeping := insertSuspendedWorkflow(t, serverCtx, nil, farAway, nil)
+		for _, workflowID := range []string{waiting, waitingElsewhere, sleeping} {
+			require.NoError(t, callSendMessage(context.Background(), pool, schema, workflowID, "hello", &topic, nil))
+		}
+		assert.Zero(t, wakeTimeOf(t, serverCtx, waiting), "a send on the awaited topic makes the workflow due")
+		assert.Equal(t, farAway, wakeTimeOf(t, serverCtx, waitingElsewhere), "a send on another topic wakes nothing")
+		assert.Equal(t, farAway, wakeTimeOf(t, serverCtx, sleeping), "a send never wakes a suspended sleep")
+	})
 }

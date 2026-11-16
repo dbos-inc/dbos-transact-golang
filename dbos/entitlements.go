@@ -24,6 +24,8 @@ var autoUpgradeFeature = enterpriseFeature{entitlement: "autoUpgrade", descripti
 
 var shardingFeature = enterpriseFeature{entitlement: "sharding", description: "Using a sharded system database"}
 
+var suspendFeature = enterpriseFeature{entitlement: "suspendWorkflows", description: "Suspending workflows on recv and sleep"}
+
 const conductorFeature = "Connecting to DBOS Conductor"
 
 func enabledFeatures(config *Config) []enterpriseFeature {
@@ -34,6 +36,9 @@ func enabledFeatures(config *Config) []enterpriseFeature {
 	// A client runs no workflows, so it needs the module but no entitlement.
 	if config.Sharding && !config.isClient {
 		features = append(features, shardingFeature)
+	}
+	if config.SuspendMode {
+		features = append(features, suspendFeature)
 	}
 	return features
 }

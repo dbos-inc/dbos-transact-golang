@@ -253,6 +253,9 @@ func andKey(key string, args *[]any) string {
 	return fmt.Sprintf(" AND shard_key = $%d", len(*args))
 }
 
+// KeyClause is andKey for the commercial module.
+func KeyClause(key string, args *[]any) string { return andKey(key, args) }
+
 // keyColumn returns the shard key column for an INSERT's column list, or "".
 func keyColumn(key string) string {
 	if key == "" {

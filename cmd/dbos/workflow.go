@@ -83,7 +83,7 @@ func init() {
 	workflowListCmd.Flags().StringP("user", "u", "", "Retrieve workflows run by this user")
 	workflowListCmd.Flags().StringP("start-time", "s", "", "Retrieve workflows starting after this timestamp (ISO 8601 format)")
 	workflowListCmd.Flags().StringP("end-time", "e", "", "Retrieve workflows starting before this timestamp (ISO 8601 format)")
-	workflowListCmd.Flags().StringP("status", "S", "", "Retrieve workflows with this status (PENDING, SUCCESS, ERROR, ENQUEUED, CANCELLED, or MAX_RECOVERY_ATTEMPTS_EXCEEDED)")
+	workflowListCmd.Flags().StringP("status", "S", "", "Retrieve workflows with this status (PENDING, ENQUEUED, DELAYED, SUSPENDED, SUCCESS, ERROR, CANCELLED, or MAX_RECOVERY_ATTEMPTS_EXCEEDED)")
 	workflowListCmd.Flags().StringP("application-version", "v", "", "Retrieve workflows with this application version")
 	workflowListCmd.Flags().StringP("name", "n", "", "Retrieve workflows with this name")
 	workflowListCmd.Flags().BoolP("sort-desc", "d", false, "Sort the results in descending order (older first)")
@@ -142,6 +142,10 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 			statusType = dbos.WorkflowStatusError
 		case "ENQUEUED":
 			statusType = dbos.WorkflowStatusEnqueued
+		case "DELAYED":
+			statusType = dbos.WorkflowStatusDelayed
+		case "SUSPENDED":
+			statusType = dbos.WorkflowStatusSuspended
 		case "CANCELLED":
 			statusType = dbos.WorkflowStatusCancelled
 		case "MAX_RECOVERY_ATTEMPTS_EXCEEDED":

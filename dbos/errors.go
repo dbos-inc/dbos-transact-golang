@@ -46,4 +46,6 @@ var (
 	ErrStepNondeterminism = &Error{Code: ErrorCodeStepNondeterminism}
 	// ErrWorkflowIDInUse matches errors from starting a workflow under WorkflowIDReusePolicyReject with an ID that already exists.
 	ErrWorkflowIDInUse = &Error{Code: ErrorCodeWorkflowIDInUse}
+	// ErrWorkflowSuspended matches the error a suspending Recv or Sleep returns once the workflow is parked. The workflow function must return it.
+	ErrWorkflowSuspended = &Error{Code: ErrorCodeWorkflowSuspended}
 )

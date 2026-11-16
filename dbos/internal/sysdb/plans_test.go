@@ -23,6 +23,7 @@ type planNode struct {
 	RowsRemovedFilter float64    `json:"Rows Removed by Filter"`
 	SharedHitBlocks   float64    `json:"Shared Hit Blocks"`
 	SharedReadBlocks  float64    `json:"Shared Read Blocks"`
+	IndexName         string     `json:"Index Name"`
 	Plans             []planNode `json:"Plans"`
 }
 
@@ -178,5 +179,76 @@ func TestLatestApplicationVersionSqlite(t *testing.T) {
 		if latest.Name != tt.want {
 			t.Fatalf("owner %q: got %s, want %s", tt.owner, latest.Name, tt.want)
 		}
+	}
+}
+
+// TestSendWakeUpdateProbesThePrimaryKey mirrors the Python test: every send runs the
+// wake update, so planned with statistics that predate the parked rows it must probe
+// the primary key and not scan idx_workflow_status_suspended.
+func TestSendWakeUpdateProbesThePrimaryKey(t *testing.T) {
+	if os.Getenv("DBOS_TEST_BACKEND") == "sqlite" {
+		t.Skip("Postgres plan test")
+	}
+	databaseURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL")
+	if databaseURL == "" {
+		password := os.Getenv("PGPASSWORD")
+		if password == "" {
+			password = "dbos"
+		}
+		databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", url.QueryEscape(password))
+	}
+	const schema = "dbos_wake_plan_test"
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crdb := IsCockroachDB(conn.Conn())
+	conn.Release()
+	if crdb {
+		t.Skip("skipping on CockroachDB: the Postgres plan nodes this asserts on are not available")
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema)); err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Exec(ctx, fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema)) //nolint:errcheck
+	if err := RunMigrations(ctx, pool, schema, false, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
+	insert := fmt.Sprintf(`INSERT INTO %q.workflow_status (workflow_uuid, status, name, created_at, updated_at, suspend_key, delay_until_epoch_ms)
+		SELECT 'wake-plan-' || i, $1, 'wake_plan_probe', 1, 1, $2, $3 FROM generate_series($4::int, $5::int) AS i`, schema)
+	if _, err := pool.Exec(ctx, insert, models.WorkflowStatusPending, nil, nil, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Analyzed before the rows are parked, the planner takes the suspended index for empty.
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`ANALYZE %q.workflow_status`, schema)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, insert, models.WorkflowStatusSuspended, "approve", int64(1)<<62, 1, 2000); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &SysDB{pool: NewPgxPool(pool), dialect: PostgresDialect{}, schema: schema}
+	query, args, err := s.wakeReceiversQuery([]WorkflowSendRow{{DestinationID: "wake-plan-0", Topic: "approve"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plans []struct{ Plan planNode }
+	if err := pool.QueryRow(ctx, "EXPLAIN (FORMAT JSON) "+query, args...).Scan(&plans); err != nil {
+		t.Fatal(err)
+	}
+	var indexes []string
+	for _, node := range plans[0].Plan.nodes() {
+		if node.IndexName != "" {
+			indexes = append(indexes, node.IndexName)
+		}
+	}
+	if len(indexes) != 1 || indexes[0] != "workflow_status_pkey" {
+		t.Fatalf("the wake update reads %v, want only workflow_status_pkey", indexes)
 	}
 }

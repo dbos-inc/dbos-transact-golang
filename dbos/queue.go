@@ -721,6 +721,7 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 			}, sysdb.WithRetrierLogger(qr.logger)); err != nil {
 				qr.logger.Warn("Exception transitioning delayed workflows", "error", err)
 			}
+			ctx.transitionSuspendedWorkflows()
 		}
 
 		// Rebuild the listen set each tick so changes made via ListenQueues
