@@ -29,7 +29,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26.11"
+          go-version: "1.26.x"
+          check-latest: true   # the newest 1.26 patch, not the one cached on the runner
 
       - name: Download dependencies
         run: go mod download
