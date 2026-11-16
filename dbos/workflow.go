@@ -4028,14 +4028,13 @@ func (c *dbosContext) Recv(_ Context, topic string, timeout time.Duration, opts 
 		if err != nil {
 			return nil, err
 		}
-		if timeoutOccurred = !time.Now().Before(deadline); !timeoutOccurred {
-			parked, err := c.suspend.ParkRecv(c, SuspendRecvInput{WorkflowID: workflowID, OwnerXID: wfState.ownerXID, Topic: topic, WakeAt: deadline})
-			if err != nil {
-				return nil, err
-			}
-			if parked {
-				return nil, models.NewWorkflowSuspendedError(workflowID, &topic)
-			}
+		var parked bool
+		parked, timeoutOccurred, err = c.suspend.ParkRecv(c, SuspendRecvInput{WorkflowID: workflowID, OwnerXID: wfState.ownerXID, Topic: topic, WakeAt: deadline})
+		if err != nil {
+			return nil, err
+		}
+		if parked {
+			return nil, models.NewWorkflowSuspendedError(workflowID, &topic)
 		}
 	} else {
 		// Register as the receiver for this workflow/topic.
@@ -4993,10 +4992,14 @@ func (c *dbosContext) Sleep(_ Context, duration time.Duration, opts ...SleepOpti
 	remainingDuration := max(0, time.Until(time.UnixMilli(deadlineMs)))
 
 	if options.suspend && remainingDuration > minSuspendDuration {
-		if err := c.suspend.ParkSleep(c, SuspendSleepInput{WorkflowID: wfState.workflowID, OwnerXID: wfState.ownerXID, WakeAt: time.UnixMilli(deadlineMs)}); err != nil {
+		parked, remaining, err := c.suspend.ParkSleep(c, SuspendSleepInput{WorkflowID: wfState.workflowID, OwnerXID: wfState.ownerXID, WakeAt: time.UnixMilli(deadlineMs), MinDuration: minSuspendDuration})
+		if err != nil {
 			return 0, err
 		}
-		return 0, models.NewWorkflowSuspendedError(wfState.workflowID, nil)
+		if parked {
+			return 0, models.NewWorkflowSuspendedError(wfState.workflowID, nil)
+		}
+		remainingDuration = remaining
 	}
 
 	// Sleep for the remaining duration, but wake early if the context is cancelled.

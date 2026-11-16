@@ -17,10 +17,12 @@ import (
 // fakeSuspendBackend stands in for the enterprise backend.
 type fakeSuspendBackend struct{}
 
-func (fakeSuspendBackend) ParkRecv(context.Context, SuspendRecvInput) (bool, error) {
-	return false, nil
+func (fakeSuspendBackend) ParkRecv(context.Context, SuspendRecvInput) (bool, bool, error) {
+	return false, false, nil
 }
-func (fakeSuspendBackend) ParkSleep(context.Context, SuspendSleepInput) error { return nil }
+func (fakeSuspendBackend) ParkSleep(context.Context, SuspendSleepInput) (bool, time.Duration, error) {
+	return true, 0, nil
+}
 func (fakeSuspendBackend) TransitionSuspendedWorkflows(context.Context) error { return nil }
 
 // registerSuspendBackend registers factory until the test ends.

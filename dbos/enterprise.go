@@ -137,14 +137,15 @@ type SuspendRecvInput struct {
 }
 
 type SuspendSleepInput struct {
-	WorkflowID string
-	OwnerXID   string    // The execution's ownership token: only the execution owning the workflow parks it
-	WakeAt     time.Time // The end of the sleep, when the workflow is re-enqueued
+	WorkflowID  string
+	OwnerXID    string        // The execution's ownership token: only the execution owning the workflow parks it
+	WakeAt      time.Time     // The end of the sleep, when the workflow is re-enqueued
+	MinDuration time.Duration // A sleep with this long or less left is not parked
 }
 
 type SuspendBackend interface {
-	ParkRecv(ctx context.Context, input SuspendRecvInput) (bool, error)
-	ParkSleep(ctx context.Context, input SuspendSleepInput) error
+	ParkRecv(ctx context.Context, input SuspendRecvInput) (parked, timedOut bool, err error)
+	ParkSleep(ctx context.Context, input SuspendSleepInput) (parked bool, remaining time.Duration, err error)
 	TransitionSuspendedWorkflows(ctx context.Context) error
 }
 
