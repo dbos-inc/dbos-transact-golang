@@ -2396,51 +2396,32 @@ type CancelWorkflowsDBInput struct {
 	OwnerXID       string
 }
 
-// CancelWorkflows cancels the given workflows in a single round-trip. Workflows that
-// are already in a terminal state (SUCCESS, ERROR, CANCELLED) are left untouched.
-// Returns the subset of input IDs that existed in workflow_status (including terminal
-// ones, which are considered existing even though they are not updated).
+// CancelWorkflows cancels the given workflows and, with CancelChildren, all their
+// descendants, one level at a time. Workflows that are already in a terminal state
+// (SUCCESS, ERROR, CANCELLED) are left untouched. Returns the subset of input IDs
+// that existed in workflow_status (including terminal ones, which are considered
+// existing even though they are not updated).
 func (s *SysDB) CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInput) ([]string, error) {
 	if len(input.WorkflowIDs) == 0 {
 		return nil, nil
 	}
-	// In a sharded database, we run one cancel query per shard key
-	if s.sharded {
-		var found []string
-		err := s.applyByLevel(ctx, input.WorkflowIDs, input.CancelChildren, "CancelWorkflows", func(ctx context.Context, key string, ids []string, root bool) error {
-			cancelled, err := s.cancelWorkflowIDs(ctx, nil, ids, input.OwnerXID, key)
-			if root {
-				found = cancelled
-			}
-			return err
-		})
-		return found, err
+	tx, q := input.Tx, Querier(s.pool)
+	switch {
+	case s.sharded:
+		// In a sharded database, we run one cancel query per shard key, outside any caller transaction
+		tx = nil
+	case tx != nil:
+		q = tx
 	}
-	for _, id := range input.WorkflowIDs {
-		if err := s.rejectShardKey(ctx, id, ""); err != nil {
-			return nil, err
+	var found []string
+	err := s.applyByLevel(ctx, q, input.WorkflowIDs, input.CancelChildren, "CancelWorkflows", func(ctx context.Context, key string, ids []string, root bool) error {
+		cancelled, err := s.cancelWorkflowIDs(ctx, tx, ids, input.OwnerXID, key)
+		if root {
+			found = cancelled
 		}
-	}
-
-	workflowIDs := make([]string, len(input.WorkflowIDs))
-	copy(workflowIDs, input.WorkflowIDs)
-
-	if input.CancelChildren {
-		for _, workflowID := range workflowIDs {
-			children, err := s.GetWorkflowChildren(ctx, GetWorkflowChildrenDBInput{
-				WorkflowID: workflowID,
-				Tx:         input.Tx,
-			})
-			if err != nil {
-				return nil, err
-			}
-			for _, child := range children {
-				workflowIDs = append(workflowIDs, child.ID)
-			}
-		}
-	}
-
-	return s.cancelWorkflowIDs(ctx, input.Tx, workflowIDs, input.OwnerXID, "")
+		return err
+	})
+	return found, err
 }
 
 func (s *SysDB) cancelWorkflowIDs(ctx context.Context, tx Tx, workflowIDs []string, ownerXID, key string) ([]string, error) {
@@ -2585,7 +2566,7 @@ func (s *SysDB) DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInpu
 		if len(input.WorkflowIDs) == 0 {
 			return nil
 		}
-		return s.applyByLevel(ctx, input.WorkflowIDs, input.DeleteChildren, "DeleteWorkflows", func(ctx context.Context, key string, ids []string, _ bool) error {
+		return s.applyByLevel(ctx, s.pool, input.WorkflowIDs, input.DeleteChildren, "DeleteWorkflows", func(ctx context.Context, key string, ids []string, _ bool) error {
 			tx, err := s.pool.BeginTx(ctx, TxOptions{})
 			if err != nil {
 				return fmt.Errorf("failed to begin transaction for deleteWorkflows: %w", err)
@@ -2699,9 +2680,10 @@ func (s *SysDB) singleKeyOf(ctx context.Context, workflowIDs []string, operation
 
 // applyByLevel applies to the listed workflows, which share one shard key, then with
 // descend to their descendants, which may live under any key: each level is applied
-// before its children are read, so a running parent is stopped before the walk looks
-// for children it could still add. Each key's workflows of a level are applied together.
-func (s *SysDB) applyByLevel(ctx context.Context, workflowIDs []string, descend bool, operation string, apply func(ctx context.Context, key string, ids []string, root bool) error) error {
+// before its children are read through q, so a running parent is stopped before the
+// walk looks for children it could still add. Each key's workflows of a level are
+// applied together.
+func (s *SysDB) applyByLevel(ctx context.Context, q Querier, workflowIDs []string, descend bool, operation string, apply func(ctx context.Context, key string, ids []string, root bool) error) error {
 	rootKey, err := s.singleKeyOf(ctx, workflowIDs, operation)
 	if err != nil {
 		return err
@@ -2734,7 +2716,7 @@ func (s *SysDB) applyByLevel(ctx context.Context, workflowIDs []string, descend 
 			return nil
 		}
 		root = false
-		children, err := s.childrenOf(ctx, level)
+		children, err := s.childrenOf(ctx, q, level)
 		if err != nil {
 			return err
 		}
@@ -2749,11 +2731,54 @@ func (s *SysDB) applyByLevel(ctx context.Context, workflowIDs []string, descend 
 	return nil
 }
 
-// childrenOf lists the direct children of these workflows. A child may live under any
-// key, so this is a keyless read matched on each parent's key.
-func (s *SysDB) childrenOf(ctx context.Context, parents []keyedWorkflow) ([]keyedWorkflow, error) {
+// childrenOf lists the direct children of these workflows through q. On a sharded
+// database a child may live under any key, so the read is keyless and matches each
+// parent's key.
+func (s *SysDB) childrenOf(ctx context.Context, q Querier, parents []keyedWorkflow) ([]keyedWorkflow, error) {
 	if len(parents) == 0 {
 		return nil, nil
+	}
+	query, args, err := s.childrenQuery(parents)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list child workflows: %w", err)
+	}
+	rows, err := q.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list child workflows: %w", err)
+	}
+	defer rows.Close()
+	var children []keyedWorkflow
+	for rows.Next() {
+		var child keyedWorkflow
+		dest := []any{&child.id}
+		if s.sharded {
+			dest = append(dest, &child.key)
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, fmt.Errorf("failed to scan child workflow: %w", err)
+		}
+		children = append(children, child)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read child workflows: %w", err)
+	}
+	return children, nil
+}
+
+// childrenQuery is the query of childrenOf: on a sharded database it also reads each
+// child's key.
+func (s *SysDB) childrenQuery(parents []keyedWorkflow) (string, []any, error) {
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
+	if !s.sharded {
+		ids := make([]string, len(parents))
+		for i, p := range parents {
+			ids[i] = p.id
+		}
+		encodedIDs, err := encodeArrayParam(s.dialect, ids)
+		if err != nil {
+			return "", nil, err
+		}
+		return s.RenderSQL(`SELECT workflow_uuid FROM %sworkflow_status WHERE %s`, schemaPrefix, dialectAnyClause(s.dialect, "parent_workflow_id", 1)), []any{encodedIDs}, nil
 	}
 	byKey := make(map[string][]string)
 	keys := make([]string, 0)
@@ -2769,24 +2794,7 @@ func (s *SysDB) childrenOf(ctx context.Context, parents []keyedWorkflow) ([]keye
 		args = append(args, key, byKey[key])
 		ors = append(ors, fmt.Sprintf("(parent_shard_key = $%d AND parent_workflow_id = ANY($%d))", len(args)-1, len(args)))
 	}
-	query := s.RenderSQL(`SELECT workflow_uuid, shard_key FROM %sworkflow_status WHERE `+strings.Join(ors, " OR "), s.dialect.SchemaPrefix(s.schema))
-	rows, err := s.pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list child workflows: %w", err)
-	}
-	defer rows.Close()
-	var children []keyedWorkflow
-	for rows.Next() {
-		var child keyedWorkflow
-		if err := rows.Scan(&child.id, &child.key); err != nil {
-			return nil, fmt.Errorf("failed to scan child workflow: %w", err)
-		}
-		children = append(children, child)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read child workflows: %w", err)
-	}
-	return children, nil
+	return s.RenderSQL(`SELECT workflow_uuid, shard_key FROM %sworkflow_status WHERE `+strings.Join(ors, " OR "), schemaPrefix), args, nil
 }
 
 type GetWorkflowChildrenDBInput struct {
@@ -2847,7 +2855,7 @@ func (s *SysDB) shardedWorkflowChildren(ctx context.Context, workflowID string) 
 	visited := map[keyedWorkflow]struct{}{level[0]: {}}
 	var children []models.WorkflowStatus
 	for len(level) > 0 {
-		found, err := s.childrenOf(ctx, level)
+		found, err := s.childrenOf(ctx, s.pool, level)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get children of workflow %s: %w", workflowID, err)
 		}
