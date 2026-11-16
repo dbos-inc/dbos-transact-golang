@@ -35,6 +35,8 @@ type ListWorkflowsInput struct {
 	ScheduleName     []string
 	ApplicationName  []string
 	IsDebounced      *bool
+	ShardKeys        []string
+	ParentShardKeys  []string
 }
 
 // Docs for the exported option and input types below live on their public
@@ -162,6 +164,7 @@ type StepInfo struct {
 	Output          any       `json:"output,omitempty"`            // The output returned by the step (if any)
 	Error           error     `json:"error,omitempty"`             // The error returned by the step (if any)
 	ChildWorkflowID string    `json:"child_workflow_id,omitempty"` // The ID of a child workflow spawned by this step (if applicable)
+	ChildShardKey   string    `json:"child_shard_key,omitempty"`   // That child workflow's shard key; empty on an unsharded system database
 	StartedAt       time.Time `json:"started_at,omitzero"`         // When the step execution started
 	CompletedAt     time.Time `json:"completed_at,omitzero"`       // When the step execution completed
 }

@@ -17,6 +17,7 @@ type migrateOptions struct {
 	schema          string
 	applicationRole string
 	logger          *slog.Logger
+	sharding        bool
 }
 
 // MigrateOption configures Migrate.
@@ -37,6 +38,12 @@ func WithMigrateApplicationRole(role string) MigrateOption {
 // WithMigrateLogger sets the logger Migrate reports progress to (default slog.Default()).
 func WithMigrateLogger(logger *slog.Logger) MigrateOption {
 	return func(o *migrateOptions) { o.logger = logger }
+}
+
+// WithMigrateSharding migrates a sharded system database, which needs
+// go.dbos.dev/dbos-enterprise-go (see Config.Sharding).
+func WithMigrateSharding() MigrateOption {
+	return func(o *migrateOptions) { o.sharding = true }
 }
 
 // Migrate creates or migrates the DBOS system database at databaseURL without
@@ -67,6 +74,12 @@ func Migrate(ctx context.Context, databaseURL string, opts ...MigrateOption) err
 	if options.applicationRole != "" && dialect == DialectSQLite {
 		return errors.New("an application role is not supported for SQLite")
 	}
+	var shardingFactory sysdb.ShardingBackendFactory
+	if options.sharding {
+		if shardingFactory = registeredShardingBackendFactory(); shardingFactory == nil {
+			return enterpriseUnavailableError(shardingFeature.description)
+		}
+	}
 
 	// A system database handle creates the database and runs the migrations;
 	// it is never launched, so no listener or notifier starts.
@@ -75,6 +88,7 @@ func Migrate(ctx context.Context, databaseURL string, opts ...MigrateOption) err
 		DatabaseSchema:         options.schema,
 		Logger:                 options.logger,
 		IdleTransactionTimeout: sysdb.DefaultIdleTransactionTimeout,
+		Sharding:               shardingFactory,
 	})
 	if err != nil {
 		return err

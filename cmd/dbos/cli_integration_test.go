@@ -1063,6 +1063,56 @@ func buildCLI(t *testing.T) string {
 	return absPath
 }
 
+// TestResetRefusesShardedDatabase verifies `dbos reset` leaves a database holding a
+// sharded system schema alone.
+func TestResetRefusesShardedDatabase(t *testing.T) {
+	if os.Getenv("ISCRDB") == "true" {
+		t.Skip("a sharded system database is Postgres")
+	}
+	cliPath := buildCLI(t)
+	t.Cleanup(func() { os.Remove(cliPath) })
+
+	const dbName = "dbos_cli_sharded_reset"
+	bg := context.Background()
+	user, password, host, port, _, sslmode := getDatabaseConfig("postgres")
+	databaseURL := func(name string) string {
+		dsn := &url.URL{Scheme: "postgres", Host: net.JoinHostPort(host, port), Path: "/" + name, RawQuery: "sslmode=" + sslmode}
+		dsn.User = url.UserPassword(user, password)
+		return dsn.String()
+	}
+	admin, err := pgx.Connect(bg, databaseURL("postgres"))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = admin.Exec(bg, "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)")
+		_ = admin.Close(bg)
+	})
+	_, err = admin.Exec(bg, "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)")
+	require.NoError(t, err)
+	_, err = admin.Exec(bg, "CREATE DATABASE "+dbName)
+	require.NoError(t, err)
+
+	holdsMarker := func() bool {
+		conn, err := pgx.Connect(bg, databaseURL(dbName))
+		require.NoError(t, err)
+		defer conn.Close(bg)
+		var found bool
+		require.NoError(t, conn.QueryRow(bg, "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'tenants' AND table_name = 'workflow_status')").Scan(&found))
+		return found
+	}
+	conn, err := pgx.Connect(bg, databaseURL(dbName))
+	require.NoError(t, err)
+	_, err = conn.Exec(bg, "CREATE SCHEMA tenants")
+	require.NoError(t, err)
+	_, err = conn.Exec(bg, "CREATE TABLE tenants.workflow_status (shard_key TEXT NOT NULL, workflow_uuid TEXT NOT NULL)")
+	require.NoError(t, err)
+	require.NoError(t, conn.Close(bg))
+
+	output, err := exec.Command(cliPath, "reset", "-y", "--db-url", databaseURL(dbName)).CombinedOutput()
+	require.Error(t, err, "reset should refuse a sharded system database: %s", string(output))
+	assert.Contains(t, string(output), "resetting a sharded system database is not supported")
+	assert.True(t, holdsMarker(), "the sharded schema should survive the refused reset")
+}
+
 // TestMigratePrintFlags verifies `dbos migrate --print-migrations` and
 // `--print-user-role` print clean SQL to stdout without connecting to a
 // database. The DB URL points at an unreachable host so any connection

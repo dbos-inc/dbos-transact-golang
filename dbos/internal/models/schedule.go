@@ -27,6 +27,7 @@ type WorkflowSchedule struct {
 	CronTimezone      string          `json:"cron_timezone,omitempty"`
 	QueueName         string          `json:"queue_name,omitempty"`
 	ApplicationName   string          `json:"application_name,omitempty"`
+	ShardKey          string          `json:"shard_key,omitempty"`
 }
 
 // ScheduledWorkflowInput's docs live on its public alias in dbos/aliases.go.

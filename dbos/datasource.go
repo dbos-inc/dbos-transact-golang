@@ -308,6 +308,13 @@ func (ds *DataSource) deleteCheckpoints(ctx context.Context, workflowID string, 
 
 var errCompletionRecorded = errors.New("transaction completion already recorded")
 
+// checkpointWorkflowID is the ID a step's checkpoint row carries in a data source: the
+// workflow's, prefixed by its shard key on a sharded system database ("<len>:<key>:<id>",
+// as every DBOS SDK writes it), since a workflow ID is unique only within its key.
+func checkpointWorkflowID(state *workflowState) string {
+	return sysdb.KeyedID(state.shardKey, state.workflowID)
+}
+
 // recordCompletion writes the durability row for (workflowID, stepID).
 // A duplicate row surfaces as errCompletionRecorded.
 func (ds *DataSource) recordCompletion(ctx context.Context, q Querier, workflowID string, stepID int, output, errStr *string, serialization string) error {
@@ -452,7 +459,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 	// between txn1 and txn2)? Replay the stored output and apply txn2 without
 	// re-running fn.
 	completion, err := sysdb.RetryWithResult(c, func() (*completionRecord, error) {
-		return ds.checkCompletion(uncancellableCtx, ds.pool, stepState.workflowID, stepState.stepID)
+		return ds.checkCompletion(uncancellableCtx, ds.pool, checkpointWorkflowID(stepState), stepState.stepID)
 	}, sysdb.WithRetrierLogger(c.logger))
 	if err != nil {
 		return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking transaction completion: %w", err))
@@ -491,7 +498,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 			return nil, err
 		}
 		completion, err := sysdb.RetryWithResult(c, func() (*completionRecord, error) {
-			return ds.checkCompletion(uncancellableCtx, ds.pool, stepState.workflowID, stepState.stepID)
+			return ds.checkCompletion(uncancellableCtx, ds.pool, checkpointWorkflowID(stepState), stepState.stepID)
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
 			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("checking transaction completion: %w", err))
@@ -529,7 +536,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 		if serErr != nil {
 			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("failed to serialize transaction output: %w", serErr))
 		}
-		if recErr := ds.recordCompletion(uncancellableCtx, tx, stepState.workflowID, stepState.stepID, encoded, nil, ser.Name()); recErr != nil {
+		if recErr := ds.recordCompletion(uncancellableCtx, tx, checkpointWorkflowID(stepState), stepState.stepID, encoded, nil, ser.Name()); recErr != nil {
 			return nil, models.NewStepExecutionError(stepState.workflowID, stepOpts.stepName, fmt.Errorf("recording transaction completion: %w", recErr))
 		}
 		if err := stillOwns(); err != nil {
@@ -592,7 +599,7 @@ func (c *dbosContext) RunAsTransaction(dbosCtx Context, ds *DataSource, fn TxnFu
 				return err
 			}
 			defer tx.Rollback(uncancellableCtx)
-			if err := ds.recordCompletion(uncancellableCtx, tx, stepState.workflowID, stepState.stepID, nil, serializedErr, ser.Name()); err != nil {
+			if err := ds.recordCompletion(uncancellableCtx, tx, checkpointWorkflowID(stepState), stepState.stepID, nil, serializedErr, ser.Name()); err != nil {
 				return err
 			}
 			// Holding this step's row, so a later owner's insert waits on our commit.

@@ -85,6 +85,11 @@ func (c *dbosContext) startAutoUpgrade() error {
 	if len(names) == 0 {
 		return nil
 	}
+	if c.systemDB.Sharded() {
+		// Its queries are not keyed by shard, so it does not run on a sharded database.
+		c.logger.Warn("Auto-upgrade is disabled: it is not supported on a sharded system database")
+		return nil
+	}
 	// Entitlement check here if it wasn't done when creating the context.
 	if !c.config.AutoUpgrade {
 		if err := requireEnterprise([]enterpriseFeature{autoUpgradeFeature}, c.config.TransactEnterpriseKey, c.config.ConductorAPIKey, c.config.ConductorURL); err != nil {

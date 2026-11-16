@@ -21,7 +21,7 @@ type fakeStreamDB struct {
 
 // StreamWakeChannel mirrors the pre-refactor behavior for fakes: no wake
 // signal (readStream falls back to its bounded wait).
-func (f *fakeStreamDB) StreamWakeChannel(_, _ string) (chan struct{}, func()) {
+func (f *fakeStreamDB) StreamWakeChannel(_ context.Context, _, _ string) (chan struct{}, func()) {
 	return nil, func() {}
 }
 

@@ -379,11 +379,11 @@ func TestDebouncer(t *testing.T) {
 		// recovers to completion like any queued workflow.
 		setWorkflowStatusPending(t, dbosCtx, handle1.GetWorkflowID())
 
-		reenqueuedIDs, err := dbosCtxInstance.systemDB.ReenqueueForRecovery(context.Background(), []string{dbosCtxInstance.executorID}, dbosCtxInstance.applicationVersion, models.InternalQueueName)
+		reenqueued, err := dbosCtxInstance.systemDB.ReenqueueForRecovery(context.Background(), []string{dbosCtxInstance.executorID}, dbosCtxInstance.applicationVersion, models.InternalQueueName)
 		require.NoError(t, err, "failed to re-enqueue workflow for recovery")
-		require.Contains(t, reenqueuedIDs, handle1.GetWorkflowID(), "should have re-enqueued workflow")
+		require.Contains(t, reenqueued, sysdb.RecoveredWorkflow{ID: handle1.GetWorkflowID()}, "should have re-enqueued workflow")
 
-		recoveredHandle := newWorkflowPollingHandle[any](dbosCtx, handle1.GetWorkflowID())
+		recoveredHandle := newWorkflowPollingHandle[any](dbosCtx, handle1.GetWorkflowID(), "")
 		_, err = recoveredHandle.GetResult()
 		require.NoError(t, err, "shouldn't have errored")
 	})
@@ -846,7 +846,7 @@ func TestDebouncerWorkflowTimeout(t *testing.T) {
 	assert.True(t, status.Deadline.IsZero(), "no absolute deadline should be set on the debounced workflow")
 
 	// Poll from the parent context: timeoutCtx expires before the workflow ends.
-	pollingHandle := newWorkflowPollingHandle[string](dbosCtx, handle.GetWorkflowID())
+	pollingHandle := newWorkflowPollingHandle[string](dbosCtx, handle.GetWorkflowID(), "")
 	_, err = pollingHandle.GetResult()
 	require.Error(t, err, "the debounced workflow should be cancelled by its execution timeout")
 	dbosErr, ok := err.(*Error)

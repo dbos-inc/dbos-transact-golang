@@ -69,6 +69,7 @@ type Config struct {
 	SystemDBIdleTransactionTimeout time.Duration   // Postgres idle_in_transaction_session_timeout for the connections DBOS creates (defaults to 1 minute; negative leaves the server setting)
 	NotificationCoalesceInterval   time.Duration   // Controls how often stream-write and set-event notifications are batched
 	SkipMigrations                 bool            // Verify the system database schema on launch instead of creating and migrating it
+	Sharding                       bool            // Use a sharded system database, a Transact Enterprise feature: every workflow lives under an explicit shard key (see WithShardKey)
 	namelessOwner                  bool            // Act for no specific application: write unclaimed rows, matches all. Used by clients without an AppName.
 	isClient                       bool            // Client handle: runs no workflows, so enqueues leave the version unset by default.
 }
@@ -131,6 +132,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		SystemDBStartupTimeout:         inputConfig.SystemDBStartupTimeout,
 		SystemDBIdleTransactionTimeout: inputConfig.SystemDBIdleTransactionTimeout,
 		NotificationCoalesceInterval:   inputConfig.NotificationCoalesceInterval,
+		Sharding:                       inputConfig.Sharding,
 		namelessOwner:                  inputConfig.namelessOwner,
 		isClient:                       inputConfig.isClient,
 	}
@@ -244,6 +246,8 @@ type Client interface {
 	GetWorkflowAggregates(_ Client, input GetWorkflowAggregatesInput) ([]WorkflowAggregateRow, error)                        // Aggregate counts of workflows by one or more grouping columns
 	GetStepAggregates(_ Client, input GetStepAggregatesInput) ([]StepAggregateRow, error)                                    // Aggregate counts/durations of steps by function name and/or status
 	DeleteWorkflows(_ Client, workflowIDs []string, opts ...DeleteWorkflowOption) error                                      // Delete workflows and all their associated data
+	BindShardKeys(_ Client, keys map[string]string) Client                                                                   // Bind workflow IDs to their shard keys, for the operations run on the returned copy (sharded only)
+	BindShardKey(_ Client, workflowID, key string) Client                                                                    // Bind one workflow ID to its shard key, for the operations run on the returned copy (sharded only)
 
 	// Queue management
 	RegisterQueue(_ Client, name string, options ...QueueOption) (Queue, error) // Register and persist a database-backed queue
@@ -299,6 +303,7 @@ type Context interface {
 	GetWorkflowID() (string, error)                                                                         // Get the current workflow ID (only available within workflows)
 	GetStepID() (int, error)                                                                                // Get the current step ID (only available within workflows)
 	GetAuthenticatedUser() (string, error)                                                                  // Get the authenticated user of the current workflow, empty if none (only available within workflows)
+	GetShardKey() (string, error)                                                                           // Get the shard key of the current workflow, empty if unsharded (only available within workflows)
 
 	// Registration
 	ListRegisteredWorkflows(_ Context) []WorkflowRegistryEntry // List workflows registered in this process
@@ -740,8 +745,14 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		if err := requireEnterprise(features, config.TransactEnterpriseKey, config.ConductorAPIKey, inputConfig.ConductorURL); err != nil {
 			return nil, err
 		}
-		if registeredAutoUpgradeFactory() == nil {
+		if config.AutoUpgrade && registeredAutoUpgradeFactory() == nil {
 			return nil, enterpriseUnavailableError(autoUpgradeFeature.description)
+		}
+	}
+	var shardingFactory sysdb.ShardingBackendFactory
+	if config.Sharding {
+		if shardingFactory = registeredShardingBackendFactory(); shardingFactory == nil {
+			return nil, enterpriseUnavailableError(shardingFeature.description)
 		}
 	}
 
@@ -760,6 +771,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		ConnectionAppName:            config.AppName,
 		IdleTransactionTimeout:       config.SystemDBIdleTransactionTimeout,
 		NotificationCoalesceInterval: config.NotificationCoalesceInterval,
+		Sharding:                     shardingFactory,
 		EncodeScheduledInput: func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error) {
 			ser := resolveEncoder(ctx)
 			encoded, err := ser.Encode(ScheduledWorkflowInput{
@@ -818,6 +830,7 @@ type ClientConfig struct {
 	Serializer                     Serializer[any] // Optional custom serializer (defaults to JSON)
 	SystemDBStartupTimeout         time.Duration   // Maximum time for system-database connection and schema verification (defaults to 2 minutes)
 	SystemDBIdleTransactionTimeout time.Duration   // Postgres idle_in_transaction_session_timeout for the connections the client creates (defaults to 1 minute; negative leaves the server setting)
+	Sharding                       bool            // Connect to a sharded system database, which needs go.dbos.dev/dbos-enterprise-go (see Config.Sharding)
 }
 
 // NewClient creates a new DBOS client with the provided configuration.
@@ -851,6 +864,7 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 		Serializer:                     config.Serializer,
 		SystemDBStartupTimeout:         config.SystemDBStartupTimeout,
 		SystemDBIdleTransactionTimeout: config.SystemDBIdleTransactionTimeout,
+		Sharding:                       config.Sharding,
 		SkipMigrations:                 true, // Clients never own the schema
 		namelessOwner:                  config.AppName == "",
 		isClient:                       true,
