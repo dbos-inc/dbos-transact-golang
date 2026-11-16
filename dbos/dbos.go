@@ -235,7 +235,7 @@ type Client interface {
 	// Workflow management
 	RetrieveWorkflow(_ Client, workflowID string) (WorkflowHandle[any], error)                                               // Get a handle to an existing workflow
 	CancelWorkflow(_ Client, workflowID string, opts ...CancelWorkflowOption) error                                          // Cancel a workflow by setting its status to CANCELLED
-	CancelWorkflows(_ Client, workflowIDs []string, opts ...CancelWorkflowOption) error                                      // Cancel multiple workflows in a single DB round-trip
+	CancelWorkflows(_ Client, workflowIDs []string, opts ...CancelWorkflowOption) error                                      // Cancel multiple workflows, and with WithCancelChildren their descendants
 	SetWorkflowAttributes(_ Client, workflowID string, attributes map[string]any, opts ...SetWorkflowAttributesOption) error // Replace attributes (nil clears them), or shallow-merge with WithMergeAttributes
 	SetWorkflowDelay(_ Client, workflowID string, opts ...SetWorkflowDelayOption) error                                      // Set or update the delay on a DELAYED workflow
 	ResumeWorkflow(_ Client, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error)                   // Resume a cancelled workflow
