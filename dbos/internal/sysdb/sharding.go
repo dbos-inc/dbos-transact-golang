@@ -56,7 +56,7 @@ var ErrShardedSchema = errors.New("sharded system schema")
 
 func shardedSchemaError(schema string) error {
 	return fmt.Errorf("%w: the DBOS system schema %s is sharded. Enable sharding to use it: set Sharding in "+
-		"dbos.Config, or in dbos.ClientConfig", ErrShardedSchema, schema)
+		"dbos.Config or dbos.ClientConfig, or pass dbos.WithMigrateSharding to dbos.Migrate", ErrShardedSchema, schema)
 }
 
 // holdsShardedSchema reports whether schema's workflow_status has a shard_key column.

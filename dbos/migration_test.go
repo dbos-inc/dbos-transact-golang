@@ -599,6 +599,14 @@ func TestMigrate(t *testing.T) {
 	assert.Equal(t, "migrated", result)
 }
 
+// TestMigrateShardingNeedsTheEnterpriseModule: core's tests link no sharding backend.
+func TestMigrateShardingNeedsTheEnterpriseModule(t *testing.T) {
+	err := Migrate(context.Background(), getDatabaseURL(), WithMigrateSharding())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Using a sharded system database requires go.dbos.dev/dbos-enterprise-go")
+	assert.Contains(t, err.Error(), `import _ "go.dbos.dev/dbos-enterprise-go"`)
+}
+
 // TestMigrateSqlite migrates a sqlite file that SkipMigrations then accepts.
 func TestMigrateSqlite(t *testing.T) {
 	bg := context.Background()

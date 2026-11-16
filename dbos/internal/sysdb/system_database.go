@@ -113,7 +113,7 @@ type SystemDatabase interface {
 	// Queues
 	SetWorkflowDelay(ctx context.Context, input SetWorkflowDelayDBInput) error
 	TransitionDelayedWorkflows(ctx context.Context) error
-	CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]string, error)
+	CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]TimedOutWorkflow, error)
 	DebounceDelayedWorkflow(ctx context.Context, input DebounceDelayedWorkflowDBInput) (*DebounceResult, error)
 	DequeueWorkflows(ctx context.Context, input DequeueWorkflowsInput) ([]string, error)
 	DeadLetterWorkflows(ctx context.Context, workflowIDs []string, minAttempts int) error
@@ -4744,13 +4744,14 @@ func (s *SysDB) checkpointName(ctx context.Context, q Querier, input PatchDBInpu
 	return functionName, q.QueryRow(ctx, query, args...).Scan(&functionName)
 }
 
-func (s *SysDB) checkpointAtOrAfter(ctx context.Context, q Querier, input PatchDBInput) (int, string, error) {
+func (s *SysDB) checkpointAtOrAfter(ctx context.Context, q Querier, input PatchDBInput, key string) (int, string, error) {
 	var functionID int
 	var functionName string
+	args := []any{input.WorkflowID, input.StepID}
 	query := s.RenderSQL(`SELECT function_id, function_name FROM %soperation_outputs
-		WHERE workflow_uuid = $1 AND function_id >= $2
+		WHERE workflow_uuid = $1 AND function_id >= $2`+andKey(key, &args)+`
 		ORDER BY function_id LIMIT 1`, s.dialect.SchemaPrefix(s.schema))
-	err := q.QueryRow(ctx, query, input.WorkflowID, input.StepID).Scan(&functionID, &functionName)
+	err := q.QueryRow(ctx, query, args...).Scan(&functionID, &functionName)
 	return functionID, functionName, err
 }
 
@@ -4761,22 +4762,22 @@ func (s *SysDB) checkpointAtOrAfter(ctx context.Context, q Querier, input PatchD
 // execution being replayed and say so. Otherwise, we return "false", so the higher level API
 // knows we are dealing with an older version of the code, and skips the patch step.
 func (s *SysDB) Patch(ctx context.Context, input PatchDBInput) (bool, error) {
+	key, err := s.ownKeyOf(ctx, input.WorkflowID)
+	if err != nil {
+		return false, err
+	}
 	tx, err := s.pool.BeginTx(ctx, TxOptions{})
 	if err != nil {
 		return false, fmt.Errorf("failed to begin patch transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	functionID, functionName, err := s.checkpointAtOrAfter(ctx, tx, input)
+	functionID, functionName, err := s.checkpointAtOrAfter(ctx, tx, input, key)
 	if err != nil {
 		// No result means this is a new workflow, or an existing workflow that has not reached this step yet
 		// Insert the patch marker and return true
 		if errors.Is(err, pgx.ErrNoRows) {
-			if err := s.checkOwner(ctx, tx, input.WorkflowID, input.OwnerXID); err != nil {
-				return false, err
-			}
-			key, err := s.ownKeyOf(ctx, input.WorkflowID)
-			if err != nil {
+			if err := s.checkOwner(ctx, tx, input.WorkflowID, input.OwnerXID, key); err != nil {
 				return false, err
 			}
 			args := []any{input.WorkflowID, input.StepID, input.PatchName}
@@ -5697,9 +5698,15 @@ type CancelTimedOutWorkflowsDBInput struct {
 	Limit int
 }
 
+// TimedOutWorkflow is a workflow CancelTimedOutWorkflows cancelled.
+type TimedOutWorkflow struct {
+	ID       string
+	ShardKey string // empty on an unsharded system database
+}
+
 // CancelTimedOutWorkflows cancels up to Limit of this application's active workflows whose
-// deadline has passed, oldest deadline first, and returns their IDs.
-func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]string, error) {
+// deadline has passed, oldest deadline first, and returns them.
+func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]TimedOutWorkflow, error) {
 	if s.sharded {
 		return s.cancelTimedOutShardedWorkflows(ctx, input)
 	}
@@ -5729,13 +5736,13 @@ func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOu
 		return nil, fmt.Errorf("failed to cancel timed-out workflows: %w", err)
 	}
 	defer rows.Close()
-	var cancelled []string
+	var cancelled []TimedOutWorkflow
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("failed to scan timed-out workflow ID: %w", err)
 		}
-		cancelled = append(cancelled, id)
+		cancelled = append(cancelled, TimedOutWorkflow{ID: id})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("failed to read timed-out workflow IDs: %w", err)
@@ -5745,7 +5752,7 @@ func (s *SysDB) CancelTimedOutWorkflows(ctx context.Context, input CancelTimedOu
 
 // cancelTimedOutShardedWorkflows finds timed-out workflows with a keyless read, then
 // cancels them key by key.
-func (s *SysDB) cancelTimedOutShardedWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]string, error) {
+func (s *SysDB) cancelTimedOutShardedWorkflows(ctx context.Context, input CancelTimedOutWorkflowsDBInput) ([]TimedOutWorkflow, error) {
 	nowMs := time.Now().UnixMilli()
 	active := `('` + string(models.WorkflowStatusEnqueued) + `', '` + string(models.WorkflowStatusPending) + `', '` + string(models.WorkflowStatusDelayed) + `', '` + string(models.WorkflowStatusSuspended) + `')`
 	args := []any{nowMs, input.Limit}
@@ -5774,7 +5781,7 @@ func (s *SysDB) cancelTimedOutShardedWorkflows(ctx context.Context, input Cancel
 		WHERE shard_key = $3 AND workflow_uuid = ANY($4)
 		  AND status IN `+active+` AND workflow_deadline_epoch_ms <= $2
 		RETURNING workflow_uuid`, s.dialect.SchemaPrefix(s.schema))
-	var cancelled []string
+	var cancelled []TimedOutWorkflow
 	cancelKey := func(key string) error {
 		rows, err := s.pool.Query(ctx, cancelQuery, models.WorkflowStatusCancelled, nowMs, key, byKey[key])
 		if err != nil {
@@ -5786,7 +5793,7 @@ func (s *SysDB) cancelTimedOutShardedWorkflows(ctx context.Context, input Cancel
 			if err := rows.Scan(&id); err != nil {
 				return err
 			}
-			cancelled = append(cancelled, id)
+			cancelled = append(cancelled, TimedOutWorkflow{ID: id, ShardKey: key})
 		}
 		return rows.Err()
 	}
@@ -7047,7 +7054,7 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 	if len(input.ScheduleNamePrefixes) > 0 {
 		patterns := make([]string, len(input.ScheduleNamePrefixes))
 		for i, p := range input.ScheduleNamePrefixes {
-			patterns[i] = p + "%"
+			patterns[i] = escapeLikePattern(p) + "%"
 		}
 		encoded, err := encodeArrayParam(s.dialect, patterns)
 		if err != nil {
@@ -8025,11 +8032,12 @@ func (qb *queryBuilder) addWhereLikeAny(column string, prefixes []string, suffix
 	if len(prefixes) == 0 {
 		return
 	}
+	escape := dialectLikeEscapeClause(qb.dialect)
 	ors := make([]string, len(prefixes))
 	for i, p := range prefixes {
 		qb.argCounter++
-		ors[i] = fmt.Sprintf("%s LIKE $%d", column, qb.argCounter)
-		qb.args = append(qb.args, p+suffix)
+		ors[i] = fmt.Sprintf("%s LIKE $%d%s", column, qb.argCounter, escape)
+		qb.args = append(qb.args, escapeLikePattern(p)+suffix)
 	}
 	qb.whereClauses = append(qb.whereClauses, "("+strings.Join(ors, " OR ")+")")
 }
