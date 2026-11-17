@@ -168,7 +168,7 @@ type SysDB struct {
 	sharded  bool
 	sharding ShardingBackend
 
-	keepPoolOpen bool
+	customPool bool
 }
 
 func (s *SysDB) owner() *string {
@@ -999,7 +999,6 @@ type NewSystemDatabaseInput struct {
 	DatabaseSchema               string
 	CustomPool                   *pgxpool.Pool
 	CustomSqliteDB               *sql.DB
-	KeepCustomDBOpen             bool
 	Logger                       *slog.Logger
 	AppName                      string
 	ConnectionAppName            string
@@ -1092,7 +1091,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 
 	// Dispatch sqlite first
 	if customSqliteDB != nil {
-		systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, customSqliteDB, logger, inputs.AppName, inputs.SkipMigrations, inputs.KeepCustomDBOpen)
+		systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, customSqliteDB, logger, inputs.AppName, inputs.SkipMigrations)
 		if err != nil {
 			return nil, startupError(ctx, inputs.StartupTimeout, "initializing the SQLite system database", nil, err)
 		}
@@ -1104,7 +1103,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 			return nil, err
 		}
 		if dialectName == DialectSQLite {
-			systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, nil, logger, inputs.AppName, inputs.SkipMigrations, false)
+			systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, nil, logger, inputs.AppName, inputs.SkipMigrations)
 			if err != nil {
 				return nil, startupError(ctx, inputs.StartupTimeout, "initializing the SQLite system database", nil, err)
 			}
@@ -1309,7 +1308,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		isCockroachDB:                isCockroach,
 		sharded:                      sharded,
 		sharding:                     sharding,
-		keepPoolOpen:                 customPool != nil && inputs.KeepCustomDBOpen,
+		customPool:                   customPool != nil,
 	}, nil
 }
 
@@ -1387,7 +1386,7 @@ func (s *SysDB) Launch(ctx context.Context) {
 }
 
 func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
-	s.logger.Debug("Closing system database connection pool")
+	s.logger.Debug("Shutting down system database")
 	var pending []string
 
 	s.notificationLoopMu.Lock()
@@ -1419,7 +1418,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 		}
 	}
 
-	if s.pool != nil && !s.keepPoolOpen {
+	if s.pool != nil && !s.customPool {
 		poolClose := make(chan struct{})
 		go func() {
 			// Will block until every acquired connection is released
@@ -4855,7 +4854,19 @@ func (s *SysDB) notificationListenerLoop(ctx context.Context) {
 		s.logger.Error("Failed to acquire listener connection", "error", err)
 		return
 	}
-	defer poolConn.Release()
+	// Close the connection rather than hand it back subscribed.
+	// A custom pool that outlives shutdown would carry it over.
+	defer func() {
+		if poolConn == nil {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		defer cancel()
+		if err := poolConn.Conn().Close(closeCtx); err != nil {
+			s.logger.Debug("Error closing notification listener connection", "error", err)
+		}
+		poolConn.Release()
+	}()
 
 	retryAttempt := 0
 	for {
@@ -4866,13 +4877,13 @@ func (s *SysDB) notificationListenerLoop(ctx context.Context) {
 			// Context cancellation -> graceful exit
 			if ctx.Err() != nil {
 				s.logger.Debug("Notification listener exiting (context canceled", "cause", context.Cause(ctx), "error", err)
-				poolConn.Release()
 				return
 			}
 			// If the underlying connection is closed, attempt to re-acquire a new one
 			if poolConn.Conn().IsClosed() {
 				s.logger.Debug("Notification listener connection closed. re-acquiring")
 				poolConn.Release()
+				poolConn = nil
 				for {
 					if ctx.Err() != nil {
 						s.logger.Debug("Notification listener exiting (context canceled)", "cause", context.Cause(ctx), "error", err)

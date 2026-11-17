@@ -167,7 +167,6 @@ func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Tim
 	logger *slog.Logger,
 	appName string,
 	skipMigrations bool,
-	keepCustomDBOpen bool,
 ) (SystemDatabase, error) {
 	// The driver is required even with a custom handle: error classification
 	// (retryable/contention/constraint) needs its ErrorCode extractor.
@@ -235,7 +234,7 @@ func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Tim
 		logger:               logger.With("service", "system_database"),
 		schema:               databaseSchema,
 		encodeScheduledInput: encodeScheduledInput,
-		keepPoolOpen:         customDB != nil && keepCustomDBOpen,
+		customPool:           customDB != nil,
 	}, nil
 }
 
