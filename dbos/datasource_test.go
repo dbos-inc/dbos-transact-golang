@@ -1349,6 +1349,7 @@ func setupSharedDBOS(t *testing.T) (Context, *DataSource, *userBackend) {
 		path := filepath.Join(t.TempDir(), "shared.db")
 		db, err := sysdb.OpenSQLitePool(context.Background(), "sqlite:"+path)
 		require.NoError(t, err)
+		t.Cleanup(func() { db.Close() })
 		config = Config{AppName: "test-app", SQLiteSystemDB: db}
 		ub = &userBackend{pool: sysdb.NewSQLPool(db), dialect: sysdb.SqliteDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
 	} else {
@@ -1358,14 +1359,13 @@ func setupSharedDBOS(t *testing.T) (Context, *DataSource, *userBackend) {
 		require.NoError(t, err)
 		pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 		require.NoError(t, err)
+		t.Cleanup(pool.Close)
 		config = Config{AppName: "test-app", SystemDBPool: pool}
 		ub = &userBackend{pool: sysdb.NewPgxPool(pool), dialect: sysdb.PostgresDialect{}, schema: _DEFAULT_SYSTEM_DB_SCHEMA}
 	}
 
 	ctx, err := NewContext(context.Background(), config)
 	require.NoError(t, err)
-	// Shutdown owns the shared pool (sysDB.shutdown closes it); don't close it
-	// separately here.
 	t.Cleanup(func() { Shutdown(ctx, 30*time.Second) })
 
 	// A leftover completion table from a prior two-table test (reset clears rows,

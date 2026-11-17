@@ -1185,6 +1185,7 @@ func TestWorkerConcurrencyHoldsUntilOutcomeDurable(t *testing.T) {
 	poolConfig.ConnConfig.Tracer = tracer
 	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
 	require.NoError(t, err)
+	t.Cleanup(pool.Close)
 
 	dbosCtx, err := NewContext(context.Background(), Config{AppName: "test-wc-outcome", SystemDBPool: pool})
 	require.NoError(t, err)

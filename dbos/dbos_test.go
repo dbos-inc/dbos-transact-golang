@@ -1382,6 +1382,7 @@ func TestCustomPool(t *testing.T) {
 
 		pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
 		require.NoError(t, err)
+		defer pool.Close()
 
 		config := Config{
 			AppName:      "test-custom-pool",
@@ -1476,6 +1477,7 @@ func TestCustomPool(t *testing.T) {
 		require.NoError(t, err)
 		pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
 		require.NoError(t, err)
+		defer pool.Close()
 
 		config := Config{
 			DatabaseURL:  invalidDatabaseURL,
@@ -1504,6 +1506,7 @@ func TestCustomPool(t *testing.T) {
 		poolConfig.ConnConfig.Host = "invalid-host"
 		pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
 		require.NoError(t, err)
+		defer pool.Close()
 
 		config := Config{
 			DatabaseURL:  databaseURL,
@@ -1563,6 +1566,33 @@ func TestCustomPool(t *testing.T) {
 		systemDB.Shutdown(ctx, shutdownTimeout)
 		assert.False(t, systemDB.(*sysdb.SysDB).Launched())
 	})
+	t.Run("LeftOpenOnShutdown", func(t *testing.T) {
+		pool, err := pgxpool.New(context.Background(), getDatabaseURL())
+		require.NoError(t, err)
+		defer pool.Close()
+
+		ctx, err := NewContext(context.Background(), Config{
+			AppName:      "test-custom-pool-left-open",
+			SystemDBPool: pool,
+		})
+		require.NoError(t, err)
+		require.NoError(t, Launch(ctx))
+		require.NoError(t, Shutdown(ctx, 10*time.Second))
+
+		require.NoError(t, pool.Ping(context.Background()), "custom pool should still be usable after Shutdown")
+
+		if detectCockroach(t, pool) {
+			return // no LISTEN/NOTIFY
+		}
+		// The listener's connection must not return to the pool still subscribed.
+		for _, conn := range pool.AcquireAllIdle(context.Background()) {
+			var listening int
+			err := conn.QueryRow(context.Background(), "SELECT count(*) FROM pg_listening_channels()").Scan(&listening)
+			conn.Release()
+			require.NoError(t, err)
+			assert.Zero(t, listening, "a pooled connection is still listening after Shutdown")
+		}
+	})
 }
 
 // TestSystemDBShutdownReportsPending verifies SysDB.Shutdown returns the
@@ -1603,20 +1633,20 @@ func TestClientShutdownReportsSystemDBTimeout(t *testing.T) {
 	skipIfSqlite(t, "holds a pgx pool connection to block pool close")
 	ctx := context.Background()
 
-	poolConfig, err := pgxpool.ParseConfig(getDatabaseURL())
-	require.NoError(t, err)
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	require.NoError(t, err)
-
 	// A client verifies the schema instead of migrating it, so migrate it here.
 	const schema = "dbos_test_shutdown_client"
-	require.NoError(t, sysdb.RunMigrations(ctx, pool, schema, detectCockroach(t, pool), slog.Default()))
+	migrationPool, err := pgxpool.New(ctx, getDatabaseURL())
+	require.NoError(t, err)
+	require.NoError(t, sysdb.RunMigrations(ctx, migrationPool, schema, detectCockroach(t, migrationPool), slog.Default()))
+	migrationPool.Close()
 
+	// The client opens the pool itself: Shutdown leaves a custom one open.
 	client, err := NewClient(ctx, ClientConfig{
-		SystemDBPool:   pool,
+		DatabaseURL:    getDatabaseURL(),
 		DatabaseSchema: schema,
 	})
 	require.NoError(t, err)
+	pool := PgxPool(client.(*dbosContext).systemDB.(*sysdb.SysDB).Pool())
 
 	// A held connection blocks pool.Close() past the timeout
 	conn, err := pool.Acquire(ctx)
@@ -2177,6 +2207,7 @@ func TestCustomSqlitePool(t *testing.T) {
 		dbPath := filepath.Join(t.TempDir(), "dbos.db")
 		db, err := sql.Open("sqlite", dbPath)
 		require.NoError(t, err)
+		defer db.Close()
 		db.SetMaxOpenConns(8)
 		db.SetMaxIdleConns(4)
 		db.SetConnMaxLifetime(time.Hour)
@@ -2233,6 +2264,7 @@ func TestCustomSqlitePool(t *testing.T) {
 		dbPath := filepath.Join(t.TempDir(), "dbos.db")
 		db, err := sql.Open("sqlite", dbPath)
 		require.NoError(t, err)
+		defer db.Close()
 
 		config := Config{
 			DatabaseURL:    "postgres://invalid:invalid@localhost:5432/invaliddb",
@@ -2303,6 +2335,21 @@ func TestCustomSqlitePool(t *testing.T) {
 		cancel()
 		systemDB.Shutdown(ctx, 2*time.Second)
 		assert.False(t, systemDB.(*sysdb.SysDB).Launched())
+	})
+	t.Run("LeftOpenOnShutdown", func(t *testing.T) {
+		db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "dbos.db"))
+		require.NoError(t, err)
+		defer db.Close()
+
+		ctx, err := NewContext(context.Background(), Config{
+			AppName:        "test-custom-sqlite-left-open",
+			SQLiteSystemDB: db,
+		})
+		require.NoError(t, err)
+		require.NoError(t, Launch(ctx))
+		require.NoError(t, Shutdown(ctx, 10*time.Second))
+
+		require.NoError(t, db.PingContext(context.Background()), "custom sqlite handle should still be usable after Shutdown")
 	})
 }
 

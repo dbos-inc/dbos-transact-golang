@@ -234,6 +234,7 @@ func newSqliteSystemDatabase(encodeScheduledInput func(context.Context, time.Tim
 		logger:               logger.With("service", "system_database"),
 		schema:               databaseSchema,
 		encodeScheduledInput: encodeScheduledInput,
+		customPool:           customDB != nil,
 	}, nil
 }
 
