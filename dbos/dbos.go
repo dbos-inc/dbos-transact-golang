@@ -50,6 +50,7 @@ type Config struct {
 	DatabaseURL                    string
 	SystemDBPool                   *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
 	SQLiteSystemDB                 *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
+	KeepSystemDBOpen               bool            // Leave a custom SystemDBPool or SQLiteSystemDB open on Shutdown (default: false)
 	DatabaseSchema                 string          // Database schema name (defaults to "dbos")
 	Logger                         *slog.Logger    // Custom logger instance (defaults to a new slog logger)
 	ConductorURL                   string          // DBOS conductor service URL (optional)
@@ -127,6 +128,7 @@ func processConfig(inputConfig *Config) (*Config, error) {
 		ExecutorID:                     inputConfig.ExecutorID,
 		SystemDBPool:                   inputConfig.SystemDBPool,
 		SQLiteSystemDB:                 inputConfig.SQLiteSystemDB,
+		KeepSystemDBOpen:               inputConfig.KeepSystemDBOpen,
 		EnablePatching:                 inputConfig.EnablePatching,
 		Serializer:                     inputConfig.Serializer,
 		SchedulerPollingInterval:       inputConfig.SchedulerPollingInterval,
@@ -778,6 +780,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		SkipMigrations:               config.SkipMigrations,
 		CustomPool:                   config.SystemDBPool,
 		CustomSqliteDB:               config.SQLiteSystemDB,
+		KeepCustomDBOpen:             config.KeepSystemDBOpen,
 		Logger:                       initExecutor.logger,
 		AppName:                      ownerAppName,
 		ConnectionAppName:            config.AppName,
@@ -849,6 +852,7 @@ type ClientConfig struct {
 	AppName                        string          // The application this client acts on behalf of. Leave empty to list all workflows, but beware that writing will serve all applications.
 	SystemDBPool                   *pgxpool.Pool   // SystemDBPool is a custom pg/CRDB pool. Optional; takes precedence over DatabaseURL. Mutually exclusive with SQLiteSystemDB.
 	SQLiteSystemDB                 *sql.DB         // SQLiteSystemDB is a custom sqlite handle. Optional; takes precedence over DatabaseURL. Mutually exclusive with SystemDBPool. Requires importing dbos/driver/sqlite.
+	KeepSystemDBOpen               bool            // Leave a custom SystemDBPool or SQLiteSystemDB open on Shutdown (default: false)
 	DatabaseSchema                 string          // Database schema name (defaults to "dbos")
 	Logger                         *slog.Logger    // Optional custom logger
 	Serializer                     Serializer[any] // Optional custom serializer (defaults to JSON)
@@ -885,6 +889,7 @@ func NewClient(ctx context.Context, config ClientConfig) (Client, error) {
 		Logger:                         config.Logger,
 		SystemDBPool:                   config.SystemDBPool,
 		SQLiteSystemDB:                 config.SQLiteSystemDB,
+		KeepSystemDBOpen:               config.KeepSystemDBOpen,
 		Serializer:                     config.Serializer,
 		SystemDBStartupTimeout:         config.SystemDBStartupTimeout,
 		SystemDBIdleTransactionTimeout: config.SystemDBIdleTransactionTimeout,

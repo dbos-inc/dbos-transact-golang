@@ -167,6 +167,8 @@ type SysDB struct {
 
 	sharded  bool
 	sharding ShardingBackend
+
+	keepPoolOpen bool
 }
 
 func (s *SysDB) owner() *string {
@@ -997,6 +999,7 @@ type NewSystemDatabaseInput struct {
 	DatabaseSchema               string
 	CustomPool                   *pgxpool.Pool
 	CustomSqliteDB               *sql.DB
+	KeepCustomDBOpen             bool
 	Logger                       *slog.Logger
 	AppName                      string
 	ConnectionAppName            string
@@ -1089,7 +1092,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 
 	// Dispatch sqlite first
 	if customSqliteDB != nil {
-		systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, customSqliteDB, logger, inputs.AppName, inputs.SkipMigrations)
+		systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, customSqliteDB, logger, inputs.AppName, inputs.SkipMigrations, inputs.KeepCustomDBOpen)
 		if err != nil {
 			return nil, startupError(ctx, inputs.StartupTimeout, "initializing the SQLite system database", nil, err)
 		}
@@ -1101,7 +1104,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 			return nil, err
 		}
 		if dialectName == DialectSQLite {
-			systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, nil, logger, inputs.AppName, inputs.SkipMigrations)
+			systemDB, err := newSqliteSystemDatabase(inputs.EncodeScheduledInput, ctx, databaseURL, databaseSchema, nil, logger, inputs.AppName, inputs.SkipMigrations, false)
 			if err != nil {
 				return nil, startupError(ctx, inputs.StartupTimeout, "initializing the SQLite system database", nil, err)
 			}
@@ -1306,6 +1309,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		isCockroachDB:                isCockroach,
 		sharded:                      sharded,
 		sharding:                     sharding,
+		keepPoolOpen:                 customPool != nil && inputs.KeepCustomDBOpen,
 	}, nil
 }
 
@@ -1415,7 +1419,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 		}
 	}
 
-	if s.pool != nil {
+	if s.pool != nil && !s.keepPoolOpen {
 		poolClose := make(chan struct{})
 		go func() {
 			// Will block until every acquired connection is released

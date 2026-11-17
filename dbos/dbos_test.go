@@ -1563,6 +1563,22 @@ func TestCustomPool(t *testing.T) {
 		systemDB.Shutdown(ctx, shutdownTimeout)
 		assert.False(t, systemDB.(*sysdb.SysDB).Launched())
 	})
+	t.Run("KeepSystemDBOpen", func(t *testing.T) {
+		pool, err := pgxpool.New(context.Background(), getDatabaseURL())
+		require.NoError(t, err)
+		defer pool.Close()
+
+		ctx, err := NewContext(context.Background(), Config{
+			AppName:          "test-keep-system-db-open",
+			SystemDBPool:     pool,
+			KeepSystemDBOpen: true,
+		})
+		require.NoError(t, err)
+		require.NoError(t, Launch(ctx))
+		require.NoError(t, Shutdown(ctx, 10*time.Second))
+
+		require.NoError(t, pool.Ping(context.Background()), "custom pool should still be usable after Shutdown")
+	})
 }
 
 // TestSystemDBShutdownReportsPending verifies SysDB.Shutdown returns the
@@ -2303,6 +2319,22 @@ func TestCustomSqlitePool(t *testing.T) {
 		cancel()
 		systemDB.Shutdown(ctx, 2*time.Second)
 		assert.False(t, systemDB.(*sysdb.SysDB).Launched())
+	})
+	t.Run("KeepSystemDBOpen", func(t *testing.T) {
+		db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "dbos.db"))
+		require.NoError(t, err)
+		defer db.Close()
+
+		ctx, err := NewContext(context.Background(), Config{
+			AppName:          "test-keep-system-db-open",
+			SQLiteSystemDB:   db,
+			KeepSystemDBOpen: true,
+		})
+		require.NoError(t, err)
+		require.NoError(t, Launch(ctx))
+		require.NoError(t, Shutdown(ctx, 10*time.Second))
+
+		require.NoError(t, db.PingContext(context.Background()), "custom sqlite handle should still be usable after Shutdown")
 	})
 }
 
