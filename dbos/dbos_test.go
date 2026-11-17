@@ -592,7 +592,8 @@ func TestSystemDBIdleTransactionTimeout(t *testing.T) {
 		require.NoError(t, err)
 		q := u.Query()
 		q.Set("options", "-c idle_in_transaction_session_timeout=7000")
-		u.RawQuery = q.Encode()
+		// pgx reads "+" in a query value literally, so the space must be %20.
+		u.RawQuery = strings.ReplaceAll(q.Encode(), "+", "%20")
 		ctx, err := NewContext(context.Background(), Config{AppName: "idle-timeout-user", DatabaseURL: u.String()})
 		require.NoError(t, err)
 		defer Shutdown(ctx, 10*time.Second)
