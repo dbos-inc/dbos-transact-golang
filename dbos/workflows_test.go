@@ -899,8 +899,8 @@ func (t *cancelFaultTx) Exec(ctx context.Context, query string, args ...any) (Re
 	return t.Tx.Exec(ctx, query, args...)
 }
 
-// childListHookPool runs the armed hook once, after the rows of the next query on
-// the pool that lists workflows by parent are closed.
+// childListHookPool runs the armed hook once, after the rows of the next query that
+// lists workflows by parent are closed, on the pool or in a transaction it began.
 type childListHookPool struct {
 	Pool
 	hook atomic.Pointer[func()]
@@ -916,6 +916,18 @@ func (p *childListHookPool) arm(hook func()) {
 
 func (p *childListHookPool) Query(ctx context.Context, query string, args ...any) (Rows, error) {
 	rows, err := p.Pool.Query(ctx, query, args...)
+	return p.hooked(query, rows, err)
+}
+
+func (p *childListHookPool) BeginTx(ctx context.Context, opts TxOptions) (Tx, error) {
+	tx, err := p.Pool.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &childListHookTx{Tx: tx, p: p}, nil
+}
+
+func (p *childListHookPool) hooked(query string, rows Rows, err error) (Rows, error) {
 	if err != nil || !strings.Contains(query, "parent_workflow_id IN") && !strings.Contains(query, "parent_workflow_id = ANY") {
 		return rows, err
 	}
@@ -923,6 +935,16 @@ func (p *childListHookPool) Query(ctx context.Context, query string, args ...any
 		return &afterCloseRows{Rows: rows, afterClose: *hook}, nil
 	}
 	return rows, nil
+}
+
+type childListHookTx struct {
+	Tx
+	p *childListHookPool
+}
+
+func (t *childListHookTx) Query(ctx context.Context, query string, args ...any) (Rows, error) {
+	rows, err := t.Tx.Query(ctx, query, args...)
+	return t.p.hooked(query, rows, err)
 }
 
 type afterCloseRows struct {
@@ -3681,6 +3703,89 @@ func TestChildWorkflow(t *testing.T) {
 			require.ErrorAs(t, err, &dbosErr)
 			require.Equal(t, ErrorCodeNonExistentWorkflow, dbosErr.Code)
 		}
+	})
+}
+
+func TestDeleteWorkflows(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// Installed before Launch so no goroutine reads sysDB.Pool() during the swap.
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	childListPool := &childListHookPool{Pool: sysDB.Pool()}
+	sysDB.SetPool(childListPool)
+
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS instance")
+
+	t.Run("DeleteWorkflowsRemovesChildStartedDuringDelete", func(t *testing.T) {
+		// A child that starts while its parent is deleted with its children must not
+		// outlive the parent: the delete reads it, or its start fails the owner check.
+		ctx := context.Background()
+		parentID, childID := uuid.NewString(), uuid.NewString()
+		insert := func(tx Tx, id, parentID string) error {
+			_, err := sysDB.InsertWorkflowStatus(ctx, sysdb.InsertWorkflowStatusDBInput{
+				Status: models.WorkflowStatus{ID: id, Name: "delete-tree", Status: WorkflowStatusPending, ParentWorkflowID: parentID, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+				Tx:     tx,
+			})
+			return err
+		}
+		tx, err := sysDB.Pool().BeginTx(ctx, sysdb.TxOptions{})
+		require.NoError(t, err)
+		require.NoError(t, insert(tx, parentID, ""))
+		require.NoError(t, tx.Commit(ctx))
+		parentXID := setWorkflowOwner(t, sysDB, parentID)
+
+		// startChild starts the child the way its parent does: the child row and the
+		// parent's owner check commit in one transaction.
+		startChild := func() error {
+			tx, err := sysDB.Pool().BeginTx(ctx, sysdb.TxOptions{})
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(ctx)
+			if err := insert(tx, childID, parentID); err != nil {
+				return err
+			}
+			if err := sysDB.RecordChildWorkflow(ctx, sysdb.RecordChildWorkflowDBInput{
+				ParentWorkflowID: parentID, ParentOwnerXID: parentXID, ChildWorkflowID: childID, StepName: "child", StartedAt: time.Now(), Tx: tx,
+			}); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
+		// The delete keeps its transaction open while the hook runs, so the start runs
+		// beside it. The hook waits until the start ends, or for a while if the start
+		// waits on a lock of the delete.
+		hookRan := false
+		startDone := make(chan error, 1)
+		childListPool.arm(func() {
+			hookRan = true
+			go func() { startDone <- startChild() }()
+			select {
+			case err := <-startDone:
+				startDone <- err
+			case <-time.After(500 * time.Millisecond):
+			}
+		})
+		defer childListPool.arm(nil)
+
+		require.NoError(t, DeleteWorkflows(dbosCtx, []string{parentID}, WithDeleteChildren()))
+		require.True(t, hookRan, "the delete did not list the children")
+		var startErr error
+		select {
+		case startErr = <-startDone:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the child start did not end")
+		}
+		if startErr != nil {
+			require.ErrorIs(t, startErr, ErrConflictingWorkflowID, "a child start during the delete fails only the parent's owner check")
+		}
+		left, err := sysDB.ListWorkflows(ctx, sysdb.ListWorkflowsDBInput{WorkflowIDs: []string{parentID, childID}})
+		require.NoError(t, err)
+		leftIDs := make([]string, 0, len(left))
+		for _, w := range left {
+			leftIDs = append(leftIDs, w.ID)
+		}
+		require.Empty(t, leftIDs, "the delete must leave no workflow of the tree")
 	})
 }
 

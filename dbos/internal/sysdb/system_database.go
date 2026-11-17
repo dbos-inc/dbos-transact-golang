@@ -2554,12 +2554,16 @@ func AdvisoryLockKey(name string) int64 {
 	return int64(binary.BigEndian.Uint64(sum[:8])) // #nosec G115 -- the sign flip is the point: the key is a signed bigint
 }
 
+// DeleteWorkflows deletes the given workflows and, with DeleteChildren, all their
+// descendants, one level at a time: each level is deleted before its children are
+// read, so a child that starts during the delete either is read or fails its parent's
+// owner check.
 func (s *SysDB) DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInput) error {
+	if len(input.WorkflowIDs) == 0 {
+		return nil
+	}
 	// In a sharded database, we run one delete query per shard key
 	if s.sharded {
-		if len(input.WorkflowIDs) == 0 {
-			return nil
-		}
 		return s.applyByLevel(ctx, s.pool, input.WorkflowIDs, input.DeleteChildren, "DeleteWorkflows", func(ctx context.Context, key string, ids []string, _ bool) error {
 			tx, err := s.pool.BeginTx(ctx, TxOptions{})
 			if err != nil {
@@ -2575,11 +2579,6 @@ func (s *SysDB) DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInpu
 			return nil
 		})
 	}
-	for _, id := range input.WorkflowIDs {
-		if err := s.rejectShardKey(ctx, id, ""); err != nil {
-			return err
-		}
-	}
 	// If no transaction is provided, create one so the entire operation is atomic
 	tx := input.Tx
 	if tx == nil {
@@ -2591,26 +2590,9 @@ func (s *SysDB) DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInpu
 		defer tx.Rollback(ctx)
 	}
 
-	// Collect all workflow IDs to delete
-	workflowIDs := make([]string, len(input.WorkflowIDs))
-	copy(workflowIDs, input.WorkflowIDs)
-
-	if input.DeleteChildren {
-		for _, wfID := range input.WorkflowIDs {
-			children, err := s.GetWorkflowChildren(ctx, GetWorkflowChildrenDBInput{
-				WorkflowID: wfID,
-				Tx:         tx,
-			})
-			if err != nil {
-				return err
-			}
-			for _, child := range children {
-				workflowIDs = append(workflowIDs, child.ID)
-			}
-		}
-	}
-
-	if err := s.deleteWorkflowIDs(ctx, tx, workflowIDs, ""); err != nil {
+	if err := s.applyByLevel(ctx, tx, input.WorkflowIDs, input.DeleteChildren, "DeleteWorkflows", func(ctx context.Context, _ string, ids []string, _ bool) error {
+		return s.deleteWorkflowIDs(ctx, tx, ids, "")
+	}); err != nil {
 		return err
 	}
 
