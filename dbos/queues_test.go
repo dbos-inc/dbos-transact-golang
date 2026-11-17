@@ -1323,34 +1323,41 @@ func TestQueueTimeouts(t *testing.T) {
 	queuedWaitForCancelWorkflow := func(ctx Context, _ string) (string, error) {
 		// This workflow will wait indefinitely until it is cancelled
 		<-ctx.Done()
-		assert.True(t, errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded), "workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
+		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %w", ctx.Err())
+		}
 		return "", ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, queuedWaitForCancelWorkflow)
 
+	queuedChildAwaitErr := make(chan error, 1)
 	enqueuedWorkflowEnqueuesATimeoutWorkflow := func(ctx Context, childWorkflowID string) (string, error) {
-		// This workflow will enqueue a workflow that waits indefinitely until it is cancelled
+		// This workflow will enqueue a workflow that waits indefinitely until it is cancelled.
+		// It runs on a queue goroutine, not the test goroutine, so it returns its errors
+		// instead of asserting: the test checks the outcome through the handles.
 		handle, err := RunWorkflow(ctx, queuedWaitForCancelWorkflow, "enqueued-wait-for-cancel", WithQueue(timeoutQueue), WithWorkflowID(childWorkflowID))
-		require.NoError(t, err, "failed to start enqueued wait for cancel workflow")
-		// Workflow should get ErrorCodeAwaitedWorkflowCancelled Error
+		if err != nil {
+			return "", err
+		}
 		_, err = handle.GetResult()
-		require.Error(t, err, "expected error when waiting for enqueued workflow to complete, but got none")
-		dbosErr := &Error{Code: ErrorCodeAwaitedWorkflowCancelled}
-		require.ErrorAs(t, err, &dbosErr, "expected error to be of type *Error, got %T", err)
-		return "", nil
+		queuedChildAwaitErr <- err
+		return "", err
 	}
 	RegisterWorkflow(dbosCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow)
 
-	detachedWorkflow := func(ctx Context, timeout time.Duration) (string, error) {
+	// The detached child runs until the test closes detachedRelease, so it is still
+	// running when its parent is cancelled.
+	detachedRelease := make(chan struct{})
+	detachedWorkflow := func(ctx Context, _ string) (string, error) {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case <-time.After(timeout):
+		case <-detachedRelease:
 			return "detached-workflow-completed", nil
 		}
 	}
 
-	enqueuedWorkflowEnqueuesADetachedWorkflow := func(ctx Context, timeout time.Duration) (string, error) {
+	enqueuedWorkflowEnqueuesADetachedWorkflow := func(ctx Context, _ string) (string, error) {
 		myId, err := GetWorkflowID(ctx)
 		if err != nil {
 			return "", fmt.Errorf("failed to get workflow ID: %v", err)
@@ -1358,11 +1365,13 @@ func TestQueueTimeouts(t *testing.T) {
 		childID := fmt.Sprintf("%s-child", myId)
 		// This workflow will enqueue a workflow that is not cancelable
 		childCtx := WithoutCancel(ctx)
-		handle, err := RunWorkflow(childCtx, detachedWorkflow, timeout*2, WithQueue(timeoutQueue), WithWorkflowID(childID))
-		require.NoError(t, err, "failed to start enqueued detached workflow")
+		handle, err := RunWorkflow(childCtx, detachedWorkflow, "detached", WithQueue(timeoutQueue), WithWorkflowID(childID))
+		if err != nil {
+			return "", err
+		}
 
 		// Wait for the enqueued workflow to complete. The parent is cancelled
-		// mid-await, so getResult is interrupted (not checkpointed) even though
+		// before the child completes, so getResult is not checkpointed even though
 		// the detached child completes successfully; a resume would replay the
 		// await and adopt the child's recorded success.
 		result, err := handle.GetResult()
@@ -1507,13 +1516,35 @@ func TestQueueTimeouts(t *testing.T) {
 	})
 
 	t.Run("EnqueueWorkflowThatEnqueuesATimeoutWorkflow", func(t *testing.T) {
-		// Start a workflow that enqueues another workflow that waits indefinitely
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		// Start a workflow that enqueues another workflow that waits indefinitely.
+		// A parent past its deadline loses ownership and cannot start a child, so the
+		// deadline must not pass before the child exists. The parent gets a deadline
+		// far in the future; once the child has inherited it, the test expires both.
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, time.Hour)
 		defer cancelFunc() // Ensure we clean up the context
 
 		childWorkflowID := uuid.NewString()
 		handle, err := RunWorkflow(cancelCtx, enqueuedWorkflowEnqueuesATimeoutWorkflow, childWorkflowID, WithQueue(timeoutQueue))
 		require.NoError(t, err, "failed to start enqueued workflow")
+
+		var childStatus WorkflowStatus
+		require.Eventually(t, func() bool {
+			childHandle, err := RetrieveWorkflow[string](dbosCtx, childWorkflowID)
+			if err != nil {
+				return false
+			}
+			childStatus, err = childHandle.GetStatus()
+			return err == nil
+		}, 10*time.Second, 50*time.Millisecond, "parent workflow did not start its child")
+
+		// The child inherits the parent's absolute deadline, set when the parent was dequeued.
+		parentStatus, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get parent workflow status")
+		require.False(t, parentStatus.Deadline.IsZero(), "parent workflow should have a deadline once dequeued")
+		assert.Equal(t, parentStatus.Deadline.UnixMilli(), childStatus.Deadline.UnixMilli(), "child should inherit the parent's deadline")
+
+		// Reach the deadline: the timeouts monitor cancels both workflows on its next pass.
+		expireDeadline(t, dbosCtx, parentStatus.Deadline)
 
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
@@ -1532,11 +1563,19 @@ func TestQueueTimeouts(t *testing.T) {
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 
-		// Wait for the child workflow status to become cancelled. The child is
-		// enqueued by the parent only once the parent has been dequeued and run, so
-		// it may not exist yet on the first polls: treat a missing child as the
-		// condition not being met rather than a hard failure (a require here would
-		// kill the polling goroutine on the first transient miss).
+		// The parent saw its child cancelled. The error is a DBOS error, or the raw context
+		// error when the parent observed its own cancellation first.
+		select {
+		case err := <-queuedChildAwaitErr:
+			var awaitErr *Error
+			cancelled := errors.As(err, &awaitErr) && (awaitErr.Code == ErrorCodeAwaitedWorkflowCancelled || awaitErr.Code == ErrorCodeWorkflowCancelled)
+			assert.True(t, cancelled || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled),
+				"expected the child workflow to be cancelled, got: %v", err)
+		case <-time.After(10 * time.Second):
+			require.FailNow(t, "parent workflow did not finish awaiting its child")
+		}
+
+		// Wait for the child workflow status to become cancelled.
 		require.Eventually(t, func() bool {
 			childHandle, err := RetrieveWorkflow[string](dbosCtx, childWorkflowID)
 			if err != nil {
@@ -1555,15 +1594,39 @@ func TestQueueTimeouts(t *testing.T) {
 
 	t.Run("EnqueueWorkflowThatEnqueuesADetachedWorkflow", func(t *testing.T) {
 		// Start a workflow that enqueues another workflow that is not cancelable.
-		// The timeout must be long enough for the parent to enqueue the child and
-		// start its getResult step (both DB roundtrips) before the deadline fires,
-		// or the getResult pre-check sees the parent CANCELLED and errors.
-		timeout := 1 * time.Second
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, timeout)
+		// A parent past its deadline loses ownership and cannot start a child, so the
+		// deadline must not pass before the child exists. The parent gets a deadline
+		// far in the future; once the child exists, the test expires the parent's.
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, time.Hour)
 		defer cancelFunc() // Ensure we clean up the context
 
-		handle, err := RunWorkflow(cancelCtx, enqueuedWorkflowEnqueuesADetachedWorkflow, timeout, WithQueue(timeoutQueue))
+		handle, err := RunWorkflow(cancelCtx, enqueuedWorkflowEnqueuesADetachedWorkflow, "parent", WithQueue(timeoutQueue))
 		require.NoError(t, err, "failed to start enqueued detached workflow")
+		childID := fmt.Sprintf("%s-child", handle.GetWorkflowID())
+
+		var childHandle WorkflowHandle[string]
+		require.Eventually(t, func() bool {
+			h, err := RetrieveWorkflow[string](dbosCtx, childID)
+			if err != nil {
+				return false
+			}
+			if _, err := h.GetStatus(); err != nil {
+				return false
+			}
+			childHandle = h
+			return true
+		}, 10*time.Second, 50*time.Millisecond, "parent workflow did not start its detached child")
+
+		// A detached child does not inherit the parent's deadline.
+		parentStatus, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get enqueued detached workflow status")
+		childStatus, err := childHandle.GetStatus()
+		require.NoError(t, err, "failed to get detached workflow status")
+		assert.True(t, childStatus.Deadline.IsZero(), "detached child should have no deadline")
+
+		// Reach the parent's deadline: the timeouts monitor cancels every workflow
+		// that holds it on its next pass, which must not include the detached child.
+		expireDeadline(t, dbosCtx, parentStatus.Deadline)
 
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
@@ -1582,18 +1645,18 @@ func TestQueueTimeouts(t *testing.T) {
 		require.NoError(t, err, "failed to get enqueued detached workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected enqueued detached workflow status to be WorkflowStatusCancelled")
 
-		// Check the child's status: should be success because it is detached
-		require.Eventually(t, func() bool {
-			childID := fmt.Sprintf("%s-child", handle.GetWorkflowID())
-			childHandle, err := RetrieveWorkflow[string](dbosCtx, childID)
-			require.NoError(t, err, "failed to retrieve detached workflow")
-
-			status, err := childHandle.GetStatus()
-			if err != nil {
-				return false
-			}
-			return status.Status == WorkflowStatusSuccess
-		}, 5*time.Second, 100*time.Millisecond, "expected detached workflow status to be WorkflowStatusSuccess")
+		// The parent is cancelled, and the detached child is not: it is still running
+		// until the test releases it, then it succeeds.
+		childStatus, err = childHandle.GetStatus()
+		require.NoError(t, err, "failed to get detached workflow status")
+		assert.NotEqual(t, WorkflowStatusCancelled, childStatus.Status, "detached workflow should not be cancelled with its parent")
+		close(detachedRelease)
+		childResult, err := childHandle.GetResult()
+		require.NoError(t, err, "detached workflow should complete after its parent is cancelled")
+		assert.Equal(t, "detached-workflow-completed", childResult)
+		childStatus, err = childHandle.GetStatus()
+		require.NoError(t, err, "failed to get detached workflow status")
+		assert.Equal(t, WorkflowStatusSuccess, childStatus.Status, "expected detached workflow status to be WorkflowStatusSuccess")
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after workflow cancellation, but they are not")
 	})
@@ -1617,6 +1680,19 @@ func TestQueueTimeouts(t *testing.T) {
 		// Sleep for duration exceeding the timeout
 		time.Sleep(timeout * 2)
 
+		// The timeout has passed, and several passes of the timeouts monitor with it, but
+		// the workflow is still enqueued with no deadline.
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get status of timeout workflow")
+		assert.Equal(t, WorkflowStatusEnqueued, status.Status, "expected timeout workflow to stay enqueued")
+		assert.True(t, status.Deadline.IsZero(), "expected no deadline before dequeue, got %v", status.Deadline)
+
+		// The deadline set on dequeue must not pass before the workflow completes, so give
+		// the workflow a long timeout before it dequeues.
+		longTimeout := time.Hour
+		setWorkflowTimeout(t, dbosCtx, handle.GetWorkflowID(), longTimeout)
+		released := time.Now()
+
 		// Signal the blocking workflow to complete
 		blockingEvent.Set()
 
@@ -1625,15 +1701,17 @@ func TestQueueTimeouts(t *testing.T) {
 		require.NoError(t, err, "failed to get result from blocking workflow")
 		assert.Equal(t, "blocking-done", blockingResult, "expected blocking workflow result")
 
-		// Now the second workflow should dequeue and complete successfully (timeout should be much longer than execution time)
-		// Note: this might be flaky if we the dequeue is delayed too long
+		// Now the second workflow should dequeue and complete successfully
 		_, err = handle.GetResult()
 		require.NoError(t, err, "unexpected error from workflow")
 
-		// Check the workflow status: should be success
+		// Check the workflow status: should be success, with the deadline computed from
+		// the timeout when the workflow was dequeued, after the release.
 		finalStatus, err := handle.GetStatus()
 		require.NoError(t, err, "failed to get final status of timeout workflow")
 		assert.Equal(t, WorkflowStatusSuccess, finalStatus.Status, "expected timeout workflow status to be WorkflowStatusSuccess")
+		assert.False(t, finalStatus.Deadline.Before(released.Add(longTimeout).Truncate(time.Millisecond)),
+			"expected the deadline to be set on dequeue, after %v, got %v", released.Add(longTimeout), finalStatus.Deadline)
 
 		require.True(t, queueEntriesAreCleanedUp(dbosCtx), "expected queue entries to be cleaned up after test")
 	})

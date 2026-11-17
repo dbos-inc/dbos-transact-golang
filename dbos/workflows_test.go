@@ -5445,8 +5445,8 @@ type sendRecvType struct {
 }
 
 func recvContextCancelWorkflow(ctx Context, topic string) (string, error) {
-	// Try to receive with a 5 second timeout, but context will cancel before that
-	msg, err := Recv[string](ctx, topic, 5*time.Second)
+	// Try to receive with a long timeout: the context cancels before that
+	msg, err := Recv[string](ctx, topic, time.Hour)
 	if err != nil {
 		return "", err
 	}
@@ -5894,13 +5894,34 @@ func TestSendRecv(t *testing.T) {
 	})
 
 	t.Run("RecvContextCancellation", func(t *testing.T) {
-		// Create a context with a shorter timeout than the Recv timeout (1s < 5s)
-		timeoutCtx, cancel := WithTimeout(dbosCtx, 1*time.Second)
+		// A workflow past its deadline loses ownership and cannot start Recv, so the
+		// deadline must not pass before the workflow waits in Recv. The workflow gets a
+		// deadline far in the future, shorter than the Recv timeout; once it waits in
+		// Recv, the test expires it.
+		timeoutCtx, cancel := WithTimeout(dbosCtx, 30*time.Minute)
 		defer cancel()
 
 		// Start the workflow with the timeout context
 		handle, err := RunWorkflow(timeoutCtx, recvContextCancelWorkflow, "context-cancel-topic")
 		require.NoError(t, err, "failed to start recv context cancel workflow")
+
+		// Recv checkpoints its own timeout as a DBOS.sleep step just before it waits.
+		require.Eventually(t, func() bool {
+			steps, err := GetWorkflowSteps(dbosCtx, handle.GetWorkflowID())
+			if err != nil {
+				return false
+			}
+			for _, step := range steps {
+				if step.StepName == "DBOS.sleep" {
+					return true
+				}
+			}
+			return false
+		}, 10*time.Second, 50*time.Millisecond, "workflow did not start waiting in Recv")
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		// Reach the deadline: the timeouts monitor cancels the workflow on its next pass.
+		expireDeadline(t, dbosCtx, status.Deadline)
 
 		// Get the result - should fail with context deadline exceeded
 		result, err := handle.GetResult()
@@ -5909,7 +5930,7 @@ func TestSendRecv(t *testing.T) {
 		require.Equal(t, "", result, "expected empty result when context cancelled")
 
 		// Verify the workflow status is cancelled
-		status, err := handle.GetStatus()
+		status, err = handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		require.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 	})
@@ -7681,8 +7702,9 @@ func TestWorkflowTimeout(t *testing.T) {
 	waitForCancelWorkflow := func(ctx Context, _ string) (string, error) {
 		// This workflow will wait indefinitely until it is cancelled
 		<-ctx.Done()
-		assert.True(t, errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded),
-			"workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
+		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %w", ctx.Err())
+		}
 		return "", ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflow)
@@ -7705,7 +7727,9 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Check the workflow status: should be cancelled
 		require.Eventually(t, func() bool {
 			status, err := handle.GetStatus()
-			require.NoError(t, err, "failed to get workflow status")
+			if err != nil {
+				return false
+			}
 			return status.Status == WorkflowStatusCancelled
 		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
 	}
@@ -7715,10 +7739,11 @@ func TestWorkflowTimeout(t *testing.T) {
 	waitForCancelWorkflowManual := func(ctx Context, _ string) (string, error) {
 		// This workflow will wait indefinitely until it is cancelled
 		<-ctx.Done()
-		assert.True(t, errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded),
-			"workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %v", ctx.Err())
 		wfcStart.Set()
 		wfcStop.Wait()
+		if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("workflow was cancelled, but context error is not context.Canceled nor context.DeadlineExceeded: %w", ctx.Err())
+		}
 		return "", ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflowManual)
@@ -7741,7 +7766,9 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Check the workflow status: should be cancelled
 		require.Eventually(t, func() bool {
 			status, err := handle.GetStatus()
-			require.NoError(t, err, "failed to get workflow status")
+			if err != nil {
+				return false
+			}
 			return status.Status == WorkflowStatusCancelled
 		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
 
@@ -7761,19 +7788,35 @@ func TestWorkflowTimeout(t *testing.T) {
 		return "", ctx.Err()
 	}
 
+	// The step signals once it runs, so the test sets the deadline off only after the step started.
+	waitForCancelStepStarted := make(chan struct{}, 1)
 	waitForCancelWorkflowWithStep := func(ctx Context, _ string) (string, error) {
 		return RunAsStep(ctx, func(context context.Context) (string, error) {
+			waitForCancelStepStarted <- struct{}{}
 			return waitForCancelStep(context)
 		})
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelWorkflowWithStep)
 
 	runWorkflowWithStepTimeout := func(t *testing.T) {
-		// Start a workflow that will run a step that triggers cancellation
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 100*time.Millisecond)
+		// Start a workflow that will run a step that triggers cancellation.
+		// A workflow past its deadline loses ownership and cannot start a step, so the
+		// deadline must not pass before the step runs. The workflow gets a deadline far
+		// in the future; once the step runs, the test expires it.
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, time.Hour)
 		defer cancelFunc() // Ensure we clean up the context
 		handle, err := RunWorkflow(cancelCtx, waitForCancelWorkflowWithStep, "wf-with-step-timeout")
 		require.NoError(t, err, "failed to start workflow with step timeout")
+
+		select {
+		case <-waitForCancelStepStarted:
+		case <-time.After(10 * time.Second):
+			require.FailNow(t, "workflow did not start its step")
+		}
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		// Reach the deadline: the timeouts monitor cancels the workflow on its next pass.
+		expireDeadline(t, dbosCtx, status.Deadline)
 
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
@@ -7783,7 +7826,9 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Check the workflow status: should be cancelled
 		require.Eventually(t, func() bool {
 			status, err := handle.GetStatus()
-			require.NoError(t, err, "failed to get workflow status")
+			if err != nil {
+				return false
+			}
 			return status.Status == WorkflowStatusCancelled
 		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
 	}
@@ -7811,14 +7856,17 @@ func TestWorkflowTimeout(t *testing.T) {
 			return "", fmt.Errorf("failed to cast systemDB to sysDB")
 		}
 		query := sysDB.RenderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`, sysDB.Dialect().SchemaPrefix(sysDB.Schema()))
-		require.Eventually(t, func() bool {
+		cancelled := false
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
 			var status WorkflowStatusType
-			err := sysDB.Pool().QueryRow(uncancellableCtx, query, wfid).Scan(&status)
-			if err != nil {
-				return false
+			if err := sysDB.Pool().QueryRow(uncancellableCtx, query, wfid).Scan(&status); err == nil && status == WorkflowStatusCancelled {
+				cancelled = true
+				break
 			}
-			return status == WorkflowStatusCancelled
-		}, 5*time.Second, 50*time.Millisecond, "workflow did not transition to cancelled status in time")
+		}
+		if !cancelled {
+			return "", fmt.Errorf("workflow %s did not transition to cancelled status in time", wfid)
+		}
 
 		// After cancellation, try to run a simple step
 		// This should return a ErrorCodeWorkflowCancelled error
@@ -7854,14 +7902,17 @@ func TestWorkflowTimeout(t *testing.T) {
 		_, err := RunAsStep(stepCtx, func(context context.Context) (string, error) {
 			return waitForCancelStep(context)
 		})
-		assert.True(t, errors.Is(err, context.DeadlineExceeded), "expected step to timeout, got: %v", err)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return "", fmt.Errorf("expected step to timeout, got: %v", err)
+		}
 		return "step-timed-out", nil
 	}
 	RegisterWorkflow(dbosCtx, shorterStepTimeoutWorkflow)
 
 	runShorterStepTimeout := func(t *testing.T) {
-		// Start a workflow that runs a step with a shorter timeout than the workflow itself
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 5*time.Second)
+		// Start a workflow that runs a step with a shorter timeout than the workflow itself.
+		// The workflow's own deadline must never pass: only the step's deadline is under test.
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, time.Hour)
 		defer cancelFunc() // Ensure we clean up the context
 		handle, err := RunWorkflow(cancelCtx, shorterStepTimeoutWorkflow, "shorter-step-timeout")
 		require.NoError(t, err, "failed to start shorter step timeout workflow")
@@ -7875,16 +7926,19 @@ func TestWorkflowTimeout(t *testing.T) {
 		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected workflow status to be WorkflowStatusSuccess")
 	}
 
-	detachedStep := func(ctx context.Context, timeout time.Duration) (string, error) {
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(timeout):
+	// The detached step signals once it runs, then runs until its workflow is cancelled,
+	// and completes after that: its own context must stay live.
+	detachedStepStarted := make(chan struct{}, 1)
+	detachedStep := func(ctx context.Context, workflowDone <-chan struct{}) (string, error) {
+		detachedStepStarted <- struct{}{}
+		<-workflowDone
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Errorf("detached step context was cancelled with its workflow: %w", err)
 		}
 		return "detached-step-completed", nil
 	}
 
-	detachedStepWorkflow := func(ctx Context, timeout time.Duration) (string, error) {
+	detachedStepWorkflow := func(ctx Context, _ string) (string, error) {
 		// This workflow will run a step that is not cancelable.
 		// What this means is the workflow *will* be cancelled, but the step will run normally.
 		// The workflow being cancelled mid-step interrupts the step checkpoint,
@@ -7892,12 +7946,14 @@ func TestWorkflowTimeout(t *testing.T) {
 		// resume would re-execute the step.
 		stepCtx := WithoutCancel(ctx)
 		res, err := RunAsStep(stepCtx, func(context context.Context) (string, error) {
-			return detachedStep(context, timeout*2)
+			return detachedStep(context, ctx.Done())
 		})
 		if err != nil {
 			return "", err
 		}
-		assert.Equal(t, "detached-step-completed", res, "expected detached step result to be 'detached-step-completed'")
+		if res != "detached-step-completed" {
+			return "", fmt.Errorf("expected detached step result to be 'detached-step-completed', got %q", res)
+		}
 		return res, ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, detachedStepWorkflow)
@@ -7906,17 +7962,26 @@ func TestWorkflowTimeout(t *testing.T) {
 		// Start a workflow that runs a detached (uncancelable) step.
 		// A detached step only ignores *context* cancellation; its start is still
 		// gated by checkOperationExecution, which refuses the step if the workflow
-		// is already marked CANCELLED in the DB. A 1ms deadline races the step's
-		// first DB read against the deadline's cancel-DB-write, so under connection
-		// contention the step can be refused with ErrorCodeWorkflowCancelled ("failed to run
-		// detached step"). Give the step a comfortable head start to pass that check
-		// before the deadline fires; the step still runs 2s (input*2), well past the
-		// deadline, so the workflow is genuinely cancelled mid-step.
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 250*time.Millisecond)
+		// is already marked CANCELLED in the DB. So the deadline must not pass before
+		// the step runs: the workflow gets a deadline far in the future, and the test
+		// expires it once the step runs. The step runs until the workflow is cancelled,
+		// so the workflow is genuinely cancelled mid-step, and the step completes after.
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, time.Hour)
 		defer cancelFunc() // Ensure we clean up the context
 
-		handle, err := RunWorkflow(cancelCtx, detachedStepWorkflow, 1*time.Second)
+		handle, err := RunWorkflow(cancelCtx, detachedStepWorkflow, "detached-step")
 		require.NoError(t, err, "failed to start detached step workflow")
+
+		select {
+		case <-detachedStepStarted:
+		case <-time.After(10 * time.Second):
+			require.FailNow(t, "workflow did not start its detached step")
+		}
+		status, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get workflow status")
+		// Reach the deadline: the timeouts monitor cancels the workflow on its next pass.
+		expireDeadline(t, dbosCtx, status.Deadline)
+
 		// Wait for the workflow to complete and get the result
 		result, err := handle.GetResult()
 		assert.True(t, errors.Is(err, context.DeadlineExceeded), "Expected deadline exceeded error, got: %v", err)
@@ -7924,47 +7989,87 @@ func TestWorkflowTimeout(t *testing.T) {
 		// CANCELLED row stores no outcome, and the run adopts the recorded outcome.
 		assert.Equal(t, "", result, "expected no result for a cancelled workflow")
 		// Check the workflow status: should be cancelled
-		status, err := handle.GetStatus()
+		status, err = handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 	}
 
+	// The parent runs on a workflow goroutine, not the test goroutine, so it reports to the
+	// test through these channels instead of asserting: whether it started its child, and
+	// the error it got awaiting that child.
+	childStarted := make(chan error, 1)
+	childAwaitErr := make(chan error, 1)
 	waitForCancelParent := func(ctx Context, childWorkflowID string) (string, error) {
 		// This workflow will run a child workflow that waits indefinitely until it is cancelled
 		childHandle, err := RunWorkflow(ctx, waitForCancelWorkflow, "child-wait-for-cancel", WithWorkflowID(childWorkflowID))
-		require.NoError(t, err, "failed to start child workflow")
+		childStarted <- err
+		if err != nil {
+			return "", err
+		}
 
-		// Wait for the child workflow to complete. The terminal error may come
-		// back either wrapped as a DBOS ErrorCodeWorkflowCancelled error or as the raw
-		// context deadline-exceeded, depending on which side observed the
-		// cancellation first — both are valid signals that the child was
-		// cancelled.
+		// Wait for the child workflow to complete.
 		result, err := childHandle.GetResult()
-		assert.True(t,
-			errors.Is(err, ErrWorkflowCancelled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled),
-			"expected child workflow to be cancelled, got: %v", err)
+		childAwaitErr <- err
 		return result, ctx.Err()
 	}
 	RegisterWorkflow(dbosCtx, waitForCancelParent)
 
 	runChildWorkflowTimesout := func(t *testing.T) {
-		// Start a parent workflow that runs a child workflow that waits indefinitely
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		// Start a parent workflow that runs a child workflow that waits indefinitely.
+		// A parent past its deadline loses ownership and cannot start a child, so the
+		// deadline must not pass before the child exists. The parent gets a deadline far
+		// in the future; once the child has inherited it, the test expires both.
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, time.Hour)
 		defer cancelFunc() // Ensure we clean up the context
 
 		childWorkflowID := "child-wait-for-cancel-" + uuid.NewString()
 		handle, err := RunWorkflow(cancelCtx, waitForCancelParent, childWorkflowID)
 		require.NoError(t, err, "failed to start parent workflow")
 
+		select {
+		case err := <-childStarted:
+			require.NoError(t, err, "failed to start child workflow")
+		case <-time.After(10 * time.Second):
+			require.FailNow(t, "parent workflow did not start its child")
+		}
+
+		// The child inherits the parent's deadline.
+		parentStatus, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get parent workflow status")
+		childStatusHandle, err := RetrieveWorkflow[string](dbosCtx, childWorkflowID)
+		require.NoError(t, err, "failed to get child workflow handle")
+		childStatus, err := childStatusHandle.GetStatus()
+		require.NoError(t, err, "failed to get child workflow status")
+		require.False(t, parentStatus.Deadline.IsZero(), "parent workflow should have a deadline")
+		assert.Equal(t, parentStatus.Deadline.UnixMilli(), childStatus.Deadline.UnixMilli(), "child should inherit the parent's deadline")
+
+		// Reach the deadline: the timeouts monitor cancels both workflows on its next pass.
+		expireDeadline(t, dbosCtx, parentStatus.Deadline)
+
 		// Wait for the parent workflow to complete and get the result
 		result, err := handle.GetResult()
 		assert.True(t, errors.Is(err, context.DeadlineExceeded), "Expected deadline exceeded error, got: %v", err)
 		assert.Equal(t, "", result, "expected result to be an empty string")
 
+		// The parent saw its child cancelled. The terminal error may come back either
+		// wrapped as a DBOS ErrorCodeWorkflowCancelled error or as the raw context
+		// deadline-exceeded, depending on which side observed the cancellation first:
+		// both are valid signals that the child was cancelled.
+		select {
+		case err := <-childAwaitErr:
+			assert.True(t,
+				errors.Is(err, ErrWorkflowCancelled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled),
+				"expected child workflow to be cancelled, got: %v", err)
+		case <-time.After(10 * time.Second):
+			require.FailNow(t, "parent workflow did not finish awaiting its child")
+		}
+
 		// Check the workflow status: should be cancelled
 		require.Eventually(t, func() bool {
 			status, err := handle.GetStatus()
-			require.NoError(t, err, "failed to get workflow status")
+			if err != nil {
+				return false
+			}
 			return status.Status == WorkflowStatusCancelled
 		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
 
@@ -7977,29 +8082,41 @@ func TestWorkflowTimeout(t *testing.T) {
 		}, 5*time.Second, 50*time.Millisecond, "expected child workflow status to be WorkflowStatusCancelled")
 	}
 
+	// The detached child runs until the test closes detachedChildRelease, so it is still
+	// running when its parent is cancelled.
 	var detachedChildExecutions atomic.Int64
-	detachedChild := func(ctx Context, timeout time.Duration) (string, error) {
+	detachedChildRelease := make(chan struct{})
+	detachedChild := func(ctx Context, _ string) (string, error) {
 		detachedChildExecutions.Add(1)
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case <-time.After(timeout):
+		case <-detachedChildRelease:
 		}
 		return "detached-step-completed", nil
 	}
 	RegisterWorkflow(dbosCtx, detachedChild)
 
-	detachedChildWorkflowParent := func(ctx Context, timeout time.Duration) (string, error) {
+	detachedChildStarted := make(chan error, 1)
+	detachedChildWorkflowParent := func(ctx Context, _ string) (string, error) {
 		childCtx := WithoutCancel(ctx)
 		myID, err := GetWorkflowID(ctx)
-		require.NoError(t, err, "failed to get parent workflow ID")
+		if err != nil {
+			return "", fmt.Errorf("failed to get parent workflow ID: %w", err)
+		}
 		childWorkflowID := fmt.Sprintf("%s-detached-child", myID)
-		childHandle, err := RunWorkflow(childCtx, detachedChild, timeout*2, WithWorkflowID(childWorkflowID))
-		require.NoError(t, err, "failed to start child workflow")
+		childHandle, err := RunWorkflow(childCtx, detachedChild, "detached", WithWorkflowID(childWorkflowID))
+		select {
+		case detachedChildStarted <- err:
+		default:
+		}
+		if err != nil {
+			return "", fmt.Errorf("failed to start child workflow: %w", err)
+		}
 
 		// Wait for the child workflow to complete. On the first execution the
-		// parent is cancelled mid-await, so getResult is interrupted (not
-		// checkpointed) even though the detached child succeeds; a resume
+		// parent is cancelled while the child runs, so getResult is not
+		// checkpointed even though the detached child succeeds; a resume
 		// replays the await and adopts the child's recorded success.
 		result, err := childHandle.GetResult()
 		if err != nil {
@@ -8037,11 +8154,37 @@ func TestWorkflowTimeout(t *testing.T) {
 	})
 
 	t.Run("ChildWorkflowDetached", func(t *testing.T) {
-		timeout := 500 * time.Millisecond
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, timeout)
+		// A parent past its deadline loses ownership and cannot start a child, so the
+		// deadline must not pass before the child exists. The parent gets a deadline far
+		// in the future, and the test expires it once the child runs.
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, time.Hour)
 		defer cancelFunc()
-		handle, err := RunWorkflow(cancelCtx, detachedChildWorkflowParent, timeout)
+		handle, err := RunWorkflow(cancelCtx, detachedChildWorkflowParent, "parent")
 		require.NoError(t, err, "failed to start parent workflow with detached child")
+
+		select {
+		case err := <-detachedChildStarted:
+			require.NoError(t, err, "failed to start detached child workflow")
+		case <-time.After(10 * time.Second):
+			require.FailNow(t, "parent workflow did not start its detached child")
+		}
+		parentStatus, err := handle.GetStatus()
+		require.NoError(t, err, "failed to get parent workflow status")
+		// Reach the deadline: the timeouts monitor cancels the parent on its next pass.
+		expireDeadline(t, dbosCtx, parentStatus.Deadline)
+		require.Eventually(t, func() bool {
+			status, err := handle.GetStatus()
+			return err == nil && status.Status == WorkflowStatusCancelled
+		}, 10*time.Second, 50*time.Millisecond, "parent workflow did not reach cancelled status in time")
+
+		// The detached child is not cancelled with its parent. The parent awaits it
+		// without cancellation, so release the child before the parent's result.
+		childHandle, err := RetrieveWorkflow[string](dbosCtx, fmt.Sprintf("%s-detached-child", handle.GetWorkflowID()))
+		require.NoError(t, err, "failed to get child workflow handle")
+		status, err := childHandle.GetStatus()
+		require.NoError(t, err, "failed to get child workflow status")
+		assert.Equal(t, WorkflowStatusPending, status.Status, "expected the detached child to still run after its parent is cancelled")
+		close(detachedChildRelease)
 
 		// Wait for the parent workflow to complete and get the result
 		result, err := handle.GetResult()
@@ -8051,13 +8194,13 @@ func TestWorkflowTimeout(t *testing.T) {
 		assert.Equal(t, "", result, "expected no result for a cancelled workflow")
 
 		// Check the workflow status: should be cancelled
-		status, err := handle.GetStatus()
+		status, err = handle.GetStatus()
 		require.NoError(t, err, "failed to get workflow status")
 		assert.Equal(t, WorkflowStatusCancelled, status.Status, "expected workflow status to be WorkflowStatusCancelled")
 
-		// Check the child workflow status: should be cancelled
-		childHandle, err := RetrieveWorkflow[string](dbosCtx, fmt.Sprintf("%s-detached-child", handle.GetWorkflowID()))
-		require.NoError(t, err, "failed to get child workflow handle")
+		childResult, err := childHandle.GetResult()
+		require.NoError(t, err, "detached child workflow should succeed")
+		assert.Equal(t, "detached-step-completed", childResult)
 		status, err = childHandle.GetStatus()
 		require.NoError(t, err, "failed to get child workflow status")
 		assert.Equal(t, WorkflowStatusSuccess, status.Status, "expected child workflow status to be WorkflowStatusSuccess")
@@ -8088,7 +8231,9 @@ func TestWorkflowTimeout(t *testing.T) {
 		require.Eventually(t, func() bool {
 			var err error
 			status, err = handle.GetStatus()
-			require.NoError(t, err, "failed to get workflow status")
+			if err != nil {
+				return false
+			}
 			return status.Status == WorkflowStatusCancelled
 		}, 5*time.Second, 100*time.Millisecond, "workflow did not reach cancelled status in time")
 
