@@ -1581,6 +1581,9 @@ func TestCustomPool(t *testing.T) {
 
 		require.NoError(t, pool.Ping(context.Background()), "custom pool should still be usable after Shutdown")
 
+		if detectCockroach(t, pool) {
+			return // no LISTEN/NOTIFY
+		}
 		// The listener's connection must not return to the pool still subscribed.
 		for _, conn := range pool.AcquireAllIdle(context.Background()) {
 			var listening int
