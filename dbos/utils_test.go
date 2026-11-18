@@ -396,6 +396,37 @@ func insertSuspendedWorkflow(t *testing.T, ctx Context, suspendKey *string, wake
 	return workflowID
 }
 
+// expireDeadline makes deadline pass now: every workflow with that deadline gets now as
+// its deadline instead, so the next pass of the workflow timeouts monitor cancels them,
+// and their running executions with them. Workflows with other deadlines keep theirs.
+func expireDeadline(t *testing.T, ctx Context, deadline time.Time) {
+	t.Helper()
+	require.False(t, deadline.IsZero(), "no deadline to expire")
+	sysDB := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	// A minute in the past, so a database clock behind this one still sees the deadline passed.
+	res, err := sysDB.Pool().Exec(context.Background(), sysDB.RenderSQL(
+		`UPDATE %sworkflow_status SET workflow_deadline_epoch_ms = $1 WHERE workflow_deadline_epoch_ms = $2`, sysDB.Dialect().SchemaPrefix(sysDB.Schema())),
+		time.Now().Add(-time.Minute).UnixMilli(), deadline.UnixMilli())
+	require.NoError(t, err)
+	rows, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.Positive(t, rows, "no workflow has the deadline %v", deadline)
+}
+
+// setWorkflowTimeout replaces the stored timeout of a workflow that has no deadline yet,
+// so the deadline it gets on dequeue is computed from the new timeout.
+func setWorkflowTimeout(t *testing.T, ctx Context, workflowID string, timeout time.Duration) {
+	t.Helper()
+	sysDB := ctx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	res, err := sysDB.Pool().Exec(context.Background(), sysDB.RenderSQL(
+		`UPDATE %sworkflow_status SET workflow_timeout_ms = $1 WHERE workflow_uuid = $2 AND workflow_deadline_epoch_ms IS NULL`, sysDB.Dialect().SchemaPrefix(sysDB.Schema())),
+		timeout.Milliseconds(), workflowID)
+	require.NoError(t, err)
+	rows, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, rows, "workflow %s not found or already has a deadline", workflowID)
+}
+
 // wakeTimeOf reads a workflow's delay_until_epoch_ms.
 func wakeTimeOf(t *testing.T, ctx Context, workflowID string) int64 {
 	t.Helper()
