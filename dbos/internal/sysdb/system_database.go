@@ -162,6 +162,7 @@ type SysDB struct {
 	encodeScheduledInput func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error)
 	schema               string
 	launched             bool
+	disableListener      bool
 	isCockroachDB        bool
 	appName              string
 
@@ -1005,6 +1006,7 @@ type NewSystemDatabaseInput struct {
 	StartupTimeout               time.Duration
 	IdleTransactionTimeout       time.Duration // idle_in_transaction_session_timeout for a pool we create; zero or less leaves the server's setting
 	NotificationCoalesceInterval time.Duration
+	DisableListener              bool // hold no LISTEN connection; waiters are woken by polling
 	SkipMigrations               bool
 	Sharding                     ShardingBackendFactory // When set, builds a sharded system database backend.
 	// EncodeScheduledInput serializes the input of a schedule-created workflow
@@ -1306,6 +1308,7 @@ func NewSystemDatabase(ctx context.Context, inputs NewSystemDatabaseInput) (Syst
 		logger:                       logger.With("service", "system_database"),
 		schema:                       databaseSchema,
 		isCockroachDB:                isCockroach,
+		disableListener:              inputs.DisableListener,
 		sharded:                      sharded,
 		sharding:                     sharding,
 		customPool:                   customPool != nil,
@@ -1372,7 +1375,7 @@ func (s *SysDB) Launch(ctx context.Context) {
 		}()
 	}
 
-	if s.ListenNotifyPool() == nil {
+	if s.disableListener || s.ListenNotifyPool() == nil {
 		go func() {
 			s.notificationPollerLoop(ctx)
 			close(done)

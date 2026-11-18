@@ -1508,8 +1508,10 @@ func TestQueueTimeouts(t *testing.T) {
 	})
 
 	t.Run("EnqueueWorkflowThatEnqueuesATimeoutWorkflow", func(t *testing.T) {
-		// Start a workflow that enqueues another workflow that waits indefinitely
-		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Millisecond)
+		// Start a workflow that enqueues another workflow that waits indefinitely.
+		// The timeout must be long enough for the parent to enqueue the child
+		// before the deadline fires, or the cancelled parent never creates it.
+		cancelCtx, cancelFunc := WithTimeout(dbosCtx, 1*time.Second)
 		defer cancelFunc() // Ensure we clean up the context
 
 		childWorkflowID := uuid.NewString()

@@ -783,6 +783,7 @@ func NewContext(ctx context.Context, inputConfig Config) (Context, error) {
 		ConnectionAppName:            config.AppName,
 		IdleTransactionTimeout:       config.SystemDBIdleTransactionTimeout,
 		NotificationCoalesceInterval: config.NotificationCoalesceInterval,
+		DisableListener:              config.isClient,
 		Sharding:                     shardingFactory,
 		EncodeScheduledInput: func(ctx context.Context, scheduledTime time.Time, scheduleContext json.RawMessage) (*string, string, error) {
 			ser := resolveEncoder(ctx)

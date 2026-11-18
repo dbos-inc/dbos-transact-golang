@@ -2706,6 +2706,23 @@ func TestClientGetEvent(t *testing.T) {
 	require.True(t, queueEntriesAreCleanedUp(serverCtx), "expected queue entries to be cleaned up after get event test")
 }
 
+// TestClientHoldsNoListenerConnection verifies a client keeps no LISTEN
+// connection checked out of its pool.
+func TestClientHoldsNoListenerConnection(t *testing.T) {
+	skipIfSqlite(t, "inspects the pgx pool")
+	setupDBOS(t, setupDBOSOptions{dropDB: true}) // migrates the schema the client verifies
+
+	client, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Shutdown(client, 30*time.Second) })
+
+	// The listener is the only connection an idle client would hold.
+	pool := PgxPool(client.(*dbosContext).systemDB.(*sysdb.SysDB).Pool())
+	require.Never(t, func() bool {
+		return pool.Stat().AcquiredConns() > 0
+	}, 500*time.Millisecond, 10*time.Millisecond, "an idle client should hold no connection")
+}
+
 // TestClientTypedHandles verifies the typed handle helpers (ClientRetrieveWorkflow,
 // ClientForkWorkflow, ClientResumeWorkflow, ClientResumeWorkflows) return handles
 // whose GetResult decodes the workflow output into the requested type.
