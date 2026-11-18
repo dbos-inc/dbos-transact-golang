@@ -116,19 +116,11 @@ func (r *fakeRows) Scan(dest ...any) error {
 func (r *fakeRows) Err() error   { return r.err }
 func (r *fakeRows) Close() error { return nil }
 
-// fakeQueryPool returns rows for every query, or what answer returns when it is set.
-// It counts the queries it receives.
 type fakeQueryPool struct {
-	rows    Rows
-	answer  func(query string, args []any) (Rows, error)
-	queries int
+	rows Rows
 }
 
 func (p *fakeQueryPool) Query(ctx context.Context, q string, args ...any) (Rows, error) {
-	p.queries++
-	if p.answer != nil {
-		return p.answer(q, args)
-	}
 	return p.rows, nil
 }
 
@@ -146,12 +138,6 @@ func (p *fakeQueryPool) BeginTx(ctx context.Context, opts TxOptions) (Tx, error)
 
 func (p *fakeQueryPool) Ping(ctx context.Context) error { return nil }
 func (p *fakeQueryPool) Close()                         {}
-
-// fakeTx is a caller's transaction over the same fake.
-type fakeTx struct{ fakeQueryPool }
-
-func (*fakeTx) Commit(context.Context) error   { return nil }
-func (*fakeTx) Rollback(context.Context) error { return nil }
 
 func newFakeSysDB(rows Rows) *SysDB {
 	return &SysDB{

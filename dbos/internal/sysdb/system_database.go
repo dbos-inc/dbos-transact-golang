@@ -2405,12 +2405,13 @@ func (s *SysDB) CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInpu
 	if len(input.WorkflowIDs) == 0 {
 		return nil, nil
 	}
-	tx, q := input.Tx, Querier(s.pool)
-	switch {
-	case s.sharded:
+	tx := input.Tx
+	if s.sharded {
 		// In a sharded database, we run one cancel query per shard key, outside any caller transaction
 		tx = nil
-	case tx != nil:
+	}
+	q := Querier(s.pool)
+	if tx != nil {
 		q = tx
 	}
 	var found []string
@@ -2659,6 +2660,19 @@ type keyedWorkflow struct {
 	key string
 }
 
+// idsByKey groups workflow IDs by shard key, with the keys in order of first appearance.
+func idsByKey(workflows []keyedWorkflow) ([]string, map[string][]string) {
+	var keys []string
+	byKey := make(map[string][]string)
+	for _, w := range workflows {
+		if _, ok := byKey[w.key]; !ok {
+			keys = append(keys, w.key)
+		}
+		byKey[w.key] = append(byKey[w.key], w.id)
+	}
+	return keys, byKey
+}
+
 // singleKeyOf is the one shard key a batch acts under. A batch spanning keys is
 // refused, as no single transaction could apply it all-or-nothing.
 func (s *SysDB) singleKeyOf(ctx context.Context, workflowIDs []string, operation string) (string, error) {
@@ -2699,14 +2713,7 @@ func (s *SysDB) applyByLevel(ctx context.Context, q Querier, workflowIDs []strin
 	}
 	root := true
 	for len(level) > 0 {
-		byKey := make(map[string][]string)
-		keys := make([]string, 0)
-		for _, w := range level {
-			if _, ok := byKey[w.key]; !ok {
-				keys = append(keys, w.key)
-			}
-			byKey[w.key] = append(byKey[w.key], w.id)
-		}
+		keys, byKey := idsByKey(level)
 		for _, key := range keys {
 			if err := apply(WithShardKeyScope(ctx, key), key, byKey[key], root); err != nil {
 				return err
@@ -2738,9 +2745,25 @@ func (s *SysDB) childrenOf(ctx context.Context, q Querier, parents []keyedWorkfl
 	if len(parents) == 0 {
 		return nil, nil
 	}
-	query, args, err := s.childrenQuery(parents)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list child workflows: %w", err)
+	table := s.dialect.SchemaPrefix(s.schema) + "workflow_status"
+	keys, byKey := idsByKey(parents)
+	var query string
+	var args []any
+	if s.sharded {
+		ors := make([]string, 0, len(keys))
+		for _, key := range keys {
+			args = append(args, key, byKey[key])
+			ors = append(ors, fmt.Sprintf("(parent_shard_key = $%d AND parent_workflow_id = ANY($%d))", len(args)-1, len(args)))
+		}
+		query = s.RenderSQL(`SELECT workflow_uuid, shard_key FROM %s WHERE %s`, table, strings.Join(ors, " OR "))
+	} else {
+		// The only key is "", and the children have none to read.
+		ids, err := encodeArrayParam(s.dialect, byKey[""])
+		if err != nil {
+			return nil, fmt.Errorf("failed to list child workflows: %w", err)
+		}
+		args = []any{ids}
+		query = s.RenderSQL(`SELECT workflow_uuid, '' FROM %s WHERE %s`, table, dialectAnyClause(s.dialect, "parent_workflow_id", 1))
 	}
 	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
@@ -2750,11 +2773,7 @@ func (s *SysDB) childrenOf(ctx context.Context, q Querier, parents []keyedWorkfl
 	var children []keyedWorkflow
 	for rows.Next() {
 		var child keyedWorkflow
-		dest := []any{&child.id}
-		if s.sharded {
-			dest = append(dest, &child.key)
-		}
-		if err := rows.Scan(dest...); err != nil {
+		if err := rows.Scan(&child.id, &child.key); err != nil {
 			return nil, fmt.Errorf("failed to scan child workflow: %w", err)
 		}
 		children = append(children, child)
@@ -2763,38 +2782,6 @@ func (s *SysDB) childrenOf(ctx context.Context, q Querier, parents []keyedWorkfl
 		return nil, fmt.Errorf("failed to read child workflows: %w", err)
 	}
 	return children, nil
-}
-
-// childrenQuery is the query of childrenOf: on a sharded database it also reads each
-// child's key.
-func (s *SysDB) childrenQuery(parents []keyedWorkflow) (string, []any, error) {
-	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
-	if !s.sharded {
-		ids := make([]string, len(parents))
-		for i, p := range parents {
-			ids[i] = p.id
-		}
-		encodedIDs, err := encodeArrayParam(s.dialect, ids)
-		if err != nil {
-			return "", nil, err
-		}
-		return s.RenderSQL(`SELECT workflow_uuid FROM %sworkflow_status WHERE %s`, schemaPrefix, dialectAnyClause(s.dialect, "parent_workflow_id", 1)), []any{encodedIDs}, nil
-	}
-	byKey := make(map[string][]string)
-	keys := make([]string, 0)
-	for _, p := range parents {
-		if _, ok := byKey[p.key]; !ok {
-			keys = append(keys, p.key)
-		}
-		byKey[p.key] = append(byKey[p.key], p.id)
-	}
-	var args []any
-	ors := make([]string, 0, len(keys))
-	for _, key := range keys {
-		args = append(args, key, byKey[key])
-		ors = append(ors, fmt.Sprintf("(parent_shard_key = $%d AND parent_workflow_id = ANY($%d))", len(args)-1, len(args)))
-	}
-	return s.RenderSQL(`SELECT workflow_uuid, shard_key FROM %sworkflow_status WHERE `+strings.Join(ors, " OR "), schemaPrefix), args, nil
 }
 
 type GetWorkflowChildrenDBInput struct {

@@ -899,19 +899,11 @@ func (t *cancelFaultTx) Exec(ctx context.Context, query string, args ...any) (Re
 	return t.Tx.Exec(ctx, query, args...)
 }
 
-// childListHookPool runs the armed hook once, after the rows of the next query on
+// childListHookPool runs the stored hook once, after the rows of the next query on
 // the pool that lists workflows by parent are closed.
 type childListHookPool struct {
 	Pool
 	hook atomic.Pointer[func()]
-}
-
-func (p *childListHookPool) arm(hook func()) {
-	if hook == nil {
-		p.hook.Store(nil)
-		return
-	}
-	p.hook.Store(&hook)
 }
 
 func (p *childListHookPool) Query(ctx context.Context, query string, args ...any) (Rows, error) {
@@ -928,14 +920,12 @@ func (p *childListHookPool) Query(ctx context.Context, query string, args ...any
 type afterCloseRows struct {
 	Rows
 	afterClose func()
+	once       sync.Once
 }
 
 func (r *afterCloseRows) Close() error {
 	err := r.Rows.Close()
-	if hook := r.afterClose; hook != nil {
-		r.afterClose = nil
-		hook()
-	}
+	r.once.Do(r.afterClose)
 	return err
 }
 
@@ -4737,7 +4727,7 @@ func TestCancelWorkflows(t *testing.T) {
 	RegisterWorkflow(dbosCtx, swallowCancelWorkflow)
 
 	// Installed before Launch so no goroutine reads sysDB.Pool() during the swap;
-	// armed by CancelWorkflowsRefusesChildStartDuringCancel only.
+	// its hook is set by CancelWorkflowsRefusesChildStartDuringCancel only.
 	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
 	childListPool := &childListHookPool{Pool: sysDB.Pool()}
 	sysDB.SetPool(childListPool)
@@ -4795,11 +4785,12 @@ func TestCancelWorkflows(t *testing.T) {
 		}
 		hookRan := false
 		var startErr error
-		childListPool.arm(func() {
+		hook := func() {
 			hookRan = true
 			startErr = startChild()
-		})
-		defer childListPool.arm(nil)
+		}
+		childListPool.hook.Store(&hook)
+		defer childListPool.hook.Store(nil)
 
 		require.NoError(t, CancelWorkflow(dbosCtx, parentID, WithCancelChildren()))
 		require.True(t, hookRan, "the cancel did not list the children")
