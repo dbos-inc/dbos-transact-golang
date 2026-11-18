@@ -1,11 +1,18 @@
 package sysdb
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
+	"net"
+	"net/url"
+	"os"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +20,7 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestNotificationLoopCompletionDoesNotRequireShutdownWaiter(t *testing.T) {
@@ -214,6 +222,141 @@ func TestIsRetryableAcceptsIdleTransactionKill(t *testing.T) {
 	err := &pgconn.PgError{Code: pgerrcode.IdleInTransactionSessionTimeout, Message: "terminating connection due to idle-in-transaction timeout"}
 	if !(PostgresDialect{}).IsRetryable(err, nil) {
 		t.Fatal("the server's idle-in-transaction kill must be retried")
+	}
+}
+
+// pgx returns io.ErrUnexpectedEOF when the peer closes the connection while a response is
+// awaited (pgproto3 translates io.EOF), e.g. a proxy or pooler dropping the client mid-query.
+func TestIsRetryableAcceptsUnexpectedEOF(t *testing.T) {
+	err := fmt.Errorf("failed to get workflow status: %w", io.ErrUnexpectedEOF)
+	if !(PostgresDialect{}).IsRetryable(err, nil) {
+		t.Fatal("a connection closed mid-response must be retried")
+	}
+}
+
+// cutProxy is a TCP proxy in front of the test database. Once armed, it drops the next client
+// message containing marker and half-closes its side of that connection (FIN, no ErrorResponse),
+// as a pooler or load balancer dropping a client mid-query does.
+type cutProxy struct {
+	ln     net.Listener
+	target string
+	marker []byte
+	armed  atomic.Bool
+	cuts   atomic.Int32
+	wg     sync.WaitGroup
+}
+
+func startCutProxy(t *testing.T, target, marker string) *cutProxy {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &cutProxy{ln: ln, target: target, marker: []byte(marker)}
+	p.wg.Go(func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			p.wg.Go(func() { p.serve(c) })
+		}
+	})
+	return p
+}
+
+// stop waits for the proxied connections to end, so the clients must be closed first.
+func (p *cutProxy) stop() {
+	p.ln.Close()
+	p.wg.Wait()
+}
+
+func (p *cutProxy) serve(c net.Conn) {
+	defer c.Close()
+	s, err := net.Dial("tcp", p.target)
+	if err != nil {
+		return
+	}
+	defer s.Close()
+	p.wg.Go(func() { // server -> client
+		_, _ = io.Copy(c, s)
+		c.Close()
+	})
+	buf := make([]byte, 64<<10)
+	for { // client -> server
+		n, err := c.Read(buf)
+		if err != nil {
+			return
+		}
+		if bytes.Contains(buf[:n], p.marker) && p.armed.CompareAndSwap(true, false) {
+			p.cuts.Add(1)
+			_ = c.(*net.TCPConn).CloseWrite() // FIN
+			_, _ = io.Copy(io.Discard, c)     // keep reading until the client closes, so the kernel sends no RST
+			return
+		}
+		if _, err := s.Write(buf[:n]); err != nil {
+			return
+		}
+	}
+}
+
+// A pgx pool whose connection is closed by the peer mid-query: pgx reports io.ErrUnexpectedEOF,
+// and Retry must run the query again.
+func TestRetryRecoversFromConnectionClosedMidQuery(t *testing.T) {
+	if os.Getenv("DBOS_TEST_BACKEND") == "sqlite" {
+		t.Skip("needs a network connection to the database")
+	}
+	databaseURL := os.Getenv("DBOS_SYSTEM_DATABASE_URL")
+	if databaseURL == "" {
+		password := os.Getenv("PGPASSWORD")
+		if password == "" {
+			password = "dbos"
+		}
+		databaseURL = fmt.Sprintf("postgres://postgres:%s@localhost:5432/dbos?sslmode=disable", url.QueryEscape(password))
+	}
+	u, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := u.Host
+	if u.Port() == "" {
+		target = net.JoinHostPort(u.Hostname(), "5432")
+	}
+
+	const query = "SELECT 'cut me'"
+	proxy := startCutProxy(t, target, query)
+	defer proxy.stop()
+	u.Host = proxy.ln.Addr().String()
+	params := u.Query()
+	params.Set("default_query_exec_mode", "exec") // one message per query, carrying the SQL text
+	u.RawQuery = params.Encode()
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+
+	proxy.armed.Store(true)
+	var attempts []error
+	got, err := RetryWithResult(ctx, func() (string, error) {
+		var v string
+		err := pool.QueryRow(ctx, query).Scan(&v)
+		attempts = append(attempts, err)
+		return v, err
+	})
+	if err != nil {
+		t.Fatalf("the query was not retried: %v", err)
+	}
+	if got != "cut me" {
+		t.Fatalf("got %q; want %q", got, "cut me")
+	}
+	if len(attempts) != 2 || !errors.Is(attempts[0], io.ErrUnexpectedEOF) {
+		t.Fatalf("attempts = %v; want io.ErrUnexpectedEOF, then success", attempts)
+	}
+	if cuts := proxy.cuts.Load(); cuts != 1 {
+		t.Fatalf("the proxy cut %d connections; want 1", cuts)
 	}
 }
 

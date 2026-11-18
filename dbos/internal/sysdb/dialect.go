@@ -304,7 +304,7 @@ func (PostgresDialect) IsRetryable(err error, logger *slog.Logger) bool {
 	if errors.As(err, &cerr) {
 		return true
 	}
-	if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "conn closed") {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "conn closed") {
 		return true
 	}
 	var nerr net.Error
