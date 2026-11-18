@@ -899,8 +899,8 @@ func (t *cancelFaultTx) Exec(ctx context.Context, query string, args ...any) (Re
 	return t.Tx.Exec(ctx, query, args...)
 }
 
-// childListHookPool runs the stored hook once, after the rows of the next query on
-// the pool that lists workflows by parent are closed.
+// childListHookPool runs the stored hook once, after the rows of the next query that
+// lists workflows by parent are closed, on the pool or in a transaction it began.
 type childListHookPool struct {
 	Pool
 	hook atomic.Pointer[func()]
@@ -908,6 +908,28 @@ type childListHookPool struct {
 
 func (p *childListHookPool) Query(ctx context.Context, query string, args ...any) (Rows, error) {
 	rows, err := p.Pool.Query(ctx, query, args...)
+	return p.hooked(query, rows, err)
+}
+
+func (p *childListHookPool) BeginTx(ctx context.Context, opts TxOptions) (Tx, error) {
+	tx, err := p.Pool.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &childListHookTx{Tx: tx, p: p}, nil
+}
+
+type childListHookTx struct {
+	Tx
+	p *childListHookPool
+}
+
+func (t *childListHookTx) Query(ctx context.Context, query string, args ...any) (Rows, error) {
+	rows, err := t.Tx.Query(ctx, query, args...)
+	return t.p.hooked(query, rows, err)
+}
+
+func (p *childListHookPool) hooked(query string, rows Rows, err error) (Rows, error) {
 	if err != nil || !strings.Contains(query, "parent_workflow_id IN") && !strings.Contains(query, "parent_workflow_id = ANY") {
 		return rows, err
 	}
@@ -927,6 +949,46 @@ func (r *afterCloseRows) Close() error {
 	err := r.Rows.Close()
 	r.once.Do(r.afterClose)
 	return err
+}
+
+func insertPendingWorkflow(sysDB *sysdb.SysDB, tx Tx, id, parentID string) error {
+	_, err := sysDB.InsertWorkflowStatus(context.Background(), sysdb.InsertWorkflowStatusDBInput{
+		Status: models.WorkflowStatus{ID: id, Name: "tree", Status: WorkflowStatusPending, ParentWorkflowID: parentID, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		Tx:     tx,
+	})
+	return err
+}
+
+// insertOwnedWorkflow commits a pending workflow and returns its owner token.
+func insertOwnedWorkflow(t *testing.T, sysDB *sysdb.SysDB, id string) string {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := sysDB.Pool().BeginTx(ctx, sysdb.TxOptions{})
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+	require.NoError(t, insertPendingWorkflow(sysDB, tx, id, ""))
+	require.NoError(t, tx.Commit(ctx))
+	return setWorkflowOwner(t, sysDB, id)
+}
+
+// startChildWorkflow starts a child the way its parent does: the child row and the
+// parent's owner check commit in one transaction.
+func startChildWorkflow(sysDB *sysdb.SysDB, parentID, parentXID, childID string) error {
+	ctx := context.Background()
+	tx, err := sysDB.Pool().BeginTx(ctx, sysdb.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := insertPendingWorkflow(sysDB, tx, childID, parentID); err != nil {
+		return err
+	}
+	if err := sysDB.RecordChildWorkflow(ctx, sysdb.RecordChildWorkflowDBInput{
+		ParentWorkflowID: parentID, ParentOwnerXID: parentXID, ChildWorkflowID: childID, StepName: "child", StartedAt: time.Now(), Tx: tx,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // Transaction-level conflicts inside a transactional step. The step function fails
@@ -3674,6 +3736,81 @@ func TestChildWorkflow(t *testing.T) {
 	})
 }
 
+func TestDeleteWorkflows(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// Installed before Launch so no goroutine reads sysDB.Pool() during the swap.
+	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+	childListPool := &childListHookPool{Pool: sysDB.Pool()}
+	sysDB.SetPool(childListPool)
+
+	require.NoError(t, Launch(dbosCtx), "failed to launch DBOS instance")
+
+	remaining := func(t *testing.T, ids ...string) []string {
+		t.Helper()
+		left, err := sysDB.ListWorkflows(context.Background(), sysdb.ListWorkflowsDBInput{WorkflowIDs: ids})
+		require.NoError(t, err, "failed to list workflows")
+		leftIDs := make([]string, 0, len(left))
+		for _, w := range left {
+			leftIDs = append(leftIDs, w.ID)
+		}
+		return leftIDs
+	}
+
+	t.Run("DeleteWorkflowsRemovesChildStartedDuringDelete", func(t *testing.T) {
+		// A child that starts while its parent is deleted with its children must not
+		// outlive the parent: the delete reads it, or its start fails the owner check.
+		parentID, childID := uuid.NewString(), uuid.NewString()
+		parentXID := insertOwnedWorkflow(t, sysDB, parentID)
+
+		// The delete keeps its transaction open while the hook runs, so the start runs
+		// beside it. The hook waits until the start ends, or for a while if the start
+		// waits on a lock of the delete.
+		var startErr error
+		var startDone chan struct{}
+		hook := func() {
+			startDone = make(chan struct{})
+			go func() {
+				defer close(startDone)
+				startErr = startChildWorkflow(sysDB, parentID, parentXID, childID)
+			}()
+			select {
+			case <-startDone:
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+		childListPool.hook.Store(&hook)
+		defer childListPool.hook.Store(nil)
+
+		require.NoError(t, DeleteWorkflows(dbosCtx, []string{parentID}, WithDeleteChildren()))
+		require.NotNil(t, startDone, "the delete did not list the children")
+		select {
+		case <-startDone:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the child start did not end")
+		}
+		if startErr != nil {
+			require.ErrorIs(t, startErr, ErrConflictingWorkflowID, "a child start during the delete fails only the parent's owner check")
+		}
+		require.Empty(t, remaining(t, parentID, childID), "the delete must leave no workflow of the tree")
+	})
+
+	t.Run("DeleteWorkflowsWithChildrenInTransaction", func(t *testing.T) {
+		// A delete inside a workflow runs in the workflow's transaction and sees its writes.
+		ctx := context.Background()
+		parentID, childID := uuid.NewString(), uuid.NewString()
+		tx, err := sysDB.Pool().BeginTx(ctx, sysdb.TxOptions{IsoLevel: sysdb.IsoLevelReadCommitted})
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+		require.NoError(t, insertPendingWorkflow(sysDB, tx, parentID, ""))
+		require.NoError(t, insertPendingWorkflow(sysDB, tx, childID, parentID))
+
+		require.NoError(t, sysDB.DeleteWorkflows(ctx, sysdb.DeleteWorkflowsDBInput{DeleteChildren: true, WorkflowIDs: []string{parentID}, Tx: tx}))
+		require.NoError(t, tx.Commit(ctx))
+		require.Empty(t, remaining(t, parentID, childID))
+	})
+}
+
 // TestChildWorkflowDeterminismCheck verifies that checkChildWorkflow detects a
 // non-deterministic child invocation: if a child workflow is already recorded at
 // a given step ID, re-invoking that step under a different name is rejected with
@@ -4737,14 +4874,6 @@ func TestCancelWorkflows(t *testing.T) {
 
 	t.Run("CancelWorkflowsWithChildren", cancelWorkflowsWithChildren)
 
-	insertPendingWorkflow := func(t *testing.T, tx Tx, id, parentID string) {
-		t.Helper()
-		_, err := sysDB.InsertWorkflowStatus(context.Background(), sysdb.InsertWorkflowStatusDBInput{
-			Status: models.WorkflowStatus{ID: id, Name: "cancel-tree", Status: WorkflowStatusPending, ParentWorkflowID: parentID, CreatedAt: time.Now(), UpdatedAt: time.Now()},
-			Tx:     tx,
-		})
-		require.NoError(t, err, "failed to insert workflow %s", id)
-	}
 	statusesOf := func(t *testing.T, ids ...string) map[string]WorkflowStatusType {
 		t.Helper()
 		statuses, err := sysDB.ListWorkflows(context.Background(), sysdb.ListWorkflowsDBInput{WorkflowIDs: ids})
@@ -4759,35 +4888,14 @@ func TestCancelWorkflows(t *testing.T) {
 	t.Run("CancelWorkflowsRefusesChildStartDuringCancel", func(t *testing.T) {
 		// A child that starts while its parent is cancelled with its children must not
 		// stay pending: once the cancel lists the children, the start fails its owner check.
-		ctx := context.Background()
 		parentID, childID := uuid.NewString(), uuid.NewString()
-		tx, err := sysDB.Pool().BeginTx(ctx, sysdb.TxOptions{})
-		require.NoError(t, err)
-		insertPendingWorkflow(t, tx, parentID, "")
-		require.NoError(t, tx.Commit(ctx))
-		parentXID := setWorkflowOwner(t, sysDB, parentID)
+		parentXID := insertOwnedWorkflow(t, sysDB, parentID)
 
-		// startChild starts the child the way its parent does: the child row and the
-		// parent's owner check commit in one transaction.
-		startChild := func() error {
-			tx, err := sysDB.Pool().BeginTx(ctx, sysdb.TxOptions{})
-			if err != nil {
-				return err
-			}
-			defer tx.Rollback(ctx)
-			insertPendingWorkflow(t, tx, childID, parentID)
-			if err := sysDB.RecordChildWorkflow(ctx, sysdb.RecordChildWorkflowDBInput{
-				ParentWorkflowID: parentID, ParentOwnerXID: parentXID, ChildWorkflowID: childID, StepName: "child", StartedAt: time.Now(), Tx: tx,
-			}); err != nil {
-				return err
-			}
-			return tx.Commit(ctx)
-		}
 		hookRan := false
 		var startErr error
 		hook := func() {
 			hookRan = true
-			startErr = startChild()
+			startErr = startChildWorkflow(sysDB, parentID, parentXID, childID)
 		}
 		childListPool.hook.Store(&hook)
 		defer childListPool.hook.Store(nil)
@@ -4805,8 +4913,8 @@ func TestCancelWorkflows(t *testing.T) {
 		tx, err := sysDB.Pool().BeginTx(ctx, sysdb.TxOptions{IsoLevel: sysdb.IsoLevelReadCommitted})
 		require.NoError(t, err)
 		defer tx.Rollback(ctx)
-		insertPendingWorkflow(t, tx, parentID, "")
-		insertPendingWorkflow(t, tx, childID, parentID)
+		require.NoError(t, insertPendingWorkflow(sysDB, tx, parentID, ""))
+		require.NoError(t, insertPendingWorkflow(sysDB, tx, childID, parentID))
 
 		found, err := sysDB.CancelWorkflows(ctx, sysdb.CancelWorkflowsDBInput{CancelChildren: true, WorkflowIDs: []string{parentID}, Tx: tx})
 		require.NoError(t, err)
