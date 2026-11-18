@@ -3,6 +3,8 @@ package sysdb
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"reflect"
 	"sync"
@@ -214,6 +216,15 @@ func TestIsRetryableAcceptsIdleTransactionKill(t *testing.T) {
 	err := &pgconn.PgError{Code: pgerrcode.IdleInTransactionSessionTimeout, Message: "terminating connection due to idle-in-transaction timeout"}
 	if !(PostgresDialect{}).IsRetryable(err, nil) {
 		t.Fatal("the server's idle-in-transaction kill must be retried")
+	}
+}
+
+// pgx returns io.ErrUnexpectedEOF when the peer closes the connection while a response is
+// awaited (pgproto3 translates io.EOF), e.g. a proxy or pooler dropping the client mid-query.
+func TestIsRetryableAcceptsUnexpectedEOF(t *testing.T) {
+	err := fmt.Errorf("failed to get workflow status: %w", io.ErrUnexpectedEOF)
+	if !(PostgresDialect{}).IsRetryable(err, nil) {
+		t.Fatal("a connection closed mid-response must be retried")
 	}
 }
 
