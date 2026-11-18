@@ -5460,7 +5460,7 @@ func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...Ca
 	return err
 }
 
-// CancelWorkflows cancels multiple workflows in a single database round-trip.
+// CancelWorkflows cancels multiple workflows. With WithCancelChildren, it also cancels all their descendants.
 // Each workflow that exists and is not already in a terminal state (SUCCESS, ERROR, CANCELLED)
 // is moved to CANCELLED and removed from its queue. Missing or already-terminal IDs are silently
 // skipped. Unlike the singular CancelWorkflow, this function does not return

@@ -2396,51 +2396,33 @@ type CancelWorkflowsDBInput struct {
 	OwnerXID       string
 }
 
-// CancelWorkflows cancels the given workflows in a single round-trip. Workflows that
-// are already in a terminal state (SUCCESS, ERROR, CANCELLED) are left untouched.
-// Returns the subset of input IDs that existed in workflow_status (including terminal
-// ones, which are considered existing even though they are not updated).
+// CancelWorkflows cancels the given workflows and, with CancelChildren, all their
+// descendants, one level at a time. Workflows that are already in a terminal state
+// (SUCCESS, ERROR, CANCELLED) are left untouched. Returns the subset of input IDs
+// that existed in workflow_status (including terminal ones, which are considered
+// existing even though they are not updated).
 func (s *SysDB) CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInput) ([]string, error) {
 	if len(input.WorkflowIDs) == 0 {
 		return nil, nil
 	}
-	// In a sharded database, we run one cancel query per shard key
+	tx := input.Tx
 	if s.sharded {
-		var found []string
-		err := s.applyByLevel(ctx, input.WorkflowIDs, input.CancelChildren, "CancelWorkflows", func(ctx context.Context, key string, ids []string, root bool) error {
-			cancelled, err := s.cancelWorkflowIDs(ctx, nil, ids, input.OwnerXID, key)
-			if root {
-				found = cancelled
-			}
-			return err
-		})
-		return found, err
+		// In a sharded database, we run one cancel query per shard key, outside any caller transaction
+		tx = nil
 	}
-	for _, id := range input.WorkflowIDs {
-		if err := s.rejectShardKey(ctx, id, ""); err != nil {
-			return nil, err
+	q := Querier(s.pool)
+	if tx != nil {
+		q = tx
+	}
+	var found []string
+	err := s.applyByLevel(ctx, q, input.WorkflowIDs, input.CancelChildren, "CancelWorkflows", func(ctx context.Context, key string, ids []string, root bool) error {
+		cancelled, err := s.cancelWorkflowIDs(ctx, tx, ids, input.OwnerXID, key)
+		if root {
+			found = cancelled
 		}
-	}
-
-	workflowIDs := make([]string, len(input.WorkflowIDs))
-	copy(workflowIDs, input.WorkflowIDs)
-
-	if input.CancelChildren {
-		for _, workflowID := range workflowIDs {
-			children, err := s.GetWorkflowChildren(ctx, GetWorkflowChildrenDBInput{
-				WorkflowID: workflowID,
-				Tx:         input.Tx,
-			})
-			if err != nil {
-				return nil, err
-			}
-			for _, child := range children {
-				workflowIDs = append(workflowIDs, child.ID)
-			}
-		}
-	}
-
-	return s.cancelWorkflowIDs(ctx, input.Tx, workflowIDs, input.OwnerXID, "")
+		return err
+	})
+	return found, err
 }
 
 func (s *SysDB) cancelWorkflowIDs(ctx context.Context, tx Tx, workflowIDs []string, ownerXID, key string) ([]string, error) {
@@ -2579,35 +2561,18 @@ func AdvisoryLockKey(name string) int64 {
 	return int64(binary.BigEndian.Uint64(sum[:8])) // #nosec G115 -- the sign flip is the point: the key is a signed bigint
 }
 
+// DeleteWorkflows deletes the given workflows and, with DeleteChildren, all their
+// descendants, one level at a time.
 func (s *SysDB) DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInput) error {
-	// In a sharded database, we run one delete query per shard key
-	if s.sharded {
-		if len(input.WorkflowIDs) == 0 {
-			return nil
-		}
-		return s.applyByLevel(ctx, input.WorkflowIDs, input.DeleteChildren, "DeleteWorkflows", func(ctx context.Context, key string, ids []string, _ bool) error {
-			tx, err := s.pool.BeginTx(ctx, TxOptions{})
-			if err != nil {
-				return fmt.Errorf("failed to begin transaction for deleteWorkflows: %w", err)
-			}
-			defer tx.Rollback(ctx)
-			if err := s.deleteWorkflowIDs(ctx, tx, ids, key); err != nil {
-				return err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return fmt.Errorf("failed to commit deleteWorkflows transaction: %w", err)
-			}
-			return nil
-		})
+	if len(input.WorkflowIDs) == 0 {
+		return nil
 	}
-	for _, id := range input.WorkflowIDs {
-		if err := s.rejectShardKey(ctx, id, ""); err != nil {
-			return err
-		}
-	}
-	// If no transaction is provided, create one so the entire operation is atomic
 	tx := input.Tx
-	if tx == nil {
+	if s.sharded {
+		// In a sharded database, each shard key's delete runs in a transaction of its own
+		tx = nil
+	} else if tx == nil {
+		// If no transaction is provided, create one so the entire operation is atomic
 		var err error
 		tx, err = s.pool.BeginTx(ctx, TxOptions{})
 		if err != nil {
@@ -2615,32 +2580,19 @@ func (s *SysDB) DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInpu
 		}
 		defer tx.Rollback(ctx)
 	}
-
-	// Collect all workflow IDs to delete
-	workflowIDs := make([]string, len(input.WorkflowIDs))
-	copy(workflowIDs, input.WorkflowIDs)
-
-	if input.DeleteChildren {
-		for _, wfID := range input.WorkflowIDs {
-			children, err := s.GetWorkflowChildren(ctx, GetWorkflowChildrenDBInput{
-				WorkflowID: wfID,
-				Tx:         tx,
-			})
-			if err != nil {
-				return err
-			}
-			for _, child := range children {
-				workflowIDs = append(workflowIDs, child.ID)
-			}
-		}
+	q := Querier(s.pool)
+	if tx != nil {
+		q = tx
 	}
 
-	if err := s.deleteWorkflowIDs(ctx, tx, workflowIDs, ""); err != nil {
+	if err := s.applyByLevel(ctx, q, input.WorkflowIDs, input.DeleteChildren, "DeleteWorkflows", func(ctx context.Context, key string, ids []string, _ bool) error {
+		return s.deleteWorkflowIDs(ctx, tx, ids, key)
+	}); err != nil {
 		return err
 	}
 
 	// If we created the transaction internally, commit it
-	if input.Tx == nil {
+	if tx != nil && input.Tx == nil {
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("failed to commit deleteWorkflows transaction: %w", err)
 		}
@@ -2649,8 +2601,23 @@ func (s *SysDB) DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInpu
 	return nil
 }
 
-// deleteWorkflowIDs deletes workflowIDs and their payloads, all under key when sharded.
+// deleteWorkflowIDs deletes workflowIDs and their payloads, all under key when sharded,
+// in tx or, without one, in a transaction of its own.
 func (s *SysDB) deleteWorkflowIDs(ctx context.Context, tx Tx, workflowIDs []string, key string) error {
+	if tx == nil {
+		tx, err := s.pool.BeginTx(ctx, TxOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for deleteWorkflows: %w", err)
+		}
+		defer tx.Rollback(ctx)
+		if err := s.deleteWorkflowIDs(ctx, tx, workflowIDs, key); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("failed to commit deleteWorkflows transaction: %w", err)
+		}
+		return nil
+	}
 	// Delete all matching workflows regardless of their state
 	encodedIDs, err := encodeArrayParam(s.dialect, workflowIDs)
 	if err != nil {
@@ -2678,6 +2645,19 @@ type keyedWorkflow struct {
 	key string
 }
 
+// idsByKey groups workflow IDs by shard key, with the keys in order of first appearance.
+func idsByKey(workflows []keyedWorkflow) ([]string, map[string][]string) {
+	var keys []string
+	byKey := make(map[string][]string)
+	for _, w := range workflows {
+		if _, ok := byKey[w.key]; !ok {
+			keys = append(keys, w.key)
+		}
+		byKey[w.key] = append(byKey[w.key], w.id)
+	}
+	return keys, byKey
+}
+
 // singleKeyOf is the one shard key a batch acts under. A batch spanning keys is
 // refused, as no single transaction could apply it all-or-nothing.
 func (s *SysDB) singleKeyOf(ctx context.Context, workflowIDs []string, operation string) (string, error) {
@@ -2699,9 +2679,10 @@ func (s *SysDB) singleKeyOf(ctx context.Context, workflowIDs []string, operation
 
 // applyByLevel applies to the listed workflows, which share one shard key, then with
 // descend to their descendants, which may live under any key: each level is applied
-// before its children are read, so a running parent is stopped before the walk looks
-// for children it could still add. Each key's workflows of a level are applied together.
-func (s *SysDB) applyByLevel(ctx context.Context, workflowIDs []string, descend bool, operation string, apply func(ctx context.Context, key string, ids []string, root bool) error) error {
+// before its children are read through q, so a running parent is stopped before the
+// walk looks for children it could still add. Each key's workflows of a level are
+// applied together.
+func (s *SysDB) applyByLevel(ctx context.Context, q Querier, workflowIDs []string, descend bool, operation string, apply func(ctx context.Context, key string, ids []string, root bool) error) error {
 	rootKey, err := s.singleKeyOf(ctx, workflowIDs, operation)
 	if err != nil {
 		return err
@@ -2717,14 +2698,7 @@ func (s *SysDB) applyByLevel(ctx context.Context, workflowIDs []string, descend 
 	}
 	root := true
 	for len(level) > 0 {
-		byKey := make(map[string][]string)
-		keys := make([]string, 0)
-		for _, w := range level {
-			if _, ok := byKey[w.key]; !ok {
-				keys = append(keys, w.key)
-			}
-			byKey[w.key] = append(byKey[w.key], w.id)
-		}
+		keys, byKey := idsByKey(level)
 		for _, key := range keys {
 			if err := apply(WithShardKeyScope(ctx, key), key, byKey[key], root); err != nil {
 				return err
@@ -2734,7 +2708,7 @@ func (s *SysDB) applyByLevel(ctx context.Context, workflowIDs []string, descend 
 			return nil
 		}
 		root = false
-		children, err := s.childrenOf(ctx, level)
+		children, err := s.childrenOf(ctx, q, level)
 		if err != nil {
 			return err
 		}
@@ -2749,28 +2723,34 @@ func (s *SysDB) applyByLevel(ctx context.Context, workflowIDs []string, descend 
 	return nil
 }
 
-// childrenOf lists the direct children of these workflows. A child may live under any
-// key, so this is a keyless read matched on each parent's key.
-func (s *SysDB) childrenOf(ctx context.Context, parents []keyedWorkflow) ([]keyedWorkflow, error) {
+// childrenOf lists the direct children of these workflows through q. On a sharded
+// database a child may live under any key, so the read is keyless and matches each
+// parent's key.
+func (s *SysDB) childrenOf(ctx context.Context, q Querier, parents []keyedWorkflow) ([]keyedWorkflow, error) {
 	if len(parents) == 0 {
 		return nil, nil
 	}
-	byKey := make(map[string][]string)
-	keys := make([]string, 0)
-	for _, p := range parents {
-		if _, ok := byKey[p.key]; !ok {
-			keys = append(keys, p.key)
-		}
-		byKey[p.key] = append(byKey[p.key], p.id)
-	}
+	table := s.dialect.SchemaPrefix(s.schema) + "workflow_status"
+	keys, byKey := idsByKey(parents)
+	var query string
 	var args []any
-	ors := make([]string, 0, len(keys))
-	for _, key := range keys {
-		args = append(args, key, byKey[key])
-		ors = append(ors, fmt.Sprintf("(parent_shard_key = $%d AND parent_workflow_id = ANY($%d))", len(args)-1, len(args)))
+	if s.sharded {
+		ors := make([]string, 0, len(keys))
+		for _, key := range keys {
+			args = append(args, key, byKey[key])
+			ors = append(ors, fmt.Sprintf("(parent_shard_key = $%d AND parent_workflow_id = ANY($%d))", len(args)-1, len(args)))
+		}
+		query = s.RenderSQL(`SELECT workflow_uuid, shard_key FROM %s WHERE %s`, table, strings.Join(ors, " OR "))
+	} else {
+		// The only key is "", and the children have none to read.
+		ids, err := encodeArrayParam(s.dialect, byKey[""])
+		if err != nil {
+			return nil, fmt.Errorf("failed to list child workflows: %w", err)
+		}
+		args = []any{ids}
+		query = s.RenderSQL(`SELECT workflow_uuid, '' FROM %s WHERE %s`, table, dialectAnyClause(s.dialect, "parent_workflow_id", 1))
 	}
-	query := s.RenderSQL(`SELECT workflow_uuid, shard_key FROM %sworkflow_status WHERE `+strings.Join(ors, " OR "), s.dialect.SchemaPrefix(s.schema))
-	rows, err := s.pool.Query(ctx, query, args...)
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list child workflows: %w", err)
 	}
@@ -2847,7 +2827,7 @@ func (s *SysDB) shardedWorkflowChildren(ctx context.Context, workflowID string) 
 	visited := map[keyedWorkflow]struct{}{level[0]: {}}
 	var children []models.WorkflowStatus
 	for len(level) > 0 {
-		found, err := s.childrenOf(ctx, level)
+		found, err := s.childrenOf(ctx, s.pool, level)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get children of workflow %s: %w", workflowID, err)
 		}
