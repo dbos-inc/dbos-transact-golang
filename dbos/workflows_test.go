@@ -10725,9 +10725,10 @@ func TestNotificationsReachOtherProcesses(t *testing.T) {
 	RegisterWorkflow(writerCtx, writerWorkflow, WithWorkflowName("CrossProcessNotifyWorkflow"))
 	require.NoError(t, Launch(writerCtx))
 
-	reader, err := NewClient(context.Background(), ClientConfig{DatabaseURL: backendDatabaseURL(t)})
-	require.NoError(t, err)
-	t.Cleanup(func() { reader.Shutdown(reader, 30*time.Second) })
+	// A client holds no listener, so the reader is a full context.
+	reader := setupDBOS(t, setupDBOSOptions{})
+	RegisterWorkflow(reader, writerWorkflow, WithWorkflowName("CrossProcessNotifyWorkflow"))
+	require.NoError(t, Launch(reader))
 
 	handle, err := RunWorkflow(writerCtx, writerWorkflow, "")
 	require.NoError(t, err)
