@@ -1653,7 +1653,7 @@ func (s *SysDB) InsertWorkflowStatus(ctx context.Context, input InsertWorkflowSt
 		queueName,
 		input.Status.AuthenticatedUser,
 		input.Status.AssumedRole,
-		authenticatedRoles,
+		string(authenticatedRoles),
 		input.Status.ExecutorID,
 		applicationVersion,
 		input.Status.ApplicationID,
@@ -1898,7 +1898,7 @@ func (s *SysDB) listWorkflows(ctx context.Context, input ListWorkflowsDBInput, i
 		qb.addWhereLessEqual("created_at", input.EndTime.UnixMilli())
 	}
 	if len(input.Status) > 0 {
-		qb.addWhereAny("status", input.Status)
+		qb.addWhereAny("status", toStrings(input.Status))
 	}
 	if len(input.ApplicationVersion) > 0 {
 		qb.addWhereAny("application_version", input.ApplicationVersion)
@@ -3147,7 +3147,7 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 			originalWorkflow.Name,
 			originalWorkflow.AuthenticatedUser,
 			originalWorkflow.AssumedRole,
-			authenticatedRoles,
+			string(authenticatedRoles),
 			appVersion,
 			originalWorkflow.ApplicationID,
 			queueName,
@@ -4333,7 +4333,7 @@ func (s *SysDB) GetWorkflowAggregates(ctx context.Context, input GetWorkflowAggr
 
 	// Apply filters using the query builder
 	if len(input.Status) > 0 {
-		qb.addWhereAny("status", input.Status)
+		qb.addWhereAny("status", toStrings(input.Status))
 	}
 	if !input.StartTime.IsZero() {
 		qb.addWhereGreaterEqual("created_at", input.StartTime.UnixMilli())
@@ -7971,6 +7971,16 @@ func (qb *queryBuilder) addWhereAny(column string, values any) {
 	qb.argCounter++
 	qb.whereClauses = append(qb.whereClauses, fmt.Sprintf("%s = ANY($%d)", column, qb.argCounter))
 	qb.args = append(qb.args, values)
+}
+
+// toStrings converts a slice of a named string type to []string, which pgx
+// can encode without knowing the parameter type (QueryExecModeExec).
+func toStrings[T ~string](in []T) []string {
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = string(v)
+	}
+	return out
 }
 
 // addWhereKeyedIDs matches workflows by ID under the shard key each ID is addressed
