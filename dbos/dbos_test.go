@@ -2385,6 +2385,304 @@ func TestPoolMaxConnsFromURL(t *testing.T) {
 		"the default pool size should apply when the URL does not set pool_max_conns")
 }
 
+// TestQueryExecModes runs a basic operation against every system table with the
+// pgx query modes that do not prepare statements, as needed behind a
+// transaction-mode connection pooler. In these modes pgx encodes arguments from
+// their Go type alone, without the parameter types a prepared statement provides.
+func TestQueryExecModes(t *testing.T) {
+	skipIfSqlite(t, "pg-only: exercises pgx query exec modes")
+
+	for _, mode := range []string{"exec", "simple_protocol"} {
+		t.Run(mode, func(t *testing.T) {
+			u, err := url.Parse(getDatabaseURL())
+			require.NoError(t, err)
+			params := u.Query()
+			params.Set("default_query_exec_mode", mode)
+			u.RawQuery = params.Encode()
+			databaseURL := u.String()
+
+			// Migrations (dbos_migrations) run through the same mode.
+			resetTestDatabase(t, databaseURL)
+			dbosCtx := setupDBOS(t, setupDBOSOptions{checkLeaks: true, databaseURL: databaseURL})
+
+			bg := context.Background()
+			userPool, err := pgxpool.New(bg, databaseURL)
+			require.NoError(t, err)
+			t.Cleanup(userPool.Close)
+			_, err = userPool.Exec(bg, `DROP TABLE IF EXISTS query_exec_mode_kv`)
+			require.NoError(t, err)
+			_, err = userPool.Exec(bg, `CREATE TABLE query_exec_mode_kv (k TEXT PRIMARY KEY, v TEXT)`)
+			require.NoError(t, err)
+			ds, err := NewDataSource(dbosCtx, userPool, WithDataSourceName("query-exec-mode"))
+			require.NoError(t, err)
+
+			const (
+				topic     = "query-exec-mode-topic"
+				eventKey  = "query-exec-mode-event"
+				streamKey = "query-exec-mode-stream"
+			)
+
+			// Writes workflow_status, workflow_input, workflow_output, operation_outputs,
+			// workflow_events, workflow_events_history, streams and notifications, plus
+			// the data source's transaction_completion table.
+			wf := func(ctx Context, input string) (string, error) {
+				workflowID, err := GetWorkflowID(ctx)
+				if err != nil {
+					return "", err
+				}
+				stepResult, err := RunAsStep(ctx, func(context.Context) (string, error) {
+					return "step-" + input, nil
+				}, WithStepName("queryExecModeStep"))
+				if err != nil {
+					return "", err
+				}
+				if _, err := RunAsTransaction(ctx, ds, func(c context.Context, tx Tx) (string, error) {
+					_, err := tx.Exec(c, `INSERT INTO query_exec_mode_kv (k, v) VALUES ($1, $2)`, workflowID, input)
+					return input, err
+				}); err != nil {
+					return "", err
+				}
+				if err := SetEvent(ctx, eventKey, "event-"+input); err != nil {
+					return "", err
+				}
+				if err := WriteStream(ctx, streamKey, "stream-"+input); err != nil {
+					return "", err
+				}
+				if err := CloseStream(ctx, streamKey); err != nil {
+					return "", err
+				}
+				message, err := Recv[string](ctx, topic, 30*time.Second)
+				if err != nil {
+					return "", err
+				}
+				return stepResult + "/" + message, nil
+			}
+			simpleWf := func(_ Context, input string) (string, error) {
+				return "simple-" + input, nil
+			}
+			scheduledWf := func(_ Context, _ ScheduledWorkflowInput) (string, error) {
+				return "scheduled", nil
+			}
+			RegisterWorkflow(dbosCtx, wf, WithWorkflowName("queryExecModeWorkflow"))
+			RegisterWorkflow(dbosCtx, simpleWf, WithWorkflowName("queryExecModeSimpleWorkflow"))
+			RegisterWorkflow(dbosCtx, scheduledWf, WithWorkflowName("queryExecModeScheduledWorkflow"))
+
+			queueName := "query-exec-mode-queue-" + mode
+			queue, err := RegisterQueue(dbosCtx, queueName)
+			require.NoError(t, err)
+			require.NoError(t, Launch(dbosCtx))
+
+			// Runs wf to completion, driving its event, stream and notification from outside.
+			runWorkflow := func(t *testing.T, opts ...WorkflowOption) string {
+				t.Helper()
+				workflowID := uuid.NewString()
+				handle, err := RunWorkflow(dbosCtx, wf, "in", append(opts, WithWorkflowID(workflowID))...)
+				require.NoError(t, err)
+				require.NoError(t, Send(dbosCtx, workflowID, "message", topic))
+				event, err := GetEvent[string](dbosCtx, workflowID, eventKey, 30*time.Second)
+				require.NoError(t, err)
+				require.Equal(t, "event-in", event)
+				result, err := handle.GetResult(WithHandleTimeout(30 * time.Second))
+				require.NoError(t, err)
+				require.Equal(t, "step-in/message", result)
+				values, closed, err := ReadStream[string](dbosCtx, workflowID, streamKey)
+				require.NoError(t, err)
+				require.Equal(t, []string{"stream-in"}, values)
+				require.True(t, closed)
+				var stored string
+				require.NoError(t, userPool.QueryRow(bg, `SELECT v FROM query_exec_mode_kv WHERE k = $1`, workflowID).Scan(&stored))
+				require.Equal(t, "in", stored)
+				return workflowID
+			}
+			storedRoles := func(t *testing.T, workflowID string) string {
+				t.Helper()
+				var roles string
+				query := fmt.Sprintf(`SELECT authenticated_roles FROM %s.workflow_status WHERE workflow_uuid = $1`, _DEFAULT_SYSTEM_DB_SCHEMA)
+				require.NoError(t, userPool.QueryRow(bg, query, workflowID).Scan(&roles))
+				return roles
+			}
+
+			var directID, queuedID string
+
+			t.Run("DirectWorkflow", func(t *testing.T) {
+				directID = runWorkflow(t,
+					WithAuthenticatedUser("alice"),
+					WithAuthenticatedRoles("reader", "writer"),
+					WithWorkflowAttributes(map[string]any{"tenant": "acme"}))
+				require.JSONEq(t, `["reader","writer"]`, storedRoles(t, directID))
+			})
+
+			t.Run("QueuedWorkflow", func(t *testing.T) {
+				queuedID = runWorkflow(t, WithQueue(queue))
+				require.Equal(t, "null", storedRoles(t, queuedID))
+			})
+
+			t.Run("ListWorkflows", func(t *testing.T) {
+				workflows, err := ListWorkflows(dbosCtx,
+					WithFilterWorkflowIDs(directID, queuedID),
+					WithFilterWorkflowIDPrefix(directID[:8]),
+					WithFilterStatus(WorkflowStatusSuccess, WorkflowStatusError),
+					WithFilterName("queryExecModeWorkflow"),
+					WithFilterUser("alice"),
+					WithFilterAttributes(map[string]any{"tenant": "acme"}),
+					WithFilterCreatedAfter(time.Now().Add(-time.Hour)),
+					WithFilterCreatedBefore(time.Now().Add(time.Hour)),
+					WithFilterLimit(10),
+					WithFilterOffset(0),
+					WithFilterSortDesc(),
+					WithFilterLoadInput(true),
+					WithFilterLoadOutput(true))
+				require.NoError(t, err)
+				require.Len(t, workflows, 1)
+				require.Equal(t, directID, workflows[0].ID)
+				require.Equal(t, []string{"reader", "writer"}, workflows[0].AuthenticatedRoles)
+				require.Equal(t, map[string]any{"tenant": "acme"}, workflows[0].Attributes)
+				require.Equal(t, `"in"`, workflows[0].Input)
+				require.Equal(t, `"step-in/message"`, workflows[0].Output)
+
+				queued, err := ListWorkflows(dbosCtx, WithFilterQueueName(queueName), WithFilterQueuesOnly())
+				require.NoError(t, err)
+				require.Empty(t, queued, "the queued workflow has completed")
+				queued, err = ListWorkflows(dbosCtx, WithFilterQueueName(queueName))
+				require.NoError(t, err)
+				require.Len(t, queued, 1)
+				require.Equal(t, queuedID, queued[0].ID)
+				require.Empty(t, queued[0].AuthenticatedRoles)
+			})
+
+			t.Run("StepsAndAggregates", func(t *testing.T) {
+				steps, err := GetWorkflowSteps(dbosCtx, directID)
+				require.NoError(t, err)
+				require.NotEmpty(t, steps)
+
+				workflowRows, err := GetWorkflowAggregates(dbosCtx, GetWorkflowAggregatesInput{
+					GroupByStatus: true,
+					SelectCount:   true,
+					Status:        []WorkflowStatusType{WorkflowStatusSuccess},
+					Name:          []string{"queryExecModeWorkflow"},
+				})
+				require.NoError(t, err)
+				require.Len(t, workflowRows, 1)
+				require.Equal(t, int64(2), *workflowRows[0].Count)
+
+				stepRows, err := GetStepAggregates(dbosCtx, GetStepAggregatesInput{
+					GroupByFunctionName: true,
+					SelectCount:         true,
+					FunctionName:        []string{"queryExecModeStep"},
+				})
+				require.NoError(t, err)
+				require.Len(t, stepRows, 1)
+				require.Equal(t, int64(2), *stepRows[0].Count)
+			})
+
+			t.Run("ForkWorkflow", func(t *testing.T) {
+				steps, err := GetWorkflowSteps(dbosCtx, directID)
+				require.NoError(t, err)
+				// Fork past the last step: every step replays from its copied checkpoint.
+				forked, err := ForkWorkflow[string](dbosCtx, ForkWorkflowInput{
+					OriginalWorkflowID: directID,
+					StartStep:          uint(len(steps)),
+				})
+				require.NoError(t, err)
+				result, err := forked.GetResult(WithHandleTimeout(30 * time.Second))
+				require.NoError(t, err)
+				require.Equal(t, "step-in/message", result)
+				require.JSONEq(t, `["reader","writer"]`, storedRoles(t, forked.GetWorkflowID()))
+			})
+
+			t.Run("CancelResumeDelete", func(t *testing.T) {
+				handle, err := RunWorkflow(dbosCtx, simpleWf, "in", WithQueue(queue), WithDelay(time.Hour))
+				require.NoError(t, err)
+				workflowID := handle.GetWorkflowID()
+
+				require.NoError(t, CancelWorkflow(dbosCtx, workflowID))
+				status, err := handle.GetStatus()
+				require.NoError(t, err)
+				require.Equal(t, WorkflowStatusCancelled, status.Status)
+
+				resumed, err := ResumeWorkflow[string](dbosCtx, workflowID)
+				require.NoError(t, err)
+				result, err := resumed.GetResult(WithHandleTimeout(30 * time.Second))
+				require.NoError(t, err)
+				require.Equal(t, "simple-in", result)
+
+				require.NoError(t, DeleteWorkflows(dbosCtx, []string{workflowID}))
+				remaining, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
+				require.NoError(t, err)
+				require.Empty(t, remaining)
+			})
+
+			t.Run("Queues", func(t *testing.T) {
+				ephemeral := "query-exec-mode-ephemeral-" + mode
+				_, err := RegisterQueue(dbosCtx, ephemeral, WithWorkerConcurrency(2))
+				require.NoError(t, err)
+				retrieved, err := RetrieveQueue(dbosCtx, ephemeral)
+				require.NoError(t, err)
+				require.Equal(t, 2, *retrieved.GetWorkerConcurrency())
+
+				queues, err := ListQueues(dbosCtx)
+				require.NoError(t, err)
+				names := make([]string, len(queues))
+				for i, q := range queues {
+					names[i] = q.GetName()
+				}
+				require.Contains(t, names, queueName)
+				require.Contains(t, names, ephemeral)
+
+				require.NoError(t, DeleteQueue(dbosCtx, ephemeral))
+				_, err = RetrieveQueue(dbosCtx, ephemeral)
+				require.ErrorIs(t, err, ErrQueueNotFound)
+			})
+
+			t.Run("Schedules", func(t *testing.T) {
+				scheduleName := "query-exec-mode-schedule-" + mode
+				require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
+					ScheduleName: scheduleName,
+					Schedule:     "0 0 * * * *",
+					Workflow:     scheduledWf,
+					Context:      map[string]any{"tenant": "acme"},
+				}))
+
+				schedule, err := GetSchedule(dbosCtx, scheduleName)
+				require.NoError(t, err)
+				require.JSONEq(t, `{"tenant":"acme"}`, string(schedule.Context))
+
+				require.NoError(t, PauseSchedule(dbosCtx, scheduleName))
+				paused, err := ListSchedules(dbosCtx, WithScheduleNames(scheduleName), WithScheduleStatuses(ScheduleStatusPaused))
+				require.NoError(t, err)
+				require.Len(t, paused, 1)
+				require.NoError(t, ResumeSchedule(dbosCtx, scheduleName))
+
+				handle, err := TriggerSchedule[string](dbosCtx, scheduleName)
+				require.NoError(t, err)
+				result, err := handle.GetResult(WithHandleTimeout(30 * time.Second))
+				require.NoError(t, err)
+				require.Equal(t, "scheduled", result)
+				triggered, err := ListWorkflows(dbosCtx, WithFilterScheduleName(scheduleName))
+				require.NoError(t, err)
+				require.Len(t, triggered, 1)
+
+				require.NoError(t, DeleteSchedule(dbosCtx, scheduleName))
+				schedules, err := ListSchedules(dbosCtx, WithScheduleNames(scheduleName))
+				require.NoError(t, err)
+				require.Empty(t, schedules)
+			})
+
+			t.Run("ApplicationVersions", func(t *testing.T) {
+				versions, err := ListApplicationVersions(dbosCtx)
+				require.NoError(t, err)
+				require.NotEmpty(t, versions)
+
+				current := GetApplicationVersion(dbosCtx)
+				require.NoError(t, SetLatestApplicationVersion(dbosCtx, current))
+				latest, err := GetLatestApplicationVersion(dbosCtx)
+				require.NoError(t, err)
+				require.Equal(t, current, latest.Name)
+			})
+		})
+	}
+}
+
 func setWorkflowExecutorID(t *testing.T, dbosCtx Context, workflowID, executorID string) {
 	t.Helper()
 	sysDB := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)

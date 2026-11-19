@@ -297,18 +297,33 @@ func (PostgresDialect) IsRetryable(err error, logger *slog.Logger) bool {
 			pgerrcode.CrashShutdown,
 			pgerrcode.CannotConnectNow,
 			pgerrcode.IdleInTransactionSessionTimeout:
+			if logger != nil {
+				logger.Error("Retrying transient database error", "error", err)
+			}
 			return true
 		}
 	}
 	var cerr *pgconn.ConnectError
 	if errors.As(err, &cerr) {
+		if logger != nil {
+			logger.Error("Retrying database connection failure", "error", err)
+		}
 		return true
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "conn closed") {
+		if logger != nil {
+			logger.Error("Retrying closed database connection", "error", err)
+		}
 		return true
 	}
 	var nerr net.Error
-	return errors.As(err, &nerr)
+	if errors.As(err, &nerr) {
+		if logger != nil {
+			logger.Error("Retrying database network error", "error", err)
+		}
+		return true
+	}
+	return false
 }
 
 // IsRetryableTransaction matches pg/CRDB transaction-level conflicts that
