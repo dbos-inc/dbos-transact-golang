@@ -81,6 +81,7 @@ type RewindWorkflowOption func(*RewindWorkflowInput)
 
 type CancelWorkflowInput struct {
 	CancelChildren bool
+	CancelFailed   bool
 }
 
 type CancelWorkflowOption func(*CancelWorkflowInput)
