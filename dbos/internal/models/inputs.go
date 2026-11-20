@@ -64,6 +64,8 @@ type GetWorkflowStepsOption func(*GetWorkflowStepsInput)
 
 type ResumeWorkflowInput struct {
 	QueueName string
+	Tx        any  // Optional: a transaction the caller owns, set by WithResumeTransaction
+	TxSet     bool // Whether Tx was set, so a nil one is refused rather than ignored
 }
 
 type ResumeWorkflowOption func(*ResumeWorkflowInput)
@@ -81,6 +83,8 @@ type RewindWorkflowOption func(*RewindWorkflowInput)
 
 type CancelWorkflowInput struct {
 	CancelChildren bool
+	Tx             any  // Optional: a transaction the caller owns, set by WithCancelTransaction
+	TxSet          bool // Whether Tx was set, so a nil one is refused rather than ignored
 }
 
 type CancelWorkflowOption func(*CancelWorkflowInput)
@@ -174,6 +178,8 @@ type AlertHandler func(name string, message string, metadata map[string]string)
 
 type SetWorkflowAttributesInput struct {
 	Merge bool
+	Tx    any  // Optional: a transaction the caller owns, set by WithSetAttributesTransaction
+	TxSet bool // Whether Tx was set, so a nil one is refused rather than ignored
 }
 
 type SetWorkflowAttributesOption func(*SetWorkflowAttributesInput)
