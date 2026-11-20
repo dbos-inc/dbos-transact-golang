@@ -2391,6 +2391,7 @@ func (s *SysDB) SetWorkflowAttributes(ctx context.Context, input SetWorkflowAttr
 
 type CancelWorkflowsDBInput struct {
 	CancelChildren bool
+	CancelFailed   bool // Also cancel the given workflows that are in ERROR; descendants in ERROR are left untouched
 	WorkflowIDs    []string
 	Tx             Tx
 	OwnerXID       string
@@ -2398,7 +2399,8 @@ type CancelWorkflowsDBInput struct {
 
 // CancelWorkflows cancels the given workflows and, with CancelChildren, all their
 // descendants, one level at a time. Workflows that are already in a terminal state
-// (SUCCESS, ERROR, CANCELLED) are left untouched. Returns the subset of input IDs
+// (SUCCESS, ERROR, CANCELLED) are left untouched, except that with CancelFailed a
+// given workflow in ERROR is cancelled too. Returns the subset of input IDs
 // that existed in workflow_status (including terminal ones, which are considered
 // existing even though they are not updated).
 func (s *SysDB) CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInput) ([]string, error) {
@@ -2416,7 +2418,7 @@ func (s *SysDB) CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInpu
 	}
 	var found []string
 	err := s.applyByLevel(ctx, q, input.WorkflowIDs, input.CancelChildren, "CancelWorkflows", func(ctx context.Context, key string, ids []string, root bool) error {
-		cancelled, err := s.cancelWorkflowIDs(ctx, tx, ids, input.OwnerXID, key)
+		cancelled, err := s.cancelWorkflowIDs(ctx, tx, ids, input.OwnerXID, key, root && input.CancelFailed)
 		if root {
 			found = cancelled
 		}
@@ -2425,7 +2427,7 @@ func (s *SysDB) CancelWorkflows(ctx context.Context, input CancelWorkflowsDBInpu
 	return found, err
 }
 
-func (s *SysDB) cancelWorkflowIDs(ctx context.Context, tx Tx, workflowIDs []string, ownerXID, key string) ([]string, error) {
+func (s *SysDB) cancelWorkflowIDs(ctx context.Context, tx Tx, workflowIDs []string, ownerXID, key string, cancelFailed bool) ([]string, error) {
 	input := struct {
 		Tx          Tx
 		WorkflowIDs []string
@@ -2437,11 +2439,17 @@ func (s *SysDB) cancelWorkflowIDs(ctx context.Context, tx Tx, workflowIDs []stri
 	if err != nil {
 		return nil, fmt.Errorf("cancel workflows: %w", err)
 	}
+	// $3, $4 and $5 are the statuses the update leaves alone. With cancelFailed, $4
+	// repeats SUCCESS in place of ERROR, so a workflow in ERROR is cancelled too.
+	errorSlot := models.WorkflowStatusError
+	if cancelFailed {
+		errorSlot = models.WorkflowStatusSuccess
+	}
 	args := []any{
 		models.WorkflowStatusCancelled,
 		encodedIDs,
 		models.WorkflowStatusSuccess,
-		models.WorkflowStatusError,
+		errorSlot,
 		models.WorkflowStatusCancelled,
 	}
 	ownerClause := ""

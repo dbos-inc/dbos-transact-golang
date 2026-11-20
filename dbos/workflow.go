@@ -5315,6 +5315,14 @@ func WithCancelChildren() CancelWorkflowOption {
 	}
 }
 
+// WithCancelFailed also cancels a given workflow that is in ERROR, in the same update, and keeps its recorded error and steps.
+// With WithCancelChildren, a descendant in ERROR stays in ERROR.
+func WithCancelFailed() CancelWorkflowOption {
+	return func(cwo *models.CancelWorkflowInput) {
+		cwo.CancelFailed = true
+	}
+}
+
 func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...CancelWorkflowOption) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
@@ -5330,6 +5338,7 @@ func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...Cancel
 			return c.systemDB.CancelWorkflows(ctx, sysdb.CancelWorkflowsDBInput{
 				WorkflowIDs:    []string{workflowID},
 				CancelChildren: cwo.CancelChildren,
+				CancelFailed:   cwo.CancelFailed,
 				Tx:             tx,
 			})
 		}, WithStepName("DBOS.cancelWorkflow"))
@@ -5338,6 +5347,7 @@ func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...Cancel
 			return c.systemDB.CancelWorkflows(c, sysdb.CancelWorkflowsDBInput{
 				WorkflowIDs:    []string{workflowID},
 				CancelChildren: cwo.CancelChildren,
+				CancelFailed:   cwo.CancelFailed,
 			})
 		}, sysdb.WithRetrierLogger(c.logger))
 	}
@@ -5352,6 +5362,7 @@ func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...Cancel
 
 // CancelWorkflow cancels a running or enqueued workflow by setting its status to CANCELLED and removing it from the queue.
 // Once cancelled, the workflow will stop executing at the start of the next step. Executing steps will not be interrupted.
+// With WithCancelFailed, a workflow in ERROR is cancelled too, and its recorded error and steps are kept.
 //
 // Parameters:
 //   - ctx: DBOS context for the operation
@@ -5450,12 +5461,12 @@ func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...Ca
 
 	if isWithinWorkflow {
 		_, err := runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) ([]string, error) {
-			return c.systemDB.CancelWorkflows(ctx, sysdb.CancelWorkflowsDBInput{CancelChildren: cwo.CancelChildren, WorkflowIDs: workflowIDs, Tx: tx})
+			return c.systemDB.CancelWorkflows(ctx, sysdb.CancelWorkflowsDBInput{CancelChildren: cwo.CancelChildren, CancelFailed: cwo.CancelFailed, WorkflowIDs: workflowIDs, Tx: tx})
 		}, WithStepName("DBOS.cancelWorkflows"))
 		return err
 	}
 	_, err := sysdb.RetryWithResult(c, func() ([]string, error) {
-		return c.systemDB.CancelWorkflows(c, sysdb.CancelWorkflowsDBInput{CancelChildren: cwo.CancelChildren, WorkflowIDs: workflowIDs})
+		return c.systemDB.CancelWorkflows(c, sysdb.CancelWorkflowsDBInput{CancelChildren: cwo.CancelChildren, CancelFailed: cwo.CancelFailed, WorkflowIDs: workflowIDs})
 	}, sysdb.WithRetrierLogger(c.logger))
 	return err
 }
@@ -5463,7 +5474,8 @@ func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...Ca
 // CancelWorkflows cancels multiple workflows. With WithCancelChildren, it also cancels all their descendants.
 // Each workflow that exists and is not already in a terminal state (SUCCESS, ERROR, CANCELLED)
 // is moved to CANCELLED and removed from its queue. Missing or already-terminal IDs are silently
-// skipped. Unlike the singular CancelWorkflow, this function does not return
+// skipped. With WithCancelFailed, a given workflow in ERROR is moved to CANCELLED too.
+// Unlike the singular CancelWorkflow, this function does not return
 // ErrorCodeNonExistentWorkflow when some IDs are missing.
 //
 // Example:
