@@ -188,6 +188,9 @@ func (c *dbosContext) AutoUpgradableWorkflows() []string {
 func (c *dbosContext) RecoverPendingWorkflows(executorIDs []string) ([]WorkflowHandle[any], error) {
 	return recoverPendingWorkflows(c, executorIDs)
 }
+func (c *dbosContext) RewindWorkflows(input sysdb.RewindWorkflowsDBInput) error {
+	return c.rewindWorkflows(input)
+}
 
 func (c *dbosContext) DecodeStoredValue(value, serialization string) (any, error) {
 	decoder, err := resolveDecoder[any](serialization, getCustomSerializerFromCtx(c))

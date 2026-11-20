@@ -12949,6 +12949,248 @@ func TestRewind(t *testing.T) {
 	})
 }
 
+func TestRewindWorkflows(t *testing.T) {
+	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
+
+	// Each step returns how often a step of its name has run, so a result shows which
+	// steps a rewind re-ran.
+	var runsMu sync.Mutex
+	runs := map[string]int{}
+	runCount := func(name string) int {
+		runsMu.Lock()
+		defer runsMu.Unlock()
+		return runs[name]
+	}
+	threeSteps := func(ctx Context, name string) ([]int, error) {
+		results := make([]int, 0, 3)
+		for _, step := range []string{"a", "b", "c"} {
+			n, err := RunAsStep(ctx, func(context.Context) (int, error) {
+				runsMu.Lock()
+				defer runsMu.Unlock()
+				runs[name+"."+step]++
+				return runs[name+"."+step], nil
+			}, WithStepName(step))
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, n)
+		}
+		return results, nil
+	}
+	RegisterWorkflow(dbosCtx, threeSteps, WithWorkflowName("batchRewindThreeSteps"))
+	partitionedQueue, err := registerWFQ(dbosCtx, "batch-rewind-partitioned", WithPartitionQueue())
+	require.NoError(t, err)
+	plainQueue, err := registerWFQ(dbosCtx, "batch-rewind-plain")
+	require.NoError(t, err)
+	_, err = registerWFQ(dbosCtx, "batch-rewind-override", WithPartitionQueue())
+	require.NoError(t, err)
+	require.NoError(t, Launch(dbosCtx))
+
+	rewind := func(workflowIDs []string, startSteps []int) error {
+		return dbosCtx.(*dbosContext).RewindWorkflows(sysdb.RewindWorkflowsDBInput{WorkflowIDs: workflowIDs, StartSteps: startSteps})
+	}
+	run := func(t *testing.T, workflowID, name string, opts ...WorkflowOption) {
+		t.Helper()
+		handle, err := RunWorkflow(dbosCtx, threeSteps, name, append(opts, WithWorkflowID(workflowID))...)
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+	}
+	result := func(t *testing.T, workflowID string) []int {
+		t.Helper()
+		handle, err := RetrieveWorkflow[[]int](dbosCtx, workflowID)
+		require.NoError(t, err)
+		res, err := handle.GetResult()
+		require.NoError(t, err)
+		return res
+	}
+	getStatus := func(t *testing.T, workflowID string) WorkflowStatus {
+		t.Helper()
+		wfs, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
+		require.NoError(t, err)
+		require.Len(t, wfs, 1)
+		return wfs[0]
+	}
+	stepCount := func(t *testing.T, workflowID string) int {
+		t.Helper()
+		steps, err := GetWorkflowSteps(dbosCtx, workflowID)
+		require.NoError(t, err)
+		return len(steps)
+	}
+
+	t.Run("RerunsEachWorkflowFromItsOwnStartStep", func(t *testing.T) {
+		partitionedID, plainID := uuid.NewString(), uuid.NewString()
+		run(t, partitionedID, "partitioned", WithQueue(partitionedQueue), WithQueuePartitionKey("pk"))
+		run(t, plainID, "plain", WithQueue(plainQueue))
+
+		require.NoError(t, rewind([]string{partitionedID, plainID}, []int{1, 2}))
+
+		// Same IDs, and only the steps from each workflow's own Start Step ran again.
+		assert.Equal(t, []int{1, 2, 2}, result(t, partitionedID))
+		assert.Equal(t, []int{1, 1, 2}, result(t, plainID))
+		steps, err := GetWorkflowSteps(dbosCtx, partitionedID)
+		require.NoError(t, err)
+		stepIDs := make([]int, 0, len(steps))
+		for _, step := range steps {
+			stepIDs = append(stepIDs, step.StepID)
+		}
+		assert.Equal(t, []int{0, 1, 2}, stepIDs)
+
+		// With no queue given, each kept its own queue and partition key.
+		partitioned := getStatus(t, partitionedID)
+		assert.Equal(t, partitionedQueue.Name, partitioned.QueueName)
+		assert.Equal(t, "pk", partitioned.QueuePartitionKey)
+		plain := getStatus(t, plainID)
+		assert.Equal(t, plainQueue.Name, plain.QueueName)
+		assert.Empty(t, plain.QueuePartitionKey)
+	})
+
+	t.Run("RefusesAnUnfinishedWorkflow", func(t *testing.T) {
+		for _, unfinished := range []WorkflowStatusType{WorkflowStatusPending, WorkflowStatusEnqueued, WorkflowStatusDelayed, WorkflowStatusSuspended} {
+			t.Run(string(unfinished), func(t *testing.T) {
+				finishedID, unfinishedID := uuid.NewString(), uuid.NewString()
+				run(t, finishedID, "finished-"+string(unfinished))
+				run(t, unfinishedID, "unfinished-"+string(unfinished))
+				rawExec(t, dbosCtx, `UPDATE %sworkflow_status SET status = $1 WHERE workflow_uuid = $2`, unfinished, unfinishedID)
+
+				err := rewind([]string{finishedID, unfinishedID}, []int{0, 0})
+				require.ErrorContains(t, err, "cannot rewind workflow "+unfinishedID)
+
+				// Nothing changed, not even for the finished workflow.
+				assert.Equal(t, WorkflowStatusSuccess, getStatus(t, finishedID).Status)
+				assert.Equal(t, 3, stepCount(t, finishedID))
+				assert.Equal(t, 1, runCount("finished-"+string(unfinished)+".a"))
+				assert.Equal(t, unfinished, getStatus(t, unfinishedID).Status)
+				assert.Equal(t, 3, stepCount(t, unfinishedID))
+			})
+		}
+	})
+
+	t.Run("RefusesAMissingWorkflow", func(t *testing.T) {
+		finishedID, missingID := uuid.NewString(), uuid.NewString()
+		run(t, finishedID, "finished-missing")
+
+		err := rewind([]string{finishedID, missingID}, []int{1, 1})
+		var dbosErr *Error
+		require.ErrorAs(t, err, &dbosErr)
+		assert.Equal(t, ErrorCodeNonExistentWorkflow, dbosErr.Code)
+		assert.Equal(t, missingID, dbosErr.WorkflowID)
+
+		assert.Equal(t, WorkflowStatusSuccess, getStatus(t, finishedID).Status)
+		assert.Equal(t, 3, stepCount(t, finishedID))
+		assert.Equal(t, 1, runCount("finished-missing.b"))
+	})
+
+	t.Run("IsOneTransaction", func(t *testing.T) {
+		skipIfSqlite(t, "the test injects the status change with a plpgsql trigger")
+		skipIfCockroach(t, "the test injects the status change with a plpgsql trigger")
+		// The batch goes in ID order, whatever the order given.
+		firstID, secondID := "a-"+uuid.NewString(), "z-"+uuid.NewString()
+		run(t, firstID, "txn-first")
+		run(t, secondID, "txn-second")
+
+		// As if the second workflow were resumed between the batch's read and its
+		// rewind: re-enqueueing the first one moves the second out of SUCCESS, inside
+		// the batch's own transaction.
+		sdb := dbosCtx.(*dbosContext).systemDB.(*sysdb.SysDB)
+		prefix := sdb.Dialect().SchemaPrefix(sdb.Schema())
+		exec := func(query string) {
+			_, err := sdb.Pool().Exec(context.Background(), query)
+			require.NoError(t, err)
+		}
+		exec(fmt.Sprintf(`CREATE FUNCTION %[1]sbatch_rewind_race() RETURNS trigger AS $$
+			BEGIN
+				UPDATE %[1]sworkflow_status SET status = 'ENQUEUED' WHERE workflow_uuid = '%[2]s';
+				RETURN NULL;
+			END $$ LANGUAGE plpgsql`, prefix, secondID))
+		exec(fmt.Sprintf(`CREATE TRIGGER batch_rewind_race AFTER UPDATE ON %[1]sworkflow_status FOR EACH ROW
+			WHEN (NEW.workflow_uuid = '%[2]s' AND NEW.status = 'ENQUEUED') EXECUTE FUNCTION %[1]sbatch_rewind_race()`,
+			prefix, firstID))
+		t.Cleanup(func() {
+			exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS batch_rewind_race ON %sworkflow_status`, prefix))
+			exec(fmt.Sprintf(`DROP FUNCTION IF EXISTS %sbatch_rewind_race()`, prefix))
+		})
+
+		err := rewind([]string{secondID, firstID}, []int{1, 1})
+		require.ErrorContains(t, err, "status likely changed from SUCCESS while rewinding")
+
+		// The first workflow's rewind was rolled back with the rest.
+		for _, workflowID := range []string{firstID, secondID} {
+			assert.Equal(t, WorkflowStatusSuccess, getStatus(t, workflowID).Status)
+			assert.Equal(t, 3, stepCount(t, workflowID))
+		}
+		assert.Equal(t, []int{1, 1, 1}, result(t, firstID))
+		assert.Equal(t, 1, runCount("txn-first.b"))
+	})
+
+	t.Run("KeepsOrOverridesVersionAndQueue", func(t *testing.T) {
+		elsewhereID, hereID := uuid.NewString(), uuid.NewString()
+		run(t, elsewhereID, "elsewhere")
+		run(t, hereID, "here")
+		runningVersion := getStatus(t, hereID).ApplicationVersion
+		// Stamp one workflow with a version nothing runs, so it stays ENQUEUED.
+		rawExec(t, dbosCtx, `UPDATE %sworkflow_status SET application_version = $1 WHERE workflow_uuid = $2`,
+			"not-this-deployment", elsewhereID)
+
+		// Given no version, each keeps its own: only the other one runs again.
+		require.NoError(t, rewind([]string{elsewhereID, hereID}, []int{2, 2}))
+		assert.Equal(t, []int{1, 1, 2}, result(t, hereID))
+		elsewhere := getStatus(t, elsewhereID)
+		assert.Equal(t, "not-this-deployment", elsewhere.ApplicationVersion)
+		assert.Equal(t, WorkflowStatusEnqueued, elsewhere.Status)
+		require.NoError(t, CancelWorkflow(dbosCtx, elsewhereID))
+
+		// A version and queue given apply to every workflow in the batch.
+		require.NoError(t, dbosCtx.(*dbosContext).RewindWorkflows(sysdb.RewindWorkflowsDBInput{
+			WorkflowIDs:        []string{elsewhereID, hereID},
+			StartSteps:         []int{2, 2},
+			ApplicationVersion: runningVersion,
+			QueueName:          "batch-rewind-override",
+			QueuePartitionKey:  "repair",
+		}))
+		assert.Equal(t, []int{1, 1, 2}, result(t, elsewhereID))
+		assert.Equal(t, []int{1, 1, 3}, result(t, hereID))
+		for _, workflowID := range []string{elsewhereID, hereID} {
+			status := getStatus(t, workflowID)
+			assert.Equal(t, runningVersion, status.ApplicationVersion)
+			assert.Equal(t, "batch-rewind-override", status.QueueName)
+			assert.Equal(t, "repair", status.QueuePartitionKey)
+		}
+	})
+
+	t.Run("RewindsALegacyRow", func(t *testing.T) {
+		workflowID := uuid.NewString()
+		run(t, workflowID, "legacy")
+		// A legacy row records its outcome in workflow_status, and no queue as ''.
+		rawExec(t, dbosCtx, `UPDATE %sworkflow_status SET output = 'stale', error = 'stale', queue_name = '' WHERE workflow_uuid = $1`, workflowID)
+
+		require.NoError(t, rewind([]string{workflowID}, []int{0}))
+		require.Equal(t, models.InternalQueueName, getStatus(t, workflowID).QueueName)
+		assert.Equal(t, []int{2, 2, 2}, result(t, workflowID))
+		assert.Equal(t, 0, rawQueryInt(t, dbosCtx,
+			`SELECT COUNT(*) FROM %sworkflow_status WHERE workflow_uuid = $1 AND (output IS NOT NULL OR error IS NOT NULL)`, workflowID))
+	})
+
+	t.Run("ValidatesAndDedupesItsInputs", func(t *testing.T) {
+		workflowID := uuid.NewString()
+		run(t, workflowID, "inputs")
+
+		// An empty batch changes nothing.
+		require.NoError(t, rewind(nil, nil))
+
+		// A negative start step, or lists of different lengths, refuse the batch
+		// before anything changes.
+		require.ErrorContains(t, rewind([]string{workflowID}, []int{-1}), "must be >= 0")
+		require.ErrorContains(t, rewind([]string{workflowID}, []int{0, 1}), "same length")
+		assert.Equal(t, WorkflowStatusSuccess, getStatus(t, workflowID).Status)
+		assert.Equal(t, 1, runCount("inputs.a"))
+
+		// A workflow listed twice is rewound once, from its first listing's step.
+		require.NoError(t, rewind([]string{workflowID, workflowID}, []int{1, 2}))
+		assert.Equal(t, []int{1, 2, 2}, result(t, workflowID))
+	})
+}
+
 // notificationRow is a row of the notifications table, as listNotifications reads it.
 type notificationRow struct {
 	Topic   *string

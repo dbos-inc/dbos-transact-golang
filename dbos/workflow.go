@@ -5874,12 +5874,14 @@ func (c *dbosContext) rewindDataSources(ctx context.Context, tx Tx, dataSources 
 	if len(statuses) == 0 {
 		return models.NewNonExistentWorkflowError(workflowID)
 	}
-	switch statuses[0].Status {
-	case models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, models.WorkflowStatusSuspended:
-		return fmt.Errorf(
-			"cannot rewind workflow %s while it is %s: only a workflow in a terminal state can be rewound, so cancel it first",
-			workflowID, statuses[0].Status)
+	if err := sysdb.RewindRefusal(workflowID, statuses[0].Status); err != nil {
+		return err
 	}
+	return c.deleteDataSourceCheckpoints(ctx, dataSources, workflowID, startStep)
+}
+
+// Drops a workflow's checkpoints from startStep onwards in every data source.
+func (c *dbosContext) deleteDataSourceCheckpoints(ctx context.Context, dataSources []*DataSource, workflowID string, startStep int) error {
 	// A sharded database's checkpoint rows carry the workflow's key.
 	key, err := c.systemDB.KeyHint(ctx, workflowID)
 	if err != nil {
@@ -5891,6 +5893,38 @@ func (c *dbosContext) rewindDataSources(ctx context.Context, tx Tx, dataSources 
 		}
 	}
 	return nil
+}
+
+// rewindWorkflows rewinds each workflow from its own start step, all or nothing in the
+// system database. Every workflow is checked before any data source checkpoint is
+// dropped, because those drops are not part of the system database transaction.
+func (c *dbosContext) rewindWorkflows(input sysdb.RewindWorkflowsDBInput) error {
+	workflowIDs, startSteps, err := sysdb.RewindTargets(input.WorkflowIDs, input.StartSteps)
+	if err != nil || len(workflowIDs) == 0 {
+		return err
+	}
+	input.WorkflowIDs, input.StartSteps = workflowIDs, startSteps
+
+	uncancellableCtx := WithoutCancel(c)
+	if dataSources := c.registeredDataSources(); len(dataSources) > 0 {
+		err := sysdb.Retry(c, func() error {
+			if err := c.systemDB.CheckRewindable(uncancellableCtx, workflowIDs); err != nil {
+				return err
+			}
+			for i, workflowID := range workflowIDs {
+				if err := c.deleteDataSourceCheckpoints(uncancellableCtx, dataSources, workflowID, startSteps[i]); err != nil {
+					return err
+				}
+			}
+			return nil
+		}, sysdb.WithRetrierLogger(c.logger))
+		if err != nil {
+			return err
+		}
+	}
+	return sysdb.Retry(c, func() error {
+		return c.systemDB.RewindWorkflows(uncancellableCtx, input)
+	}, sysdb.WithRetrierLogger(c.logger))
 }
 
 // RewindWorkflow drops a workflow's recorded history from a given step onwards and
