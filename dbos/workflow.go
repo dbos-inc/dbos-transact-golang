@@ -5315,6 +5315,36 @@ func WithCancelChildren() CancelWorkflowOption {
 	}
 }
 
+// WithCancelTransaction runs the cancellation inside tx, a transaction the
+// caller owns on the system database: the workflow is cancelled if and only
+// if tx commits, together with the caller's other writes. tx is a [Tx], a
+// [pgx.Tx] or a [*sql.Tx]. The caller commits or rolls back; DBOS does
+// neither, and does not retry. Not available inside a workflow, where a
+// cancellation is checkpointed as a step.
+//
+//	tx, _ := pool.Begin(ctx)
+//	defer tx.Rollback(ctx)
+//	tx.Exec(ctx, "UPDATE runs SET state = 'cancelled' WHERE id = $1", runID)
+//	err := dbos.CancelWorkflow(client, runID, dbos.WithCancelTransaction(tx))
+//	tx.Commit(ctx)
+func WithCancelTransaction(tx any) CancelWorkflowOption {
+	return func(cwo *models.CancelWorkflowInput) {
+		cwo.Tx = tx
+		cwo.TxSet = true
+	}
+}
+
+// callerTx resolves tx, which the caller passed through option, a
+// With...Transaction option of a client operation. It is refused inside a
+// workflow, where the operation is checkpointed as a step.
+func callerTx(option string, tx any, isWithinWorkflow bool) (Tx, error) {
+	if isWithinWorkflow {
+		return nil, models.NewInvalidOptionError(option + " cannot be used within a workflow")
+	}
+
+	return resolveUserTx(tx)
+}
+
 func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...CancelWorkflowOption) error {
 	workflowState, ok := c.Value(workflowStateKey).(*workflowState)
 	isWithinWorkflow := ok && workflowState != nil
@@ -5325,7 +5355,18 @@ func (c *dbosContext) CancelWorkflow(_ Client, workflowID string, opts ...Cancel
 		opt(&cwo)
 	}
 
-	if isWithinWorkflow {
+	if cwo.TxSet {
+		userTx, txErr := callerTx("WithCancelTransaction", cwo.Tx, isWithinWorkflow)
+		if txErr != nil {
+			return txErr
+		}
+		// The caller owns the transaction: no commit, no retry.
+		found, err = c.systemDB.CancelWorkflows(WithoutCancel(c), sysdb.CancelWorkflowsDBInput{
+			WorkflowIDs:    []string{workflowID},
+			CancelChildren: cwo.CancelChildren,
+			Tx:             userTx,
+		})
+	} else if isWithinWorkflow {
 		found, err = runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) ([]string, error) {
 			return c.systemDB.CancelWorkflows(ctx, sysdb.CancelWorkflowsDBInput{
 				WorkflowIDs:    []string{workflowID},
@@ -5383,6 +5424,20 @@ func WithMergeAttributes() SetWorkflowAttributesOption {
 	}
 }
 
+// WithSetAttributesTransaction writes the attributes inside tx, a transaction
+// the caller owns on the system database: they change if and only if tx
+// commits, together with the caller's other writes, such as a cancellation
+// made with [WithCancelTransaction]. tx is a [Tx], a [pgx.Tx] or a
+// [*sql.Tx]. The caller commits or rolls back; DBOS does neither, and does
+// not retry. Not available inside a workflow, where the update is
+// checkpointed as a step.
+func WithSetAttributesTransaction(tx any) SetWorkflowAttributesOption {
+	return func(in *models.SetWorkflowAttributesInput) {
+		in.Tx = tx
+		in.TxSet = true
+	}
+}
+
 func (c *dbosContext) SetWorkflowAttributes(_ Client, workflowID string, attributes map[string]any, opts ...SetWorkflowAttributesOption) error {
 	params := models.SetWorkflowAttributesInput{}
 	for _, opt := range opts {
@@ -5404,6 +5459,14 @@ func (c *dbosContext) SetWorkflowAttributes(_ Client, workflowID string, attribu
 		})
 	}
 
+	if params.TxSet {
+		userTx, err := callerTx("WithSetAttributesTransaction", params.Tx, isWithinWorkflow)
+		if err != nil {
+			return err
+		}
+		// The caller owns the transaction: no commit, no retry.
+		return call(WithoutCancel(c), userTx)
+	}
 	if isWithinWorkflow {
 		_, err := runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) (struct{}, error) {
 			return struct{}{}, call(ctx, tx)
@@ -5448,6 +5511,15 @@ func (c *dbosContext) CancelWorkflows(_ Client, workflowIDs []string, opts ...Ca
 		opt(&cwo)
 	}
 
+	if cwo.TxSet {
+		userTx, err := callerTx("WithCancelTransaction", cwo.Tx, isWithinWorkflow)
+		if err != nil {
+			return err
+		}
+		// The caller owns the transaction: no commit, no retry.
+		_, err = c.systemDB.CancelWorkflows(WithoutCancel(c), sysdb.CancelWorkflowsDBInput{CancelChildren: cwo.CancelChildren, WorkflowIDs: workflowIDs, Tx: userTx})
+		return err
+	}
 	if isWithinWorkflow {
 		_, err := runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) ([]string, error) {
 			return c.systemDB.CancelWorkflows(ctx, sysdb.CancelWorkflowsDBInput{CancelChildren: cwo.CancelChildren, WorkflowIDs: workflowIDs, Tx: tx})
@@ -5636,6 +5708,19 @@ func WithResumeQueue(queueName string) ResumeWorkflowOption {
 	}
 }
 
+// WithResumeTransaction resumes the workflow(s) inside tx, a transaction the
+// caller owns on the system database: they are re-enqueued if and only if tx
+// commits, together with the caller's other writes. tx is a [Tx], a
+// [pgx.Tx] or a [*sql.Tx]. The caller commits or rolls back; DBOS does
+// neither, and does not retry. Not available inside a workflow, where a
+// resume is checkpointed as a step.
+func WithResumeTransaction(tx any) ResumeWorkflowOption {
+	return func(o *models.ResumeWorkflowInput) {
+		o.Tx = tx
+		o.TxSet = true
+	}
+}
+
 func (c *dbosContext) ResumeWorkflow(_ Client, workflowID string, opts ...ResumeWorkflowOption) (WorkflowHandle[any], error) {
 	handles, err := c.ResumeWorkflows(c, []string{workflowID}, opts...)
 	if err != nil {
@@ -5657,7 +5742,18 @@ func (c *dbosContext) ResumeWorkflows(_ Client, workflowIDs []string, opts ...Re
 	isWithinWorkflow := ok && workflowState != nil
 	var foundIDs []string
 	var err error
-	if isWithinWorkflow {
+	if params.TxSet {
+		userTx, txErr := callerTx("WithResumeTransaction", params.Tx, isWithinWorkflow)
+		if txErr != nil {
+			return nil, txErr
+		}
+		// The caller owns the transaction: no commit, no retry.
+		foundIDs, err = c.systemDB.ResumeWorkflows(WithoutCancel(c), sysdb.ResumeWorkflowsDBInput{
+			WorkflowIDs: workflowIDs,
+			QueueName:   params.QueueName,
+			Tx:          userTx,
+		})
+	} else if isWithinWorkflow {
 		foundIDs, err = runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) ([]string, error) {
 			return c.systemDB.ResumeWorkflows(ctx, sysdb.ResumeWorkflowsDBInput{
 				WorkflowIDs: workflowIDs,
