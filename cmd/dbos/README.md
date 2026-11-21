@@ -216,9 +216,13 @@ Shows all the steps executed within a workflow, their status, and execution deta
 #### `dbos workflow cancel [workflow-id]`
 Cancel a workflow so it is no longer automatically retried or restarted.
 
+**Options:**
+- `--failed` - Also cancel the workflow if it is in ERROR (a child in ERROR stays in ERROR)
+
 **Usage:**
 ```bash
 dbos workflow cancel abc123def456
+dbos workflow cancel abc123def456 --failed
 ```
 
 #### `dbos workflow resume [workflow-id]`

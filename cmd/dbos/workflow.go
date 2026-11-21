@@ -74,6 +74,7 @@ func init() {
 
 	// Cancel command flags
 	workflowCancelCmd.Flags().BoolP("children", "c", false, "Also cancel all child workflows recursively")
+	workflowCancelCmd.Flags().Bool("failed", false, "Also cancel the workflow if it is in ERROR (a child in ERROR stays in ERROR)")
 
 	// Delete command flags
 	workflowDeleteCmd.Flags().BoolP("children", "c", false, "Also delete all child workflows recursively")
@@ -278,6 +279,10 @@ func runWorkflowCancel(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	cancelFailed, err := cmd.Flags().GetBool("failed")
+	if err != nil {
+		return err
+	}
 
 	workflowID := args[0]
 
@@ -298,6 +303,9 @@ func runWorkflowCancel(cmd *cobra.Command, args []string) error {
 	opts := []dbos.CancelWorkflowOption{}
 	if cancelChildren {
 		opts = append(opts, dbos.WithCancelChildren())
+	}
+	if cancelFailed {
+		opts = append(opts, dbos.WithCancelFailed())
 	}
 	// Cancel workflow
 	err = ctx.CancelWorkflow(ctx, workflowID, opts...)

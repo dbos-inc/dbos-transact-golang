@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1266,4 +1267,108 @@ func TestMigratePrintFlags(t *testing.T) {
 		assert.Contains(t, errOut, "--print-migrations is only supported for Postgres databases")
 		assert.Empty(t, out)
 	})
+}
+
+var errCLIFailedWorkflow = errors.New("the workflow failed")
+
+func cliFailingWorkflow(ctx dbos.Context, _ string) (string, error) {
+	return "", errCLIFailedWorkflow
+}
+
+// cliFailingParentWorkflow runs a child workflow that fails, then fails itself. The input is the child ID.
+func cliFailingParentWorkflow(ctx dbos.Context, childID string) (string, error) {
+	handle, err := dbos.RunWorkflow(ctx, cliFailingWorkflow, "", dbos.WithWorkflowID(childID))
+	if err != nil {
+		return "", err
+	}
+	if _, err := handle.GetResult(); err == nil {
+		return "", errors.New("the child workflow should fail")
+	}
+	return "", errCLIFailedWorkflow
+}
+
+// cliTestDatabaseURL returns the URL of an empty system database for one test: a SQLite file when the
+// tests run on SQLite, else a new database on the Postgres or CockroachDB server of the test setup.
+func cliTestDatabaseURL(t *testing.T) string {
+	t.Helper()
+	if os.Getenv("DBOS_TEST_BACKEND") == "sqlite" {
+		return "sqlite:" + filepath.Join(t.TempDir(), "dbos.db")
+	}
+	bg := context.Background()
+	user, password, host, port, _, sslmode := getDatabaseConfig("postgres")
+	databaseURL := func(name string) string {
+		dsn := &url.URL{Scheme: "postgres", Host: net.JoinHostPort(host, port), Path: "/" + name, RawQuery: "sslmode=" + sslmode}
+		dsn.User = url.UserPassword(user, password)
+		return dsn.String()
+	}
+	const dbName = "dbos_cli_cancel_failed"
+	admin, err := pgx.Connect(bg, databaseURL("postgres"))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = dropDatabaseIfExists(bg, admin, dbName)
+		_ = admin.Close(bg)
+	})
+	require.NoError(t, dropDatabaseIfExists(bg, admin, dbName))
+	_, err = admin.Exec(bg, "CREATE DATABASE "+dbName)
+	require.NoError(t, err)
+	return databaseURL(dbName)
+}
+
+// TestWorkflowCancelFailedFlag verifies that `dbos workflow cancel --failed` ends a workflow in ERROR as
+// CANCELLED, that a cancel without the flag leaves it in ERROR, and that with --children the flag covers
+// the named workflow only: a child in ERROR stays in ERROR.
+func TestWorkflowCancelFailedFlag(t *testing.T) {
+	cliPath := buildCLI(t)
+	t.Cleanup(func() { os.Remove(cliPath) })
+	databaseURL := cliTestDatabaseURL(t)
+
+	// Seed the database with workflows that ended in ERROR.
+	dbosCtx, err := dbos.NewContext(context.Background(), dbos.Config{DatabaseURL: databaseURL, AppName: "cli-cancel-failed"})
+	require.NoError(t, err)
+	dbos.RegisterWorkflow(dbosCtx, cliFailingWorkflow)
+	dbos.RegisterWorkflow(dbosCtx, cliFailingParentWorkflow)
+	require.NoError(t, dbos.Launch(dbosCtx))
+	t.Cleanup(func() { dbos.Shutdown(dbosCtx, 10*time.Second) })
+	failedWorkflow := func(run func() (dbos.WorkflowHandle[string], error)) string {
+		handle, err := run()
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.ErrorContains(t, err, errCLIFailedWorkflow.Error())
+		return handle.GetWorkflowID()
+	}
+	plainID := failedWorkflow(func() (dbos.WorkflowHandle[string], error) {
+		return dbos.RunWorkflow(dbosCtx, cliFailingWorkflow, "")
+	})
+	flaggedID := failedWorkflow(func() (dbos.WorkflowHandle[string], error) {
+		return dbos.RunWorkflow(dbosCtx, cliFailingWorkflow, "")
+	})
+	childID := uuid.NewString()
+	parentID := failedWorkflow(func() (dbos.WorkflowHandle[string], error) {
+		return dbos.RunWorkflow(dbosCtx, cliFailingParentWorkflow, childID)
+	})
+
+	cli := func(args ...string) string {
+		cmd := exec.Command(cliPath, append(args, "--db-url", databaseURL)...)
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "dbos %v failed: %s", args, string(output))
+		return string(output)
+	}
+	statusOf := func(id string) string {
+		var status dbos.WorkflowStatus
+		require.NoError(t, json.Unmarshal([]byte(cli("workflow", "get", id)), &status))
+		return string(status.Status)
+	}
+	for _, id := range []string{plainID, flaggedID, parentID, childID} {
+		require.Equal(t, "ERROR", statusOf(id), "workflow %s starts in ERROR", id)
+	}
+
+	cli("workflow", "cancel", plainID)
+	assert.Equal(t, "ERROR", statusOf(plainID), "a cancel without --failed leaves a workflow in ERROR")
+
+	cli("workflow", "cancel", flaggedID, "--failed")
+	assert.Equal(t, "CANCELLED", statusOf(flaggedID), "--failed cancels a workflow in ERROR")
+
+	cli("workflow", "cancel", parentID, "--failed", "--children")
+	assert.Equal(t, "CANCELLED", statusOf(parentID), "--failed with --children cancels the named workflow")
+	assert.Equal(t, "ERROR", statusOf(childID), "--failed with --children leaves a child in ERROR")
 }
