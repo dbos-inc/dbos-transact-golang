@@ -12555,6 +12555,8 @@ func TestRewind(t *testing.T) {
 	// One slot, so a blocked workflow leaves everything behind it ENQUEUED.
 	gateQueue, err := registerWFQ(dbosCtx, "rewind-gate-queue", WithWorkerConcurrency(1))
 	require.NoError(t, err)
+	partitionedQueue, err := registerWFQ(dbosCtx, "rewind-partitioned-queue", WithPartitionQueue())
+	require.NoError(t, err)
 	require.NoError(t, Launch(dbosCtx))
 
 	// runToFailure runs the parent to its first failure and returns the parent and child IDs.
@@ -12578,12 +12580,16 @@ func TestRewind(t *testing.T) {
 		return parentID, childID
 	}
 
-	getStatus := func(t *testing.T, workflowID string) WorkflowStatusType {
+	getWorkflow := func(t *testing.T, workflowID string) WorkflowStatus {
 		t.Helper()
 		wfs, err := ListWorkflows(dbosCtx, WithFilterWorkflowIDs(workflowID))
 		require.NoError(t, err)
 		require.Len(t, wfs, 1)
-		return wfs[0].Status
+		return wfs[0]
+	}
+	getStatus := func(t *testing.T, workflowID string) WorkflowStatusType {
+		t.Helper()
+		return getWorkflow(t, workflowID).Status
 	}
 
 	t.Run("RepairsChildAndAdoptsItOnReplay", func(t *testing.T) {
@@ -12909,6 +12915,49 @@ func TestRewind(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, wfs, 1)
 		assert.Equal(t, runningVersion, wfs[0].ApplicationVersion)
+	})
+
+	t.Run("KeepsItsQueueAndPartitionKey", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, idleWorkflow, "", WithQueue(partitionedQueue), WithQueuePartitionKey("pk"))
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+		workflowID := handle.GetWorkflowID()
+
+		// No queue given: the replay runs on the workflow's own queue and partition.
+		rewound, err := RewindWorkflow[string](dbosCtx, workflowID)
+		require.NoError(t, err)
+		// Checked before waiting: without its partition key, nothing would ever dequeue it.
+		status := getWorkflow(t, workflowID)
+		require.Equal(t, partitionedQueue.Name, status.QueueName)
+		require.Equal(t, "pk", status.QueuePartitionKey)
+		_, err = rewound.GetResult()
+		require.NoError(t, err)
+	})
+
+	t.Run("ClearsALegacyRowsOutcome", func(t *testing.T) {
+		handle, err := RunWorkflow(dbosCtx, idleWorkflow, "")
+		require.NoError(t, err)
+		_, err = handle.GetResult()
+		require.NoError(t, err)
+		workflowID := handle.GetWorkflowID()
+
+		// Move the outcome to where rows written before the workflow_output split keep it.
+		rawExec(t, dbosCtx, `UPDATE %[1]sworkflow_status SET error = 'stale error',
+			output = (SELECT output FROM %[1]sworkflow_output WHERE workflow_uuid = $1)
+			WHERE workflow_uuid = $1`, workflowID)
+		rawExec(t, dbosCtx, `DELETE FROM %sworkflow_output WHERE workflow_uuid = $1`, workflowID)
+		require.NotNil(t, getWorkflow(t, workflowID).Output, "reads should fall back to the legacy column")
+
+		// Onto a version no executor runs, so it waits ENQUEUED: the old outcome must not
+		// show while it does.
+		_, err = RewindWorkflow[string](dbosCtx, workflowID, WithRewindApplicationVersion("no-executor-runs-this"))
+		require.NoError(t, err)
+		status := getWorkflow(t, workflowID)
+		require.Equal(t, WorkflowStatusEnqueued, status.Status)
+		assert.Nil(t, status.Output)
+		assert.Nil(t, status.Error)
+		require.NoError(t, CancelWorkflow(dbosCtx, workflowID))
 	})
 
 	t.Run("RefusesActiveWorkflow", func(t *testing.T) {

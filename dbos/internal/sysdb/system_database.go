@@ -3345,9 +3345,9 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 type RewindWorkflowDBInput struct {
 	WorkflowID         string
 	StartStep          int
-	ApplicationVersion string
-	QueueName          string
-	QueuePartitionKey  string
+	ApplicationVersion string // Empty keeps the workflow's own
+	QueueName          string // Empty keeps the workflow's own queue
+	QueuePartitionKey  string // Empty keeps the workflow's own partition key
 	Tx                 Tx
 }
 
@@ -3452,8 +3452,6 @@ func (s *SysDB) RewindWorkflows(ctx context.Context, input RewindWorkflowsDBInpu
 		applicationVersion: input.ApplicationVersion,
 		queueName:          input.QueueName,
 		queuePartitionKey:  input.QueuePartitionKey,
-		keepQueue:          true,
-		clearLegacyOutcome: true,
 	}
 	for i, workflowID := range workflowIDs {
 		if err := s.rewindWorkflowTx(ctx, tx, key, workflowID, startSteps[i], statuses[workflowID], opts); err != nil {
@@ -3556,13 +3554,8 @@ func (s *SysDB) rewindableStatuses(ctx context.Context, q Querier, key string, w
 
 type rewindOptions struct {
 	applicationVersion string // Empty keeps the workflow's own
-	queueName          string
-	queuePartitionKey  string
-	// Keep the workflow's own queue and partition key where none is given, rather than
-	// the internal queue and no partition key.
-	keepQueue bool
-	// Also clear workflow_status's legacy output and error columns.
-	clearLegacyOutcome bool
+	queueName          string // Empty keeps the workflow's own, or the internal queue if it has none
+	queuePartitionKey  string // Empty keeps the workflow's own
 }
 
 // rewindWorkflowTx runs a rewind's statements in tx, for a workflow already read to be
@@ -3658,28 +3651,22 @@ func (s *SysDB) rewindWorkflowTx(ctx context.Context, tx Tx, key, workflowID str
 		return fmt.Sprintf("$%d", len(args))
 	}
 	set := ""
-	switch {
-	case opts.queueName != "":
+	if opts.queueName != "" {
 		set += ", queue_name = " + bind(opts.queueName)
-	case opts.keepQueue:
+	} else {
 		// NULLIF: legacy rows stored not-enqueued as '' rather than NULL
 		set += ", queue_name = COALESCE(NULLIF(queue_name, ''), " + bind(models.InternalQueueName) + ")"
-	default:
-		set += ", queue_name = " + bind(models.InternalQueueName)
 	}
 	if opts.queuePartitionKey != "" {
 		set += ", queue_partition_key = " + bind(opts.queuePartitionKey)
-	} else if !opts.keepQueue {
-		set += ", queue_partition_key = NULL"
 	}
 	if opts.applicationVersion != "" {
 		set += ", application_version = " + bind(opts.applicationVersion)
 	}
-	if opts.clearLegacyOutcome {
-		set += ", output = NULL, error = NULL"
-	}
+	// Clear output and error too: rows written before the workflow_output split keep their
+	// outcome on workflow_status, and reads fall back to it.
 	updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
-		SET status = $1, recovery_attempts = 0,
+		SET status = $1, recovery_attempts = 0, output = NULL, error = NULL,
 		    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, owner_xid = NULL, suspend_key = NULL,
 		    started_at_epoch_ms = NULL, completed_at = NULL, updated_at = $2`+set+`
 		WHERE workflow_uuid = $3 AND status = $4`+andKey(key, &args), schemaPrefix)

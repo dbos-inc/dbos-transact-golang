@@ -5753,7 +5753,9 @@ func ResumeWorkflows[R any](ctx Client, workflowIDs []string, opts ...ResumeWork
 	return handles, nil
 }
 
-// WithRewindQueue re-enqueues the rewound workflow on the specified queue instead of the internal queue.
+// WithRewindQueue re-enqueues the rewound workflow on the specified queue instead of the one
+// it ran on (the internal queue if it ran on none). Its partition key is kept unless
+// WithRewindQueuePartitionKey is also given.
 func WithRewindQueue(queueName string) RewindWorkflowOption {
 	return func(o *models.RewindWorkflowInput) {
 		o.QueueName = queueName
@@ -5962,7 +5964,7 @@ func (c *dbosContext) rewindWorkflows(input sysdb.RewindWorkflowsDBInput) error 
 // Options:
 //   - WithRewindStartStep: the step to rewind to (default 0, the whole history).
 //   - WithRewindApplicationVersion: replay under a different application version.
-//   - WithRewindQueue: re-enqueue on a named queue instead of the internal queue.
+//   - WithRewindQueue: re-enqueue on a named queue instead of the workflow's own.
 //   - WithRewindQueuePartitionKey: re-enqueue onto a partition of that queue.
 //   - WithRewindDataSources: data sources whose checkpoints to drop, for a Client.
 //
