@@ -67,7 +67,7 @@ type SystemDatabase interface {
 	ResumeWorkflows(ctx context.Context, input ResumeWorkflowsDBInput) ([]string, error)
 	ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) ([]string, error)
 	RewindWorkflows(ctx context.Context, input RewindWorkflowsDBInput) error
-	CheckRewindable(ctx context.Context, workflowIDs []string) error
+	CheckRewindable(ctx context.Context, workflowIDs []string, tx Tx) error
 
 	GetDeduplicatedWorkflow(ctx context.Context, queueName, deduplicationID string) (*string, error)
 
@@ -3407,8 +3407,8 @@ func (s *SysDB) RewindWorkflows(ctx context.Context, input RewindWorkflowsDBInpu
 }
 
 // CheckRewindable refuses, naming the workflow, if any of the workflows is missing or
-// active. It changes nothing.
-func (s *SysDB) CheckRewindable(ctx context.Context, workflowIDs []string) error {
+// active. It changes nothing, and reads through tx when given one.
+func (s *SysDB) CheckRewindable(ctx context.Context, workflowIDs []string, tx Tx) error {
 	if len(workflowIDs) == 0 {
 		return nil
 	}
@@ -3416,7 +3416,11 @@ func (s *SysDB) CheckRewindable(ctx context.Context, workflowIDs []string) error
 	if err != nil {
 		return err
 	}
-	_, err = s.rewindableStatuses(ctx, s.pool, key, workflowIDs)
+	var q Querier = s.pool
+	if tx != nil {
+		q = tx
+	}
+	_, err = s.rewindableStatuses(ctx, q, key, workflowIDs)
 	return err
 }
 

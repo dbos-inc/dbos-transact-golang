@@ -189,7 +189,10 @@ func (c *dbosContext) RecoverPendingWorkflows(executorIDs []string) ([]WorkflowH
 	return recoverPendingWorkflows(c, executorIDs)
 }
 func (c *dbosContext) RewindWorkflows(input sysdb.RewindWorkflowsDBInput) error {
-	return c.rewindWorkflows(input)
+	uncancellableCtx := WithoutCancel(c)
+	return sysdb.Retry(c, func() error {
+		return c.rewindWorkflows(uncancellableCtx, input, c.registeredDataSources())
+	}, sysdb.WithRetrierLogger(c.logger))
 }
 
 func (c *dbosContext) DecodeStoredValue(value, serialization string) (any, error) {
