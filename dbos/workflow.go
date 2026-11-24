@@ -5814,9 +5814,9 @@ func (c *dbosContext) RewindWorkflow(_ Client, workflowID string, opts ...Rewind
 	}
 	startStep := int(params.StartStep)
 
-	dbInput := sysdb.RewindWorkflowDBInput{
-		WorkflowID:         workflowID,
-		StartStep:          startStep,
+	dbInput := sysdb.RewindWorkflowsDBInput{
+		WorkflowIDs:        []string{workflowID},
+		StartSteps:         []int{startStep},
 		ApplicationVersion: params.ApplicationVersion,
 		QueueName:          params.QueueName,
 		QueuePartitionKey:  params.QueuePartitionKey,
@@ -5841,7 +5841,7 @@ func (c *dbosContext) RewindWorkflow(_ Client, workflowID string, opts ...Rewind
 				return nil, err
 			}
 			dbInput.Tx = tx
-			return nil, c.systemDB.RewindWorkflow(ctx, dbInput)
+			return nil, c.systemDB.RewindWorkflows(ctx, dbInput)
 		}, WithStepName("DBOS.rewindWorkflow"))
 	} else {
 		uncancellableCtx := WithoutCancel(c)
@@ -5850,7 +5850,7 @@ func (c *dbosContext) RewindWorkflow(_ Client, workflowID string, opts ...Rewind
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err == nil {
 			err = sysdb.Retry(c, func() error {
-				return c.systemDB.RewindWorkflow(uncancellableCtx, dbInput)
+				return c.systemDB.RewindWorkflows(uncancellableCtx, dbInput)
 			}, sysdb.WithRetrierLogger(c.logger))
 		}
 	}

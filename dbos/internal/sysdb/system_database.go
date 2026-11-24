@@ -66,7 +66,6 @@ type SystemDatabase interface {
 	DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInput) error
 	ResumeWorkflows(ctx context.Context, input ResumeWorkflowsDBInput) ([]string, error)
 	ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) ([]string, error)
-	RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput) error
 	RewindWorkflows(ctx context.Context, input RewindWorkflowsDBInput) error
 	CheckRewindable(ctx context.Context, workflowIDs []string) error
 
@@ -3342,17 +3341,18 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 	return forkedWorkflowIDs, nil
 }
 
-type RewindWorkflowDBInput struct {
-	WorkflowID         string
-	StartStep          int
-	ApplicationVersion string // Empty keeps the workflow's own
-	QueueName          string // Empty keeps the workflow's own queue
-	QueuePartitionKey  string // Empty keeps the workflow's own partition key
+type RewindWorkflowsDBInput struct {
+	WorkflowIDs        []string // Parallel to StartSteps
+	StartSteps         []int    // Each workflow's step to rewind to, numbered from 0
+	ApplicationVersion string   // Empty keeps each workflow's own
+	QueueName          string   // Empty keeps each workflow's own queue, or the internal queue if it has none
+	QueuePartitionKey  string   // Empty keeps each workflow's own partition key
 	Tx                 Tx
 }
 
-// RewindWorkflow drops a workflow's history from StartStep onwards and re-enqueues
-// it under the same workflow ID, so a replay re-executes everything from that step.
+// RewindWorkflows drops each workflow's history from its start step onwards and
+// re-enqueues it under the same workflow ID, so a replay re-executes everything from
+// that step. It is all or nothing: a missing or active workflow refuses the whole batch.
 //
 // Unlike ForkWorkflows it writes no new workflow: peers keep addressing the same ID,
 // and the workflow's mailbox, events, and streams are not copied anywhere. Unlike
@@ -3368,66 +3368,6 @@ type RewindWorkflowDBInput struct {
 //
 // A replayed Send still duplicates into its destination's mailbox; that side effect
 // lands in another workflow's history, which this rewind does not own.
-func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput) error {
-	if input.StartStep < 0 {
-		return models.NewInvalidOptionError(fmt.Sprintf("startStep must be >= 0, got %d", input.StartStep))
-	}
-
-	key, err := s.keyOf(ctx, input.WorkflowID)
-	if err != nil {
-		return err
-	}
-
-	tx := input.Tx
-	ownTx := tx == nil
-	if ownTx {
-		var err error
-		tx, err = s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.SnapshotIsolation()})
-		if err != nil {
-			return fmt.Errorf("failed to begin rewind transaction: %w", err)
-		}
-		defer tx.Rollback(ctx)
-	}
-
-	var currentStatus string
-	statusArgs := []any{input.WorkflowID}
-	statusQuery := s.RenderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`+andKey(key, &statusArgs), s.dialect.SchemaPrefix(s.schema))
-	if err := tx.QueryRow(ctx, statusQuery, statusArgs...).Scan(&currentStatus); err != nil {
-		if err == pgx.ErrNoRows {
-			return models.NewNonExistentWorkflowError(input.WorkflowID)
-		}
-		return fmt.Errorf("failed to read status of workflow %s: %w", input.WorkflowID, err)
-	}
-	if err := RewindRefusal(input.WorkflowID, models.WorkflowStatusType(currentStatus)); err != nil {
-		return err
-	}
-
-	if err := s.rewindWorkflowTx(ctx, tx, key, input.WorkflowID, input.StartStep, currentStatus, rewindOptions{
-		applicationVersion: input.ApplicationVersion,
-		queueName:          input.QueueName,
-		queuePartitionKey:  input.QueuePartitionKey,
-	}); err != nil {
-		return err
-	}
-
-	if ownTx {
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("failed to commit rewind transaction: %w", err)
-		}
-	}
-	return nil
-}
-
-type RewindWorkflowsDBInput struct {
-	WorkflowIDs        []string // Parallel to StartSteps
-	StartSteps         []int    // Each workflow's step to rewind to, numbered from 0
-	ApplicationVersion string   // Empty keeps each workflow's own
-	QueueName          string   // Empty keeps each workflow's own queue
-	QueuePartitionKey  string   // Empty keeps each workflow's own partition key
-}
-
-// RewindWorkflows rewinds each workflow from its own start step, all in one
-// transaction: a missing or active workflow refuses the whole batch.
 func (s *SysDB) RewindWorkflows(ctx context.Context, input RewindWorkflowsDBInput) error {
 	workflowIDs, startSteps, err := RewindTargets(input.WorkflowIDs, input.StartSteps)
 	if err != nil || len(workflowIDs) == 0 {
@@ -3438,29 +3378,30 @@ func (s *SysDB) RewindWorkflows(ctx context.Context, input RewindWorkflowsDBInpu
 		return err
 	}
 
-	tx, err := s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.SnapshotIsolation()})
-	if err != nil {
-		return fmt.Errorf("failed to begin rewind transaction: %w", err)
+	tx := input.Tx
+	ownTx := tx == nil
+	if ownTx {
+		tx, err = s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.SnapshotIsolation()})
+		if err != nil {
+			return fmt.Errorf("failed to begin rewind transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
 	}
-	defer tx.Rollback(ctx)
 
 	statuses, err := s.rewindableStatuses(ctx, tx, key, workflowIDs)
 	if err != nil {
 		return err
 	}
-	opts := rewindOptions{
-		applicationVersion: input.ApplicationVersion,
-		queueName:          input.QueueName,
-		queuePartitionKey:  input.QueuePartitionKey,
-	}
 	for i, workflowID := range workflowIDs {
-		if err := s.rewindWorkflowTx(ctx, tx, key, workflowID, startSteps[i], statuses[workflowID], opts); err != nil {
+		if err := s.rewindWorkflowTx(ctx, tx, key, workflowID, startSteps[i], statuses[workflowID], input); err != nil {
 			return err
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit rewind transaction: %w", err)
+	if ownTx {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("failed to commit rewind transaction: %w", err)
+		}
 	}
 	return nil
 }
@@ -3552,15 +3493,10 @@ func (s *SysDB) rewindableStatuses(ctx context.Context, q Querier, key string, w
 	return statuses, nil
 }
 
-type rewindOptions struct {
-	applicationVersion string // Empty keeps the workflow's own
-	queueName          string // Empty keeps the workflow's own, or the internal queue if it has none
-	queuePartitionKey  string // Empty keeps the workflow's own
-}
-
 // rewindWorkflowTx runs a rewind's statements in tx, for a workflow already read to be
-// in status. The re-enqueue only applies while the workflow is still in status.
-func (s *SysDB) rewindWorkflowTx(ctx context.Context, tx Tx, key, workflowID string, startStep int, status string, opts rewindOptions) error {
+// in status, with the batch's version and queue overrides. The re-enqueue only applies
+// while the workflow is still in status.
+func (s *SysDB) rewindWorkflowTx(ctx context.Context, tx Tx, key, workflowID string, startStep int, status string, batch RewindWorkflowsDBInput) error {
 	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
 	// Every statement below binds the workflow ID as $1, the start step as $2, and the key last.
 	keyed := func(alias string, args ...any) ([]any, string) {
@@ -3651,17 +3587,17 @@ func (s *SysDB) rewindWorkflowTx(ctx context.Context, tx Tx, key, workflowID str
 		return fmt.Sprintf("$%d", len(args))
 	}
 	set := ""
-	if opts.queueName != "" {
-		set += ", queue_name = " + bind(opts.queueName)
+	if batch.QueueName != "" {
+		set += ", queue_name = " + bind(batch.QueueName)
 	} else {
 		// NULLIF: legacy rows stored not-enqueued as '' rather than NULL
 		set += ", queue_name = COALESCE(NULLIF(queue_name, ''), " + bind(models.InternalQueueName) + ")"
 	}
-	if opts.queuePartitionKey != "" {
-		set += ", queue_partition_key = " + bind(opts.queuePartitionKey)
+	if batch.QueuePartitionKey != "" {
+		set += ", queue_partition_key = " + bind(batch.QueuePartitionKey)
 	}
-	if opts.applicationVersion != "" {
-		set += ", application_version = " + bind(opts.applicationVersion)
+	if batch.ApplicationVersion != "" {
+		set += ", application_version = " + bind(batch.ApplicationVersion)
 	}
 	// Clear output and error too: rows written before the workflow_output split keep their
 	// outcome on workflow_status, and reads fall back to it.
