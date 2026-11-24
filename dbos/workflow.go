@@ -5753,7 +5753,9 @@ func ResumeWorkflows[R any](ctx Client, workflowIDs []string, opts ...ResumeWork
 	return handles, nil
 }
 
-// WithRewindQueue re-enqueues the rewound workflow on the specified queue instead of the internal queue.
+// WithRewindQueue re-enqueues the rewound workflow on the specified queue instead of the one
+// it ran on (the internal queue if it ran on none). Its partition key is kept unless
+// WithRewindQueuePartitionKey is also given.
 func WithRewindQueue(queueName string) RewindWorkflowOption {
 	return func(o *models.RewindWorkflowInput) {
 		o.QueueName = queueName
@@ -5812,9 +5814,9 @@ func (c *dbosContext) RewindWorkflow(_ Client, workflowID string, opts ...Rewind
 	}
 	startStep := int(params.StartStep)
 
-	dbInput := sysdb.RewindWorkflowDBInput{
-		WorkflowID:         workflowID,
-		StartStep:          startStep,
+	dbInput := sysdb.RewindWorkflowsDBInput{
+		WorkflowIDs:        []string{workflowID},
+		StartSteps:         []int{startStep},
 		ApplicationVersion: params.ApplicationVersion,
 		QueueName:          params.QueueName,
 		QueuePartitionKey:  params.QueuePartitionKey,
@@ -5835,22 +5837,14 @@ func (c *dbosContext) RewindWorkflow(_ Client, workflowID string, opts ...Rewind
 	var err error
 	if isWithinWorkflow {
 		_, err = runAsTxnOrStep(c, c.systemDB.Sharded(), func(ctx context.Context, tx Tx) (any, error) {
-			if err := c.rewindDataSources(ctx, tx, dataSources, workflowID, startStep); err != nil {
-				return nil, err
-			}
 			dbInput.Tx = tx
-			return nil, c.systemDB.RewindWorkflow(ctx, dbInput)
+			return nil, c.rewindWorkflows(ctx, dbInput, dataSources)
 		}, WithStepName("DBOS.rewindWorkflow"))
 	} else {
 		uncancellableCtx := WithoutCancel(c)
 		err = sysdb.Retry(c, func() error {
-			return c.rewindDataSources(uncancellableCtx, nil, dataSources, workflowID, startStep)
+			return c.rewindWorkflows(uncancellableCtx, dbInput, dataSources)
 		}, sysdb.WithRetrierLogger(c.logger))
-		if err == nil {
-			err = sysdb.Retry(c, func() error {
-				return c.systemDB.RewindWorkflow(uncancellableCtx, dbInput)
-			}, sysdb.WithRetrierLogger(c.logger))
-		}
 	}
 	if err != nil {
 		return nil, err
@@ -5859,27 +5853,30 @@ func (c *dbosContext) RewindWorkflow(_ Client, workflowID string, opts ...Rewind
 	return newWorkflowPollingHandle[any](c, workflowID, key), nil
 }
 
-// Drops the data sources' checkpoints. Refuses an active workflow before anything is deleted.
-func (c *dbosContext) rewindDataSources(ctx context.Context, tx Tx, dataSources []*DataSource, workflowID string, startStep int) error {
-	if len(dataSources) == 0 {
-		return nil
+// rewindWorkflows drops the data sources' checkpoints, then rewinds each workflow from
+// its own start step, all or nothing in the system database. Every workflow is checked
+// before any checkpoint is dropped, because those drops are not part of the system
+// database transaction.
+func (c *dbosContext) rewindWorkflows(ctx context.Context, input sysdb.RewindWorkflowsDBInput, dataSources []*DataSource) error {
+	if len(dataSources) > 0 {
+		workflowIDs, startSteps, err := sysdb.RewindTargets(input.WorkflowIDs, input.StartSteps)
+		if err != nil {
+			return err
+		}
+		if err := c.systemDB.CheckRewindable(ctx, workflowIDs, input.Tx); err != nil {
+			return err
+		}
+		for i, workflowID := range workflowIDs {
+			if err := c.deleteDataSourceCheckpoints(ctx, dataSources, workflowID, startSteps[i]); err != nil {
+				return err
+			}
+		}
 	}
-	if startStep < 0 {
-		return models.NewInvalidOptionError(fmt.Sprintf("startStep must be >= 0, got %d", startStep))
-	}
-	statuses, err := c.systemDB.ListWorkflows(ctx, sysdb.ListWorkflowsDBInput{WorkflowIDs: []string{workflowID}, Tx: tx})
-	if err != nil {
-		return err
-	}
-	if len(statuses) == 0 {
-		return models.NewNonExistentWorkflowError(workflowID)
-	}
-	switch statuses[0].Status {
-	case models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, models.WorkflowStatusSuspended:
-		return fmt.Errorf(
-			"cannot rewind workflow %s while it is %s: only a workflow in a terminal state can be rewound, so cancel it first",
-			workflowID, statuses[0].Status)
-	}
+	return c.systemDB.RewindWorkflows(ctx, input)
+}
+
+// Drops a workflow's checkpoints from startStep onwards in every data source.
+func (c *dbosContext) deleteDataSourceCheckpoints(ctx context.Context, dataSources []*DataSource, workflowID string, startStep int) error {
 	// A sharded database's checkpoint rows carry the workflow's key.
 	key, err := c.systemDB.KeyHint(ctx, workflowID)
 	if err != nil {
@@ -5928,7 +5925,7 @@ func (c *dbosContext) rewindDataSources(ctx context.Context, tx Tx, dataSources 
 // Options:
 //   - WithRewindStartStep: the step to rewind to (default 0, the whole history).
 //   - WithRewindApplicationVersion: replay under a different application version.
-//   - WithRewindQueue: re-enqueue on a named queue instead of the internal queue.
+//   - WithRewindQueue: re-enqueue on a named queue instead of the workflow's own.
 //   - WithRewindQueuePartitionKey: re-enqueue onto a partition of that queue.
 //   - WithRewindDataSources: data sources whose checkpoints to drop, for a Client.
 //

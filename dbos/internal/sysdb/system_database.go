@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"net/url"
 	"reflect"
@@ -65,7 +66,8 @@ type SystemDatabase interface {
 	DeleteWorkflows(ctx context.Context, input DeleteWorkflowsDBInput) error
 	ResumeWorkflows(ctx context.Context, input ResumeWorkflowsDBInput) ([]string, error)
 	ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) ([]string, error)
-	RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput) error
+	RewindWorkflows(ctx context.Context, input RewindWorkflowsDBInput) error
+	CheckRewindable(ctx context.Context, workflowIDs []string, tx Tx) error
 
 	GetDeduplicatedWorkflow(ctx context.Context, queueName, deduplicationID string) (*string, error)
 
@@ -3339,17 +3341,18 @@ func (s *SysDB) ForkWorkflows(ctx context.Context, input ForkWorkflowsDBInput) (
 	return forkedWorkflowIDs, nil
 }
 
-type RewindWorkflowDBInput struct {
-	WorkflowID         string
-	StartStep          int
-	ApplicationVersion string
-	QueueName          string
-	QueuePartitionKey  string
+type RewindWorkflowsDBInput struct {
+	WorkflowIDs        []string // Parallel to StartSteps
+	StartSteps         []int    // Each workflow's step to rewind to, numbered from 0
+	ApplicationVersion string   // Empty keeps each workflow's own
+	QueueName          string   // Empty keeps each workflow's own queue, or the internal queue if it has none
+	QueuePartitionKey  string   // Empty keeps each workflow's own partition key
 	Tx                 Tx
 }
 
-// RewindWorkflow drops a workflow's history from StartStep onwards and re-enqueues
-// it under the same workflow ID, so a replay re-executes everything from that step.
+// RewindWorkflows drops each workflow's history from its start step onwards and
+// re-enqueues it under the same workflow ID, so a replay re-executes everything from
+// that step. It is all or nothing: a missing or active workflow refuses the whole batch.
 //
 // Unlike ForkWorkflows it writes no new workflow: peers keep addressing the same ID,
 // and the workflow's mailbox, events, and streams are not copied anywhere. Unlike
@@ -3365,20 +3368,140 @@ type RewindWorkflowDBInput struct {
 //
 // A replayed Send still duplicates into its destination's mailbox; that side effect
 // lands in another workflow's history, which this rewind does not own.
-func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput) error {
-	if input.StartStep < 0 {
-		return models.NewInvalidOptionError(fmt.Sprintf("startStep must be >= 0, got %d", input.StartStep))
+func (s *SysDB) RewindWorkflows(ctx context.Context, input RewindWorkflowsDBInput) error {
+	workflowIDs, startSteps, err := RewindTargets(input.WorkflowIDs, input.StartSteps)
+	if err != nil || len(workflowIDs) == 0 {
+		return err
 	}
-
-	queueName := input.QueueName
-	if queueName == "" {
-		queueName = models.InternalQueueName
-	}
-	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
-	key, err := s.keyOf(ctx, input.WorkflowID)
+	key, err := s.singleKeyOf(ctx, workflowIDs, "RewindWorkflows")
 	if err != nil {
 		return err
 	}
+
+	tx := input.Tx
+	ownTx := tx == nil
+	if ownTx {
+		tx, err = s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.SnapshotIsolation()})
+		if err != nil {
+			return fmt.Errorf("failed to begin rewind transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+	}
+
+	statuses, err := s.rewindableStatuses(ctx, tx, key, workflowIDs)
+	if err != nil {
+		return err
+	}
+	for i, workflowID := range workflowIDs {
+		if err := s.rewindWorkflowTx(ctx, tx, key, workflowID, startSteps[i], statuses[workflowID], input); err != nil {
+			return err
+		}
+	}
+
+	if ownTx {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("failed to commit rewind transaction: %w", err)
+		}
+	}
+	return nil
+}
+
+// CheckRewindable refuses, naming the workflow, if any of the workflows is missing or
+// active. It changes nothing, and reads through tx when given one.
+func (s *SysDB) CheckRewindable(ctx context.Context, workflowIDs []string, tx Tx) error {
+	if len(workflowIDs) == 0 {
+		return nil
+	}
+	key, err := s.singleKeyOf(ctx, workflowIDs, "CheckRewindable")
+	if err != nil {
+		return err
+	}
+	var q Querier = s.pool
+	if tx != nil {
+		q = tx
+	}
+	_, err = s.rewindableStatuses(ctx, q, key, workflowIDs)
+	return err
+}
+
+// RewindTargets is a batch rewind's workflows and start steps: each workflow once,
+// with the start step of its first listing, in ID order.
+func RewindTargets(workflowIDs []string, startSteps []int) ([]string, []int, error) {
+	if len(workflowIDs) != len(startSteps) {
+		return nil, nil, models.NewInvalidOptionError("workflowIDs and startSteps must have the same length")
+	}
+	firstStep := make(map[string]int, len(workflowIDs))
+	for i, workflowID := range workflowIDs {
+		if startSteps[i] < 0 {
+			return nil, nil, models.NewInvalidOptionError(fmt.Sprintf("startStep must be >= 0, got %d", startSteps[i]))
+		}
+		if _, ok := firstStep[workflowID]; !ok {
+			firstStep[workflowID] = startSteps[i]
+		}
+	}
+	ids := slices.Sorted(maps.Keys(firstStep))
+	steps := make([]int, len(ids))
+	for i, workflowID := range ids {
+		steps[i] = firstStep[workflowID]
+	}
+	return ids, steps, nil
+}
+
+// RewindRefusal is the error refusing to rewind a workflow in status, or nil when a
+// workflow in that status can be rewound.
+func RewindRefusal(workflowID string, status models.WorkflowStatusType) error {
+	switch status {
+	case models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, models.WorkflowStatusSuspended:
+		return fmt.Errorf(
+			"cannot rewind workflow %s while it is %s: only a workflow in a terminal state can be rewound, so cancel it first",
+			workflowID, status)
+	}
+	return nil
+}
+
+// rewindableStatuses reads every workflow's status in one query, refusing a missing or
+// active one. It takes no locks: rewindWorkflowTx's guarded update catches a later change.
+func (s *SysDB) rewindableStatuses(ctx context.Context, q Querier, key string, workflowIDs []string) (map[string]string, error) {
+	idsParam, err := encodeArrayParam(s.dialect, workflowIDs)
+	if err != nil {
+		return nil, err
+	}
+	args := []any{idsParam}
+	query := s.RenderSQL(`SELECT workflow_uuid, status FROM %sworkflow_status WHERE `+
+		dialectAnyClause(s.dialect, "workflow_uuid", 1)+andKey(key, &args), s.dialect.SchemaPrefix(s.schema))
+	rows, err := q.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read workflow statuses: %w", err)
+	}
+	defer rows.Close()
+	statuses := make(map[string]string, len(workflowIDs))
+	for rows.Next() {
+		var workflowID, status string
+		if err := rows.Scan(&workflowID, &status); err != nil {
+			return nil, fmt.Errorf("failed to scan workflow status: %w", err)
+		}
+		statuses[workflowID] = status
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read workflow statuses: %w", err)
+	}
+	for _, workflowID := range workflowIDs {
+		status, ok := statuses[workflowID]
+		if !ok {
+			return nil, models.NewNonExistentWorkflowError(workflowID)
+		}
+		if err := RewindRefusal(workflowID, models.WorkflowStatusType(status)); err != nil {
+			return nil, err
+		}
+	}
+	return statuses, nil
+}
+
+// rewindWorkflowTx runs a rewind's statements in tx, for a workflow already read to be
+// in status, with the batch's version and queue overrides. The re-enqueue only applies
+// while the workflow is still in status.
+func (s *SysDB) rewindWorkflowTx(ctx context.Context, tx Tx, key, workflowID string, startStep int, status string, batch RewindWorkflowsDBInput) error {
+	schemaPrefix := s.dialect.SchemaPrefix(s.schema)
 	// Every statement below binds the workflow ID as $1, the start step as $2, and the key last.
 	keyed := func(alias string, args ...any) ([]any, string) {
 		if key == "" {
@@ -3392,40 +3515,12 @@ func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput)
 		return args, fmt.Sprintf(" AND %s = $%d", column, len(args))
 	}
 
-	tx := input.Tx
-	ownTx := tx == nil
-	if ownTx {
-		var err error
-		tx, err = s.pool.BeginTx(ctx, TxOptions{IsoLevel: s.dialect.SnapshotIsolation()})
-		if err != nil {
-			return fmt.Errorf("failed to begin rewind transaction: %w", err)
-		}
-		defer tx.Rollback(ctx)
-	}
-
-	var currentStatus string
-	statusArgs, statusKey := keyed("", input.WorkflowID)
-	statusQuery := s.RenderSQL(`SELECT status FROM %sworkflow_status WHERE workflow_uuid = $1`+statusKey, schemaPrefix)
-	if err := tx.QueryRow(ctx, statusQuery, statusArgs...).Scan(&currentStatus); err != nil {
-		if err == pgx.ErrNoRows {
-			return models.NewNonExistentWorkflowError(input.WorkflowID)
-		}
-		return fmt.Errorf("failed to read status of workflow %s: %w", input.WorkflowID, err)
-	}
-	// Only a terminal workflow can be rewound.
-	switch models.WorkflowStatusType(currentStatus) {
-	case models.WorkflowStatusPending, models.WorkflowStatusEnqueued, models.WorkflowStatusDelayed, models.WorkflowStatusSuspended:
-		return fmt.Errorf(
-			"cannot rewind workflow %s while it is %s: only a workflow in a terminal state can be rewound, so cancel it first",
-			input.WorkflowID, currentStatus)
-	}
-
 	// Roll workflow_events back to the value each key held below the cut, using
 	// workflow_events_history as an undo log.
 
 	// First unpublish every key the discarded run touched.
-	stepArgs, eventsKey := keyed("", input.WorkflowID, input.StartStep)
-	_, discardedKey := keyed("discarded", input.WorkflowID, input.StartStep)
+	stepArgs, eventsKey := keyed("", workflowID, startStep)
+	_, discardedKey := keyed("discarded", workflowID, startStep)
 	unpublishQuery := s.RenderSQL(`DELETE FROM %sworkflow_events
 		WHERE workflow_uuid = $1`+eventsKey+` AND EXISTS (
 			SELECT 1 FROM %sworkflow_events_history discarded
@@ -3433,13 +3528,13 @@ func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput)
 			  AND discarded.function_id >= $2
 		)`, schemaPrefix, schemaPrefix, schemaPrefix)
 	if _, err := tx.Exec(ctx, unpublishQuery, stepArgs...); err != nil {
-		return fmt.Errorf("failed to unpublish events for workflow %s: %w", input.WorkflowID, err)
+		return fmt.Errorf("failed to unpublish events for workflow %s: %w", workflowID, err)
 	}
 
 	// Then restore those keys, if any, to the last value published below the cut.
 	// A key the discarded run published for the first time has no surviving row, so
 	// it stays unpublished.
-	_, historyKey := keyed("h", input.WorkflowID, input.StartStep)
+	_, historyKey := keyed("h", workflowID, startStep)
 	survivingKey := ""
 	if key != "" {
 		survivingKey = "h.shard_key, "
@@ -3456,29 +3551,29 @@ func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput)
 			)
 		) surviving WHERE rn = 1`, schemaPrefix, schemaPrefix, schemaPrefix)
 	if _, err := tx.Exec(ctx, restoreQuery, stepArgs...); err != nil {
-		return fmt.Errorf("failed to restore events for workflow %s: %w", input.WorkflowID, err)
+		return fmt.Errorf("failed to restore events for workflow %s: %w", workflowID, err)
 	}
 
 	// Drop the recorded outcome so the replay's is the only one readers can see.
-	outputArgs, outputKey := keyed("", input.WorkflowID)
+	outputArgs, outputKey := keyed("", workflowID)
 	outputQuery := s.RenderSQL(`DELETE FROM %sworkflow_output WHERE workflow_uuid = $1`+outputKey, schemaPrefix)
 	if _, err := tx.Exec(ctx, outputQuery, outputArgs...); err != nil {
-		return fmt.Errorf("failed to delete output of workflow %s: %w", input.WorkflowID, err)
+		return fmt.Errorf("failed to delete output of workflow %s: %w", workflowID, err)
 	}
 
 	// Clear up streams closed sentinels.
-	reopenArgs, reopenKey := keyed("", input.WorkflowID, input.StartStep, StreamClosedSentinel)
+	reopenArgs, reopenKey := keyed("", workflowID, startStep, StreamClosedSentinel)
 	reopenQuery := s.RenderSQL(`DELETE FROM %sstreams
 		WHERE workflow_uuid = $1 AND function_id >= $2 AND value = $3`+reopenKey, schemaPrefix)
 	if _, err := tx.Exec(ctx, reopenQuery, reopenArgs...); err != nil {
-		return fmt.Errorf("failed to reopen streams for workflow %s: %w", input.WorkflowID, err)
+		return fmt.Errorf("failed to reopen streams for workflow %s: %w", workflowID, err)
 	}
 
 	// delete operation_outputs and workflow_events_history
 	for _, table := range []string{"operation_outputs", "workflow_events_history"} {
 		deleteQuery := s.RenderSQL(`DELETE FROM %s`+table+` WHERE workflow_uuid = $1 AND function_id >= $2`+eventsKey, schemaPrefix)
 		if _, err := tx.Exec(ctx, deleteQuery, stepArgs...); err != nil {
-			return fmt.Errorf("failed to delete %s for workflow %s: %w", table, input.WorkflowID, err)
+			return fmt.Errorf("failed to delete %s for workflow %s: %w", table, workflowID, err)
 		}
 	}
 
@@ -3486,45 +3581,46 @@ func (s *SysDB) RewindWorkflow(ctx context.Context, input RewindWorkflowDBInput)
 	consumedQuery := s.RenderSQL(`DELETE FROM %snotifications
 		WHERE destination_uuid = $1 AND (consumed_by_function_id >= $2 OR consumed = false)`+eventsKey, schemaPrefix)
 	if _, err := tx.Exec(ctx, consumedQuery, stepArgs...); err != nil {
-		return fmt.Errorf("failed to delete consumed notifications for workflow %s: %w", input.WorkflowID, err)
+		return fmt.Errorf("failed to delete consumed notifications for workflow %s: %w", workflowID, err)
 	}
 
-	// Re-enqueue the workflow. An empty ApplicationVersion leaves the recorded one in place.
-	var queuePartitionKey any
-	if input.QueuePartitionKey != "" {
-		queuePartitionKey = input.QueuePartitionKey
+	// Re-enqueue the workflow. An empty applicationVersion leaves the recorded one in place.
+	args := []any{models.WorkflowStatusEnqueued, time.Now().UnixMilli(), workflowID, status}
+	bind := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
 	}
-	setVersion := ""
-	args := []any{
-		models.WorkflowStatusEnqueued, queueName, queuePartitionKey,
-		time.Now().UnixMilli(), input.WorkflowID, currentStatus,
+	set := ""
+	if batch.QueueName != "" {
+		set += ", queue_name = " + bind(batch.QueueName)
+	} else {
+		// NULLIF: legacy rows stored not-enqueued as '' rather than NULL
+		set += ", queue_name = COALESCE(NULLIF(queue_name, ''), " + bind(models.InternalQueueName) + ")"
 	}
-	if input.ApplicationVersion != "" {
-		setVersion = ", application_version = $7"
-		args = append(args, input.ApplicationVersion)
+	if batch.QueuePartitionKey != "" {
+		set += ", queue_partition_key = " + bind(batch.QueuePartitionKey)
 	}
+	if batch.ApplicationVersion != "" {
+		set += ", application_version = " + bind(batch.ApplicationVersion)
+	}
+	// Clear output and error too: rows written before the workflow_output split keep their
+	// outcome on workflow_status, and reads fall back to it.
 	updateQuery := s.RenderSQL(`UPDATE %sworkflow_status
-		SET status = $1, queue_name = $2, queue_partition_key = $3, recovery_attempts = 0,
+		SET status = $1, recovery_attempts = 0, output = NULL, error = NULL,
 		    workflow_deadline_epoch_ms = NULL, deduplication_id = NULL, owner_xid = NULL, suspend_key = NULL,
-		    started_at_epoch_ms = NULL, completed_at = NULL, updated_at = $4`+setVersion+`
-		WHERE workflow_uuid = $5 AND status = $6`+andKey(key, &args), schemaPrefix)
+		    started_at_epoch_ms = NULL, completed_at = NULL, updated_at = $2`+set+`
+		WHERE workflow_uuid = $3 AND status = $4`+andKey(key, &args), schemaPrefix)
 	result, err := tx.Exec(ctx, updateQuery, args...)
 	if err != nil {
-		return fmt.Errorf("failed to re-enqueue rewound workflow %s: %w", input.WorkflowID, err)
+		return fmt.Errorf("failed to re-enqueue rewound workflow %s: %w", workflowID, err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("failed to read rows affected after rewinding workflow %s: %w", input.WorkflowID, err)
+		return fmt.Errorf("failed to read rows affected after rewinding workflow %s: %w", workflowID, err)
 	}
 	if n == 0 {
-		return models.NewUnexpectedWorkflowError(input.WorkflowID,
-			fmt.Sprintf("status likely changed from %s while rewinding; retry the rewind", currentStatus))
-	}
-
-	if ownTx {
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("failed to commit rewind transaction: %w", err)
-		}
+		return models.NewUnexpectedWorkflowError(workflowID,
+			fmt.Sprintf("status likely changed from %s while rewinding; retry the rewind", status))
 	}
 	return nil
 }

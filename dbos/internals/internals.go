@@ -23,6 +23,8 @@ type Runtime interface {
 	AutoUpgradableWorkflows() []string // The recorded names of the registered workflows enrolled in auto-upgrade, sorted
 
 	RecoverPendingWorkflows(executorIDs []string) ([]dbos.WorkflowHandle[any], error)
+	// RewindWorkflows rewinds each workflow from its own start step, all or nothing.
+	RewindWorkflows(input RewindWorkflowsInput) error
 	DecodeStoredValue(value, serialization string) (any, error)
 }
 
@@ -47,6 +49,7 @@ type (
 	DeleteWorkflowsInput     = sysdb.DeleteWorkflowsDBInput
 	BackfillScheduleInput    = sysdb.BackfillScheduleDBInput
 	GetWorkflowChildrenInput = sysdb.GetWorkflowChildrenDBInput
+	RewindWorkflowsInput     = sysdb.RewindWorkflowsDBInput
 
 	Tx        = sysdb.Tx        // A transaction on the system database pool
 	TxOptions = sysdb.TxOptions // Options for Pool().BeginTx

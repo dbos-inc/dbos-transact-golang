@@ -1811,4 +1811,66 @@ func TestRewindDropsDataSourceCheckpoints(t *testing.T) {
 		require.Equal(t, 1, ub.countRows(t, countTarget, targetID),
 			"the replayed rewind step dropped the target's fresh checkpoint")
 	})
+
+	t.Run("BatchChecksEveryWorkflowBeforeDeleting", func(t *testing.T) {
+		ctx := setupDBOS(t, setupDBOSOptions{dropDB: true})
+		ub := openUserBackend(t)
+		ub.dropCompletionTable(t)
+		ds := ub.register(t, ctx, "app")
+
+		runs := map[string]*atomic.Int32{"finished": {}, "unfinished": {}}
+		writer := func(dctx Context, name string) (int32, error) {
+			return RunAsTransaction(dctx, ds, func(c context.Context, tx Tx) (int32, error) {
+				n := runs[name].Add(1)
+				_, e := tx.Exec(c, ub.rw(`INSERT INTO kv (k, v) VALUES ($1, $2)`), fmt.Sprintf("%s-%d", name, n), "v")
+				return n, e
+			})
+		}
+		RegisterWorkflow(ctx, writer)
+		require.NoError(t, Launch(ctx))
+		ub.createAppTable(t)
+
+		// The batch goes in ID order, so the finished workflow comes first.
+		finishedID, unfinishedID := "a-"+uuid.NewString(), "z-"+uuid.NewString()
+		for id, name := range map[string]string{finishedID: "finished", unfinishedID: "unfinished"} {
+			h, err := RunWorkflow(ctx, writer, name, WithWorkflowID(id))
+			require.NoError(t, err)
+			_, err = h.GetResult()
+			require.NoError(t, err)
+		}
+		setWorkflowStatusPending(t, ctx, unfinishedID)
+		rewind := func(workflowIDs ...string) error {
+			return ctx.(*dbosContext).RewindWorkflows(sysdb.RewindWorkflowsDBInput{
+				WorkflowIDs: workflowIDs,
+				StartSteps:  make([]int, len(workflowIDs)),
+			})
+		}
+		checkpoints := func(workflowID string) int {
+			return ub.countRows(t, fmt.Sprintf(`SELECT count(*) FROM %s WHERE workflow_id = $1`, ub.completionTable()), workflowID)
+		}
+
+		// The checkpoint deletes can't be rolled back, so a batch that will be refused
+		// deletes none, even those of a workflow it reaches before the one refusing it.
+		require.ErrorContains(t, rewind(finishedID, unfinishedID), "cannot rewind workflow "+unfinishedID)
+		require.Equal(t, 1, checkpoints(finishedID))
+		require.Equal(t, 1, checkpoints(unfinishedID))
+
+		missingID := "z-" + uuid.NewString()
+		var dbosErr *Error
+		require.ErrorAs(t, rewind(finishedID, missingID), &dbosErr)
+		require.Equal(t, ErrorCodeNonExistentWorkflow, dbosErr.Code)
+		require.Equal(t, 1, checkpoints(finishedID))
+
+		// Once both are finished, the batch drops their checkpoints, so each
+		// transaction runs again rather than replaying its checkpoint.
+		rawExec(t, ctx, `UPDATE %sworkflow_status SET status = $1 WHERE workflow_uuid = $2`, WorkflowStatusError, unfinishedID)
+		require.NoError(t, rewind(finishedID, unfinishedID))
+		for id, name := range map[string]string{finishedID: "finished", unfinishedID: "unfinished"} {
+			h, err := RetrieveWorkflow[int32](ctx, id)
+			require.NoError(t, err)
+			_, err = h.GetResult()
+			require.NoError(t, err)
+			require.Equal(t, 2, ub.countRows(t, `SELECT count(*) FROM kv WHERE k LIKE $1`, name+"-%"))
+		}
+	})
 }
