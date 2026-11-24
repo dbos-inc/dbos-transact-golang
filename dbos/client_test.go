@@ -2944,8 +2944,8 @@ func TestClientTriggerScheduleTyped(t *testing.T) {
 // txInWorkflowTopic is the topic the in-workflow rejection workflow sends to.
 const txInWorkflowTopic = "client-tx-in-workflow-topic"
 
-// enqueueInWorkflowWithTx tries both transactional client options from inside a
-// workflow, where they are not allowed, and returns the two error messages.
+// enqueueInWorkflowWithTx tries every transactional client option from inside a
+// workflow, where none is allowed, and returns their error messages.
 func enqueueInWorkflowWithTx(ctx Context, queueName string) (string, error) {
 	pool := ctx.(*dbosContext).systemDB.Pool()
 	tx, err := pool.BeginTx(context.Background(), TxOptions{})
@@ -2968,14 +2968,28 @@ func enqueueInWorkflowWithTx(ctx Context, queueName string) (string, error) {
 	if sendBulkErr == nil {
 		return "", errors.New("expected SendBulk with a transaction to be rejected within a workflow")
 	}
-	return enqueueErr.Error() + "|" + sendErr.Error() + "|" + sendBulkErr.Error(), nil
+	cancelErr := CancelWorkflow(ctx, "some-workflow-id", WithCancelTransaction(tx))
+	if cancelErr == nil {
+		return "", errors.New("expected CancelWorkflow with a transaction to be rejected within a workflow")
+	}
+	_, resumeErr := ResumeWorkflow[string](ctx, "some-workflow-id", WithResumeTransaction(tx))
+	if resumeErr == nil {
+		return "", errors.New("expected ResumeWorkflow with a transaction to be rejected within a workflow")
+	}
+	attrsErr := SetWorkflowAttributes(ctx, "some-workflow-id", map[string]any{"k": "v"}, WithSetAttributesTransaction(tx))
+	if attrsErr == nil {
+		return "", errors.New("expected SetWorkflowAttributes with a transaction to be rejected within a workflow")
+	}
+	return strings.Join([]string{enqueueErr.Error(), sendErr.Error(), sendBulkErr.Error(), cancelErr.Error(),
+		resumeErr.Error(), attrsErr.Error()}, "|"), nil
 }
 
 func txClientWorkflow(ctx Context, input string) (string, error) {
 	return "processed: " + input, nil
 }
 
-// TestClientTransactionalOps covers WithEnqueueTransaction and WithSendTransaction:
+// TestClientTransactionalOps covers WithEnqueueTransaction, WithSendTransaction,
+// WithCancelTransaction, WithResumeTransaction and WithSetAttributesTransaction:
 // the operation joins a transaction the caller owns, so it lands only if that
 // transaction commits.
 func TestClientTransactionalOps(t *testing.T) {
@@ -3156,6 +3170,150 @@ func TestClientTransactionalOps(t *testing.T) {
 		require.Contains(t, err.Error(), "return-existing")
 	})
 
+	// delayed enqueues TxClientWorkflow an hour ahead, so it waits DELAYED
+	// while a test cancels, resumes or tags it.
+	delayed := func(t *testing.T, input string) WorkflowHandle[string] {
+		t.Helper()
+		handle, err := Enqueue[string](client, queue.GetName(), "TxClientWorkflow", input,
+			appVersion, WithEnqueueDelay(time.Hour))
+		require.NoError(t, err)
+		return handle
+	}
+
+	status := func(t *testing.T, workflowID string) WorkflowStatus {
+		t.Helper()
+		handle, err := client.RetrieveWorkflow(client, workflowID)
+		require.NoError(t, err)
+		st, err := handle.GetStatus()
+		require.NoError(t, err)
+		return st
+	}
+
+	t.Run("CancelCommits", func(t *testing.T) {
+		id := delayed(t, "cancel-commit").GetWorkflowID()
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+
+		require.NoError(t, CancelWorkflow(client, id, WithCancelTransaction(tx)))
+		if !isCockroach {
+			require.Equal(t, WorkflowStatusDelayed, status(t, id).Status, "cancellation must not be visible before commit")
+		}
+
+		require.NoError(t, tx.Commit(ctx))
+		require.Equal(t, WorkflowStatusCancelled, status(t, id).Status)
+	})
+
+	t.Run("CancelRollsBack", func(t *testing.T) {
+		id := delayed(t, "cancel-rollback").GetWorkflowID()
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+
+		require.NoError(t, CancelWorkflow(client, id, WithCancelTransaction(tx)))
+		require.NoError(t, tx.Rollback(ctx))
+		require.Equal(t, WorkflowStatusDelayed, status(t, id).Status, "rolled back cancellation must not apply")
+	})
+
+	t.Run("CancelWorkflowsInTransaction", func(t *testing.T) {
+		first, second := delayed(t, "bulk-cancel-1").GetWorkflowID(), delayed(t, "bulk-cancel-2").GetWorkflowID()
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+
+		require.NoError(t, CancelWorkflows(client, []string{first, second}, WithCancelTransaction(tx)))
+		require.NoError(t, tx.Commit(ctx))
+		require.Equal(t, WorkflowStatusCancelled, status(t, first).Status)
+		require.Equal(t, WorkflowStatusCancelled, status(t, second).Status)
+	})
+
+	t.Run("SetAttributesCommits", func(t *testing.T) {
+		id := delayed(t, "attrs-commit").GetWorkflowID()
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+
+		require.NoError(t, SetWorkflowAttributes(client, id, map[string]any{"state": "paused"},
+			WithSetAttributesTransaction(tx)))
+		if !isCockroach {
+			require.Empty(t, status(t, id).Attributes, "attributes must not be visible before commit")
+		}
+
+		require.NoError(t, tx.Commit(ctx))
+		require.Equal(t, map[string]any{"state": "paused"}, status(t, id).Attributes)
+	})
+
+	t.Run("SetAttributesRollsBack", func(t *testing.T) {
+		id := delayed(t, "attrs-rollback").GetWorkflowID()
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+
+		require.NoError(t, SetWorkflowAttributes(client, id, map[string]any{"state": "paused"},
+			WithSetAttributesTransaction(tx)))
+		require.NoError(t, tx.Rollback(ctx))
+		require.Empty(t, status(t, id).Attributes, "rolled back attributes must not apply")
+	})
+
+	t.Run("ResumeCommits", func(t *testing.T) {
+		id := delayed(t, "resume-commit").GetWorkflowID()
+		require.NoError(t, CancelWorkflow(client, id))
+
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+
+		handle, err := ResumeWorkflow[string](client, id, WithResumeTransaction(tx))
+		require.NoError(t, err)
+		if !isCockroach {
+			require.Equal(t, WorkflowStatusCancelled, status(t, id).Status, "resume must not be visible before commit")
+		}
+
+		require.NoError(t, tx.Commit(ctx))
+		result, err := handle.GetResult()
+		require.NoError(t, err)
+		require.Equal(t, "processed: resume-commit", result)
+	})
+
+	t.Run("ResumeRollsBack", func(t *testing.T) {
+		id := delayed(t, "resume-rollback").GetWorkflowID()
+		require.NoError(t, CancelWorkflow(client, id))
+
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+
+		_, err = ResumeWorkflow[string](client, id, WithResumeTransaction(tx))
+		require.NoError(t, err)
+		require.NoError(t, tx.Rollback(ctx))
+		require.Equal(t, WorkflowStatusCancelled, status(t, id).Status, "rolled back resume must not apply")
+	})
+
+	// Tagging and cancelling in one transaction is all or nothing: a crash or
+	// error between the two can no longer leave one without the other.
+	t.Run("CancelAndTagTogether", func(t *testing.T) {
+		id := delayed(t, "tag-and-cancel").GetWorkflowID()
+		tag := map[string]any{"control": "paused"}
+
+		tx, err := pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+		require.NoError(t, SetWorkflowAttributes(client, id, tag, WithSetAttributesTransaction(tx)))
+		require.NoError(t, CancelWorkflow(client, id, WithCancelTransaction(tx)))
+		require.NoError(t, tx.Rollback(ctx))
+
+		st := status(t, id)
+		require.Equal(t, WorkflowStatusDelayed, st.Status)
+		require.Empty(t, st.Attributes)
+
+		tx, err = pool.BeginTx(ctx, TxOptions{})
+		require.NoError(t, err)
+		defer tx.Rollback(ctx)
+		require.NoError(t, SetWorkflowAttributes(client, id, tag, WithSetAttributesTransaction(tx)))
+		require.NoError(t, CancelWorkflow(client, id, WithCancelTransaction(tx)))
+		require.NoError(t, tx.Commit(ctx))
+
+		st = status(t, id)
+		require.Equal(t, WorkflowStatusCancelled, st.Status)
+		require.Equal(t, tag, st.Attributes)
+	})
+
 	t.Run("RejectsUnsupportedTransaction", func(t *testing.T) {
 		_, err := Enqueue[string](client, queue.GetName(), "TxClientWorkflow", "bad-tx",
 			appVersion, WithEnqueueTransaction("not a transaction"))
@@ -3168,6 +3326,18 @@ func TestClientTransactionalOps(t *testing.T) {
 			{DestinationID: "some-workflow-id", Message: "bad-tx", Topic: "client-tx-topic"},
 		}, WithSendTransaction(nil))
 		require.ErrorIs(t, err, ErrInvalidOption)
+
+		err = CancelWorkflow(client, "some-workflow-id", WithCancelTransaction(nil))
+		require.ErrorIs(t, err, ErrInvalidOption)
+
+		err = CancelWorkflows(client, []string{"some-workflow-id"}, WithCancelTransaction("not a transaction"))
+		require.ErrorIs(t, err, ErrInvalidOption)
+
+		_, err = ResumeWorkflow[string](client, "some-workflow-id", WithResumeTransaction(nil))
+		require.ErrorIs(t, err, ErrInvalidOption)
+
+		err = SetWorkflowAttributes(client, "some-workflow-id", map[string]any{"k": "v"}, WithSetAttributesTransaction(nil))
+		require.ErrorIs(t, err, ErrInvalidOption)
 	})
 
 	t.Run("RejectsWithinWorkflow", func(t *testing.T) {
@@ -3178,6 +3348,9 @@ func TestClientTransactionalOps(t *testing.T) {
 		require.NoError(t, err)
 		require.Contains(t, result, "WithEnqueueTransaction cannot be used within a workflow")
 		require.Contains(t, result, "WithSendTransaction cannot be used within a workflow")
+		require.Contains(t, result, "WithCancelTransaction cannot be used within a workflow")
+		require.Contains(t, result, "WithResumeTransaction cannot be used within a workflow")
+		require.Contains(t, result, "WithSetAttributesTransaction cannot be used within a workflow")
 	})
 }
 
