@@ -23,6 +23,52 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func TestSystemDBShutdownUsesOneTimeoutBudget(t *testing.T) {
+	s := &SysDB{
+		logger:               slog.New(slog.DiscardHandler),
+		launched:             true,
+		notificationLoopDone: make(chan struct{}),
+		notifierDone:         make(chan struct{}),
+		RecvNotifier:         &notifyRegistry{},
+		EventNotifier:        &notifyRegistry{},
+		streamNotifier:       &notifyRegistry{},
+	}
+	// Neither completion channel closes, so both loops exhaust their wait.
+	const timeout = 500 * time.Millisecond
+	started := time.Now()
+	pending := s.Shutdown(context.Background(), timeout)
+	elapsed := time.Since(started)
+
+	want := []string{"notification listener", "notifier"}
+	if !reflect.DeepEqual(pending, want) {
+		t.Errorf("pending components = %v, want %v", pending, want)
+	}
+	if elapsed < timeout {
+		t.Errorf("shutdown returned after %v, before its %v budget expired", elapsed, timeout)
+	}
+	if elapsed >= 2*timeout {
+		t.Errorf("shutdown took %v; notification loops must share one %v budget", elapsed, timeout)
+	}
+}
+
+func TestWaitUntil(t *testing.T) {
+	ready := make(chan struct{})
+	close(ready)
+	expired := time.Now().Add(-time.Second)
+	// With an expired deadline, both cases of a single select are ready.
+	for range 100 {
+		if !waitUntil(ready, expired) {
+			t.Fatal("a ready channel must win over an expired deadline")
+		}
+	}
+	if waitUntil(make(chan struct{}), expired) {
+		t.Error("a channel that is never ready was reported ready")
+	}
+	if !waitUntil(ready, time.Now().Add(time.Second)) {
+		t.Error("a ready channel was reported not ready before the deadline")
+	}
+}
+
 func TestNotificationLoopCompletionDoesNotRequireShutdownWaiter(t *testing.T) {
 	s := &SysDB{
 		dialect: SqliteDialect{},

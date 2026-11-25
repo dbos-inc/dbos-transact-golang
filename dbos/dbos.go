@@ -1046,8 +1046,11 @@ func (c *dbosContext) Launch() error {
 // 7. Shuts down the system database connection pool and notification listener
 // 8. Marks the context as not launched
 //
-// Each step respects the provided timeout. If any component doesn't shut down within the timeout,
-// a warning is logged and the shutdown continues to the next component.
+// The timeout is shared across the whole shutdown, not given to each step:
+// each step waits only for the time left. Once it runs out, the remaining
+// steps still run but are not waited on; a zero or negative timeout does not
+// wait at all. Steps that did not finish in time are listed in the returned
+// error and may still be stopping.
 //
 // Shutdown is a permanent, one-shot operation and should be called once, when the
 // application is terminating: only the first call performs the shutdown and reports
@@ -1062,9 +1065,10 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	if !c.shutdownStarted.CompareAndSwap(false, true) {
 		return nil
 	}
+	deadline := time.Now().Add(timeout)
 	c.logger.Debug("Shutting down DBOS context")
 
-	// Resources still running when their timeout expired.
+	// Resources whose completion could not be confirmed within the shared budget.
 	var pending []string
 
 	c.ctxCancelFunc(errShutdown)
@@ -1072,7 +1076,7 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	// Stop auto-upgrade first so it releases its lock it if holds one.
 	if c.autoUpgrader != nil {
 		c.logger.Debug("Stopping auto-upgrade")
-		if err := c.autoUpgrader.stop(timeout); err != nil {
+		if err := c.autoUpgrader.stop(max(0, time.Until(deadline))); err != nil {
 			pending = append(pending, "auto-upgrade")
 		}
 	}
@@ -1085,10 +1089,9 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		c.scheduleReconcilerWg.Wait()
 		close(reconcilerDone)
 	}()
-	select {
-	case <-reconcilerDone:
+	if waitUntil(reconcilerDone, deadline) {
 		c.logger.Debug("Schedule reconciler completed")
-	case <-time.After(timeout):
+	} else {
 		c.logger.Warn("Timeout waiting for schedule reconciler to complete", "timeout", timeout)
 		pending = append(pending, "schedule reconciler")
 	}
@@ -1098,10 +1101,9 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		c.workflowTimeoutsMonitorWg.Wait()
 		close(monitorDone)
 	}()
-	select {
-	case <-monitorDone:
+	if waitUntil(monitorDone, deadline) {
 		c.logger.Debug("Workflow timeouts monitor completed")
-	case <-time.After(timeout):
+	} else {
 		c.logger.Warn("Timeout waiting for workflow timeouts monitor to complete", "timeout", timeout)
 		pending = append(pending, "workflow timeouts monitor")
 	}
@@ -1109,11 +1111,10 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	// Wait for queue runner to finish
 	if c.queueRunner != nil && c.queueRunnerStarted.Load() {
 		c.logger.Debug("Waiting for queue runner to complete")
-		select {
-		case <-c.queueRunner.completionChan:
+		if waitUntil(c.queueRunner.completionChan, deadline) {
 			c.logger.Debug("Queue runner completed")
 			c.queueRunnerStarted.Store(false)
-		case <-time.After(timeout):
+		} else {
 			c.logger.Warn("Timeout waiting for queue runner to complete", "timeout", timeout)
 			pending = append(pending, "queue runner")
 		}
@@ -1125,10 +1126,9 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		ctx := c.workflowScheduler.Stop()
 		c.workflowSchedulerStarted.Store(false)
 
-		select {
-		case <-ctx.Done():
+		if waitUntil(ctx.Done(), deadline) {
 			c.logger.Debug("All scheduled jobs completed")
-		case <-time.After(timeout):
+		} else {
 			c.logger.Warn("Timeout waiting for jobs to complete. Moving on", "timeout", timeout)
 			pending = append(pending, "workflow scheduler")
 		}
@@ -1141,10 +1141,9 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		c.workflowsWg.Wait()
 		close(done)
 	}()
-	select {
-	case <-done:
+	if waitUntil(done, deadline) {
 		c.logger.Debug("All workflows completed")
-	case <-time.After(timeout):
+	} else {
 		c.logger.Warn("Timeout waiting for workflows to complete", "timeout", timeout)
 		pending = append(pending, "workflows")
 	}
@@ -1152,7 +1151,7 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	// Shutdown the conductor
 	if c.conductor != nil {
 		c.logger.Debug("Shutting down conductor")
-		if err := c.conductor.Shutdown(timeout); err != nil {
+		if err := c.conductor.Shutdown(max(0, time.Until(deadline))); err != nil {
 			pending = append(pending, "conductor")
 		}
 	}
@@ -1160,7 +1159,7 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 	// Close the system database
 	if c.systemDB != nil {
 		c.logger.Debug("Shutting down system database")
-		for _, p := range c.systemDB.Shutdown(c, timeout) {
+		for _, p := range c.systemDB.Shutdown(c, max(0, time.Until(deadline))) {
 			pending = append(pending, "system database "+p)
 		}
 	}
@@ -1172,6 +1171,23 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		return fmt.Errorf("shutdown timed out after %v waiting for: %s", timeout, strings.Join(pending, ", "))
 	}
 	return nil
+}
+
+// waitUntil waits for done until deadline and reports whether done is ready.
+// If the deadline passes, it checks done once more, so a component that has
+// already finished is not reported as timed out.
+func waitUntil(done <-chan struct{}, deadline time.Time) bool {
+	select {
+	case <-done:
+		return true
+	case <-time.After(time.Until(deadline)):
+	}
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 // getBinaryHash computes and returns the SHA-256 hash of the current executable.
@@ -1262,6 +1278,7 @@ func Launch(ctx Context) error {
 // Shutdown gracefully shuts down all DBOS resources using the provided Client
 // or Context and timeout.
 // This is a package-level wrapper for the Client.Shutdown() method.
+// The timeout is shared across the whole shutdown, not given to each component.
 //
 // Example:
 //

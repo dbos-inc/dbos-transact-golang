@@ -51,7 +51,8 @@ type SystemDatabase interface {
 	// IsContentionError reports whether err is a lock/serialization contention
 	// error for the active backend. See Dialect.IsContentionError.
 	IsContentionError(err error) bool
-	// Shutdown returns the names of sub-components still running when timeout expired.
+	// Shutdown shares timeout across all sub-component waits and returns the names
+	// of components whose completion could not be confirmed within that budget.
 	Shutdown(ctx context.Context, timeout time.Duration) []string
 	ResetSystemDB(ctx context.Context) error
 
@@ -1389,6 +1390,7 @@ func (s *SysDB) Launch(ctx context.Context) {
 }
 
 func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
+	deadline := time.Now().Add(timeout)
 	s.logger.Debug("Shutting down system database")
 	var pending []string
 
@@ -1401,9 +1403,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 	if launched {
 		// Wait for the notification loop to exit
 		// The context should be cancelled prior to calling shutdown
-		select {
-		case <-done:
-		case <-time.After(timeout):
+		if !waitUntil(done, deadline) {
 			s.logger.Warn("Notification listener loop did not finish in time", "timeout", timeout)
 			pending = append(pending, "notification listener")
 			loopsStopped = false
@@ -1411,9 +1411,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 		// Wait for the notifier's final flush before closing the pool, so
 		// writes made just before shutdown still wake their waiters.
 		if notifierDone != nil {
-			select {
-			case <-notifierDone:
-			case <-time.After(timeout):
+			if !waitUntil(notifierDone, deadline) {
 				s.logger.Warn("Notifier loop did not finish in time", "timeout", timeout)
 				pending = append(pending, "notifier")
 				loopsStopped = false
@@ -1428,9 +1426,7 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 			s.pool.Close()
 			close(poolClose)
 		}()
-		select {
-		case <-poolClose:
-		case <-time.After(timeout):
+		if !waitUntil(poolClose, deadline) {
 			s.logger.Warn("System database connection pool did not close in time", "timeout", timeout)
 			pending = append(pending, "connection pool")
 		}
@@ -1448,6 +1444,23 @@ func (s *SysDB) Shutdown(ctx context.Context, timeout time.Duration) []string {
 	}
 	s.notificationLoopMu.Unlock()
 	return pending
+}
+
+// waitUntil waits for done until deadline and reports whether done is ready.
+// If the deadline passes, it checks done once more, so a component that has
+// already finished is not reported as timed out.
+func waitUntil(done <-chan struct{}, deadline time.Time) bool {
+	select {
+	case <-done:
+		return true
+	case <-time.After(time.Until(deadline)):
+	}
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 /*******************************/

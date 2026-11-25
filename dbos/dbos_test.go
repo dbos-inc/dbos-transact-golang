@@ -870,6 +870,65 @@ func TestLifecycleRequiresRootContext(t *testing.T) {
 	assert.False(t, derivedBefore.(*dbosContext).launched.Load(), "derived contexts share the root's launched flag")
 }
 
+func TestShutdownSharesTimeoutAcrossComponents(t *testing.T) {
+	ctx, err := NewContext(context.Background(), Config{
+		AppName:     "test-shared-shutdown-timeout",
+		DatabaseURL: sqliteURL(t),
+	})
+	require.NoError(t, err)
+	dbosCtx := ctx.(*dbosContext)
+	// Simulate two components that cannot finish within the shutdown budget.
+	dbosCtx.scheduleReconcilerWg.Add(1)
+	dbosCtx.workflowsWg.Add(1)
+	t.Cleanup(func() {
+		dbosCtx.scheduleReconcilerWg.Done()
+		dbosCtx.workflowsWg.Done()
+		require.NoError(t, Shutdown(ctx, 5*time.Second))
+	})
+
+	const timeout = 500 * time.Millisecond
+	started := time.Now()
+	err = Shutdown(ctx, timeout)
+	elapsed := time.Since(started)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "schedule reconciler")
+	assert.Contains(t, err.Error(), "workflows")
+	assert.GreaterOrEqual(t, elapsed, timeout)
+	assert.Less(t, elapsed, 2*timeout, "components must share one shutdown budget")
+}
+
+func TestWaitUntil(t *testing.T) {
+	ready := make(chan struct{})
+	close(ready)
+	expired := time.Now().Add(-time.Second)
+	// With an expired deadline, both cases of a single select are ready.
+	for range 100 {
+		require.True(t, waitUntil(ready, expired), "a ready channel must win over an expired deadline")
+	}
+	assert.False(t, waitUntil(make(chan struct{}), expired))
+	assert.True(t, waitUntil(ready, time.Now().Add(time.Second)))
+}
+
+func TestShutdownRecognizesCompletedQueueRunner(t *testing.T) {
+	ctx, err := NewContext(context.Background(), Config{
+		AppName:     "test-completed-queue-shutdown",
+		DatabaseURL: sqliteURL(t),
+	})
+	require.NoError(t, err)
+	dbosCtx := ctx.(*dbosContext)
+	dbosCtx.queueRunnerStarted.Store(true)
+	dbosCtx.queueRunner.completionChan <- struct{}{}
+	t.Cleanup(func() { require.NoError(t, Shutdown(ctx, 5*time.Second)) })
+
+	// With no budget, the expired timer and the completion signal are both ready.
+	if err := Shutdown(ctx, 0); err != nil {
+		// WaitGroup completion goroutines may not have run with no wait budget.
+		assert.NotContains(t, err.Error(), "queue runner")
+	}
+	assert.False(t, dbosCtx.queueRunnerStarted.Load())
+}
+
 func TestConcurrentShutdownDoesNotWaitTwice(t *testing.T) {
 	ctx, err := NewContext(context.Background(), Config{
 		AppName:     "test-concurrent-shutdown",

@@ -38,7 +38,7 @@ type ConductorOptions struct {
 // ConductorConnection is the Conductor client, run for the life of a launched Context.
 type ConductorConnection interface {
 	Launch()                              // Start connecting; called by Context.Launch after the runtime is up
-	Shutdown(timeout time.Duration) error // Disconnect; returns an error if the client did not stop within timeout
+	Shutdown(timeout time.Duration) error // Disconnect; timeout is the remaining shutdown budget and may be zero (do not wait). Returns an error if the client did not stop within it
 }
 
 // ConductorFactory builds the Conductor client for a Context. ctx is the root
