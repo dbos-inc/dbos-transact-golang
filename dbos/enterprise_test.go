@@ -120,7 +120,32 @@ func TestEnterprise(t *testing.T) {
 		assert.EqualValues(t, 1, conn.launched.Load())
 		require.NoError(t, Shutdown(ctx, 7*time.Second))
 		assert.EqualValues(t, 1, conn.shutdowns.Load())
-		assert.Equal(t, 7*time.Second, conn.timeout)
+		assert.Positive(t, conn.timeout)
+		assert.Less(t, conn.timeout, 7*time.Second)
+	})
+
+	t.Run("ShutdownGivesConductorZeroOnceBudgetIsSpent", func(t *testing.T) {
+		conn := &fakeConductor{}
+		RegisterConductorFactory(fakeConductorFactory(conn))
+		ctx, err := NewContext(context.Background(), Config{
+			AppName:         "test-app",
+			DatabaseURL:     sqliteURL(t),
+			ConductorAPIKey: "test-key",
+		})
+		require.NoError(t, err)
+		dbosCtx := ctx.(*dbosContext)
+		// Keep workflows pending until cleanup.
+		dbosCtx.workflowsWg.Add(1)
+		t.Cleanup(func() {
+			dbosCtx.workflowsWg.Done()
+			require.NoError(t, Shutdown(ctx, 5*time.Second))
+		})
+
+		err = Shutdown(ctx, 100*time.Millisecond)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "workflows")
+		assert.EqualValues(t, 1, conn.shutdowns.Load())
+		assert.Zero(t, conn.timeout)
 	})
 
 	t.Run("ExplicitURLAndCloudEnvironmentPassThrough", func(t *testing.T) {
