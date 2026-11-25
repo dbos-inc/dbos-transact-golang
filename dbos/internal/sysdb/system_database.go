@@ -41,9 +41,9 @@ type SystemDatabase interface {
 	KeyHint(ctx context.Context, workflowID string) (string, error)
 	// DequeueScopes returns the scopes (shards) a queue's workers dequeue from in turn.
 	DequeueScopes(ctx context.Context, queueName string) ([]string, error)
-	// BackgroundJobLock acquires an advisory lock such that only 1 DBOS executor
-	// transitions delayed workflows and cancel timed out workflows.
-	BackgroundJobLock(ctx context.Context, name string) (acquired bool, release func(), err error)
+	// BackgroundJobLock tries the lock letting one of this application's processes run
+	// the background jobs, returning nil if another process holds it.
+	BackgroundJobLock(ctx context.Context, jobName string) (HeldLock, error)
 	Pool() Pool
 	Dialect() Dialect
 	Schema() string                              // The schema the system tables live in

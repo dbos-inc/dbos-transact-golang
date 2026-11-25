@@ -59,6 +59,7 @@ type (
 	ShardingBackend        = sysdb.ShardingBackend
 	ShardingBackendInput   = sysdb.ShardingBackendInput
 	ShardingBackendFactory = sysdb.ShardingBackendFactory
+	HeldLock               = sysdb.HeldLock // A lock its holder renews in place and releases
 )
 
 // GlobalShardKey is the shard key of every row in a global table: queues, schedules,
