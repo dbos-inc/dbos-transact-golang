@@ -1547,8 +1547,8 @@ func TestListWorkflows(t *testing.T) {
 		assert.Len(t, dequeuedBefore, 0, "parent not dequeued before test start")
 
 		// Test 18: Workflow ID prefixes are literal: "_" and "%" are not
-		// wildcards, and a backslash is not an escape character.
-		for _, id := range []string{`customer_1-job`, `customerA1-job`, `customer%2-job`, `customerZZ2-job`, `back\slash-job`, `backXslash-job`} {
+		// wildcards, backslashes are literal, and case must match.
+		for _, id := range []string{`customer_1-job`, `customerA1-job`, `customer%2-job`, `customerZZ2-job`, `back\slash-job`, `backXslash-job`, `Batch-1`, `batch-2`} {
 			h, err := RunWorkflow(serverCtx, simpleWorkflow, testInput{Value: 1, ID: id}, WithWorkflowID(id))
 			require.NoError(t, err, "failed to run workflow %s", id)
 			_, err = h.GetResult()
@@ -1558,6 +1558,7 @@ func TestListWorkflows(t *testing.T) {
 			`customer_1`: `customer_1-job`,
 			`customer%2`: `customer%2-job`,
 			`back\slash`: `back\slash-job`,
+			`Batch-`:     `Batch-1`,
 		} {
 			literal, err := client.ListWorkflows(client, WithFilterWorkflowIDPrefix(prefix))
 			require.NoError(t, err, "failed to list workflows by prefix %q", prefix)

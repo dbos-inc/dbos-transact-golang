@@ -510,27 +510,28 @@ func dialectAnyClause(d Dialect, column string, placeholderIdx int) string {
 	return fmt.Sprintf("%s IN (SELECT value FROM json_each($%d))", column, placeholderIdx)
 }
 
-// escapeLikePattern escapes the LIKE wildcards (% and _) and the escape
-// character (\) so that s matches literally. Postgres uses backslash as the
-// default LIKE escape character; SQLite needs an explicit ESCAPE '\'.
-func escapeLikePattern(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+// dialectPrefixPattern binds literal prefixes on SQLite and escaped LIKE
+// patterns on PostgreSQL, where backslash is the default escape character.
+func dialectPrefixPattern(d Dialect, prefix string) string {
+	if d.Name() == DialectSQLite {
+		return prefix
+	}
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix) + "%"
 }
 
-func dialectLikeAnyClause(d Dialect, column string, placeholderIdx int) string {
+func dialectPrefixClause(d Dialect, column string, pattern string) string {
+	if d.Name() == DialectSQLite {
+		// SQLite's LIKE folds ASCII case; instr matches the literal prefix.
+		return fmt.Sprintf("instr(%s, %s) = 1", column, pattern)
+	}
+	return fmt.Sprintf("%s LIKE %s", column, pattern)
+}
+
+func dialectPrefixAnyClause(d Dialect, column string, placeholderIdx int) string {
 	if d.SupportsArrayParameters() {
 		return fmt.Sprintf("%s LIKE ANY($%d)", column, placeholderIdx)
 	}
-	return fmt.Sprintf("EXISTS (SELECT 1 FROM json_each($%d) WHERE %s LIKE value%s)", placeholderIdx, column, dialectLikeEscapeClause(d))
-}
-
-// dialectLikeEscapeClause declares backslash as the LIKE escape character on
-// SQLite, which has no default. Postgres already defaults to backslash.
-func dialectLikeEscapeClause(d Dialect) string {
-	if d != nil && d.Name() == DialectSQLite {
-		return ` ESCAPE '\'`
-	}
-	return ""
+	return fmt.Sprintf("EXISTS (SELECT 1 FROM json_each($%d) WHERE %s)", placeholderIdx, dialectPrefixClause(d, column, "value"))
 }
 
 // dialectNoLimitClause returns the LIMIT clause that must precede an OFFSET when

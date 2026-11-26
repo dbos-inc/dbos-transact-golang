@@ -1875,7 +1875,7 @@ func (s *SysDB) listWorkflows(ctx context.Context, input ListWorkflowsDBInput, i
 		qb.addWhereIsNotNull("queue_name")
 	}
 	if len(input.WorkflowIDPrefix) > 0 {
-		qb.addWhereLikeAny("workflow_uuid", input.WorkflowIDPrefix, "%")
+		qb.addWherePrefixAny("workflow_uuid", input.WorkflowIDPrefix)
 	}
 	if len(input.WorkflowIDs) > 0 {
 		if idGroups == nil {
@@ -4450,7 +4450,7 @@ func (s *SysDB) GetWorkflowAggregates(ctx context.Context, input GetWorkflowAggr
 		qb.addWhereAny("queue_name", input.QueueName)
 	}
 	if len(input.WorkflowIDPrefix) > 0 {
-		qb.addWhereLikeAny("workflow_uuid", input.WorkflowIDPrefix, "%")
+		qb.addWherePrefixAny("workflow_uuid", input.WorkflowIDPrefix)
 	}
 	if len(input.WorkflowIDs) > 0 {
 		qb.addWhereAny("workflow_uuid", input.WorkflowIDs)
@@ -4714,7 +4714,7 @@ func (s *SysDB) GetStepAggregates(ctx context.Context, input GetStepAggregatesDB
 		qb.addWhereAny("function_name", input.FunctionName)
 	}
 	if len(input.WorkflowIDPrefix) > 0 {
-		qb.addWhereLikeAny("workflow_uuid", input.WorkflowIDPrefix, "%")
+		qb.addWherePrefixAny("workflow_uuid", input.WorkflowIDPrefix)
 	}
 	if !input.CompletedAfter.IsZero() {
 		qb.addWhereGreaterEqual("completed_at_epoch_ms", input.CompletedAfter.UnixMilli())
@@ -7148,14 +7148,14 @@ func (s *SysDB) ListSchedules(ctx context.Context, input ListSchedulesDBInput) (
 	if len(input.ScheduleNamePrefixes) > 0 {
 		patterns := make([]string, len(input.ScheduleNamePrefixes))
 		for i, p := range input.ScheduleNamePrefixes {
-			patterns[i] = escapeLikePattern(p) + "%"
+			patterns[i] = dialectPrefixPattern(s.dialect, p)
 		}
 		encoded, err := encodeArrayParam(s.dialect, patterns)
 		if err != nil {
 			return nil, fmt.Errorf("list schedules: %w", err)
 		}
 		args = append(args, encoded)
-		conds = append(conds, dialectLikeAnyClause(s.dialect, "schedule_name", len(args)))
+		conds = append(conds, dialectPrefixAnyClause(s.dialect, "schedule_name", len(args)))
 	}
 	if len(conds) > 0 {
 		query += " WHERE " + strings.Join(conds, " AND ")
@@ -8131,17 +8131,16 @@ func (qb *queryBuilder) addWhereClaimedBy(column string, names []string) {
 	qb.args = append(qb.args, names)
 }
 
-// addWhereLikeAny adds (column LIKE $n OR column LIKE $n+1 OR ...) for each prefix+suffix pattern.
-func (qb *queryBuilder) addWhereLikeAny(column string, prefixes []string, suffix string) {
+// addWherePrefixAny adds a disjunction of literal prefix matches.
+func (qb *queryBuilder) addWherePrefixAny(column string, prefixes []string) {
 	if len(prefixes) == 0 {
 		return
 	}
-	escape := dialectLikeEscapeClause(qb.dialect)
 	ors := make([]string, len(prefixes))
 	for i, p := range prefixes {
 		qb.argCounter++
-		ors[i] = fmt.Sprintf("%s LIKE $%d%s", column, qb.argCounter, escape)
-		qb.args = append(qb.args, escapeLikePattern(p)+suffix)
+		ors[i] = dialectPrefixClause(qb.dialect, column, fmt.Sprintf("$%d", qb.argCounter))
+		qb.args = append(qb.args, dialectPrefixPattern(qb.dialect, p))
 	}
 	qb.whereClauses = append(qb.whereClauses, "("+strings.Join(ors, " OR ")+")")
 }

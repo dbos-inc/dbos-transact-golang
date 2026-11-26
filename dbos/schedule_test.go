@@ -205,8 +205,8 @@ func TestScheduleCRUD(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, none)
 
-		// Schedule name prefixes are literal: "_" and "%" are not wildcards
-		for _, name := range []string{`sched_1-a`, `schedA1-a`, `sched%2-a`, `schedZZ2-a`} {
+		// Schedule name prefixes are case-sensitive and treat "_" and "%" literally.
+		for _, name := range []string{`sched_1-a`, `schedA1-a`, `sched%2-a`, `schedZZ2-a`, `Batch-1`, `batch-2`} {
 			require.NoError(t, CreateSchedule(dbosCtx, ScheduleSpec{
 				ScheduleName: name,
 				Schedule:     "0 0 * * * *",
@@ -214,7 +214,7 @@ func TestScheduleCRUD(t *testing.T) {
 			}))
 			t.Cleanup(func() { _ = DeleteSchedule(dbosCtx, name) })
 		}
-		for prefix, want := range map[string]string{`sched_1`: `sched_1-a`, `sched%2`: `sched%2-a`} {
+		for prefix, want := range map[string]string{`sched_1`: `sched_1-a`, `sched%2`: `sched%2-a`, `Batch-`: `Batch-1`} {
 			literal, err := ListSchedules(dbosCtx, WithScheduleNamePrefixes(prefix))
 			require.NoError(t, err)
 			require.Len(t, literal, 1, "prefix %q", prefix)
