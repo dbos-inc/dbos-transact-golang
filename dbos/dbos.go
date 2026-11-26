@@ -1041,12 +1041,14 @@ func (c *dbosContext) Launch() error {
 // durably cancelled: their status rows are left PENDING so they are
 // recovered on the next launch rather than marked CANCELLED.
 // 2. Stops auto-upgrade, if a workflow enrolled
-// 3. Waits for the queue runner to complete processing
-// 4. Stops the workflow scheduler and waits for scheduled jobs to finish
-// 5. Waits for in-flight workflows to finish unwinding
-// 6. Shuts down conductor
-// 7. Shuts down the system database connection pool and notification listener
-// 8. Marks the context as not launched
+// 3. Waits for the schedule reconciler and the background jobs to stop; the background
+// jobs release their lock, so another process takes them over
+// 4. Waits for the queue runner to complete processing
+// 5. Stops the workflow scheduler and waits for scheduled jobs to finish
+// 6. Waits for in-flight workflows to finish unwinding
+// 7. Shuts down conductor
+// 8. Shuts down the system database connection pool and notification listener
+// 9. Marks the context as not launched
 //
 // Each step respects the provided timeout. If any component doesn't shut down within the timeout,
 // a warning is logged and the shutdown continues to the next component.
@@ -1095,17 +1097,18 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		pending = append(pending, "schedule reconciler")
 	}
 
-	monitorDone := make(chan struct{})
+	// The background-jobs loop releases its lock on exit, so a peer takes over.
+	backgroundJobsDone := make(chan struct{})
 	go func() {
-		c.workflowTimeoutsMonitorWg.Wait()
-		close(monitorDone)
+		c.backgroundJobsWg.Wait()
+		close(backgroundJobsDone)
 	}()
 	select {
-	case <-monitorDone:
-		c.logger.Debug("Workflow timeouts monitor completed")
+	case <-backgroundJobsDone:
+		c.logger.Debug("Background jobs completed")
 	case <-time.After(timeout):
-		c.logger.Warn("Timeout waiting for workflow timeouts monitor to complete", "timeout", timeout)
-		pending = append(pending, "workflow timeouts monitor")
+		c.logger.Warn("Timeout waiting for background jobs to complete", "timeout", timeout)
+		pending = append(pending, "background jobs")
 	}
 
 	// Wait for queue runner to finish
