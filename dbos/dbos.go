@@ -373,10 +373,10 @@ type dbosContext struct {
 	activeExecutions *sync.Map
 
 	// Workflow scheduler
-	workflowScheduler         *cron.Cron
-	workflowSchedulerStarted  atomic.Bool
-	scheduleReconcilerWg      sync.WaitGroup
-	workflowTimeoutsMonitorWg sync.WaitGroup
+	workflowScheduler        *cron.Cron
+	workflowSchedulerStarted atomic.Bool
+	scheduleReconcilerWg     sync.WaitGroup
+	backgroundJobsWg         sync.WaitGroup
 
 	scheduleMu sync.Mutex
 	// Schedule entry ID mapping (scheduleName -> cron.EntryID)
@@ -1013,10 +1013,12 @@ func (c *dbosContext) Launch() error {
 		c.runScheduleReconciler()
 	}()
 
-	c.workflowTimeoutsMonitorWg.Add(1)
+	// Start the background jobs: the delayed release, the timeout sweep and the suspended
+	// pass, run by whichever of this application version's processes holds their lock.
+	c.backgroundJobsWg.Add(1)
 	go func() {
-		defer c.workflowTimeoutsMonitorWg.Done()
-		c.runWorkflowTimeoutsMonitor()
+		defer c.backgroundJobsWg.Done()
+		c.runBackgroundJobs()
 	}()
 
 	// Start the conductor if it has been initialized

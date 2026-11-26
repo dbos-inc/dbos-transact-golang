@@ -713,17 +713,6 @@ func (qr *queueRunner) run(ctx *dbosContext) {
 	workerDone := make(map[string]chan struct{})
 
 	for ctx.Err() == nil { // While ctx is not cancelled
-		// Transition any DELAYED workflows whose delay has expired to ENQUEUED. On a
-		// sharded database one process per application does it, in its background jobs.
-		if !ctx.systemDB.Sharded() {
-			if err := sysdb.Retry(ctx, func() error {
-				return ctx.systemDB.TransitionDelayedWorkflows(ctx)
-			}, sysdb.WithRetrierLogger(qr.logger)); err != nil {
-				qr.logger.Warn("Exception transitioning delayed workflows", "error", err)
-			}
-			ctx.transitionSuspendedWorkflows()
-		}
-
 		// Rebuild the listen set each tick so changes made via ListenQueues
 		// after launch take effect dynamically.
 		for name, queue := range qr.queuesToListen(ctx) {

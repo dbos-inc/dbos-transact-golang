@@ -2004,94 +2004,29 @@ func (c *dbosContext) recoverPanic(workflowID string, fn func() (any, error)) (r
 	return fn()
 }
 
-const (
-	_WORKFLOW_TIMEOUTS_MONITOR_INTERVAL   = 1 * time.Second
-	_WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE = 1000
-)
-
-// runWorkflowTimeoutsMonitor cancels this application's workflows past their deadline,
-// whichever executor runs them, and cancels the context of the ones running here.
-func (c *dbosContext) runWorkflowTimeoutsMonitor() {
-	if c.systemDB.Sharded() {
-		c.runShardedBackgroundJobs()
-		return
-	}
-	ticker := time.NewTicker(_WORKFLOW_TIMEOUTS_MONITOR_INTERVAL)
-	defer ticker.Stop()
-	for {
-		c.cancelTimedOutWorkflows()
-		select {
-		case <-c.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
-// runShardedBackgroundJobs runs the background jobs of a sharded system database once
-// per interval across all of this application's processes: their statements read every
-// shard, so whichever process takes the backend's lock runs them, holding it for the
-// rest of the interval. The holder tries again at once and so keeps the jobs; the
-// others poll for them.
-func (c *dbosContext) runShardedBackgroundJobs() {
-	interval := _WORKFLOW_TIMEOUTS_MONITOR_INTERVAL
-	for c.Err() == nil {
-		started := time.Now()
-		held := false
-		acquired, release, err := c.systemDB.BackgroundJobLock(c, "background_jobs")
-		if err != nil {
-			if c.Err() == nil {
-				c.logger.Warn("Exception taking the background jobs lock", "error", err)
-			}
-		} else if acquired {
-			if err := sysdb.Retry(c, func() error {
-				return c.systemDB.TransitionDelayedWorkflows(c)
-			}, sysdb.WithRetrierLogger(c.logger)); err != nil && c.Err() == nil {
-				c.logger.Warn("Exception transitioning delayed workflows", "error", err)
-			}
-			c.transitionSuspendedWorkflows()
-			c.cancelTimedOutWorkflows()
-			select {
-			case <-c.Done():
-			case <-time.After(max(0, interval-time.Since(started))):
-			}
-			release()
-			held = true
-		}
-		wait := time.Duration(0)
-		if !held {
-			wait = time.Duration(float64(interval) * (0.9 + 0.2*rand.Float64())) // #nosec G404 -- non-crypto jitter
-		}
-		select {
-		case <-c.Done():
-			return
-		case <-time.After(wait):
-		}
-	}
+// transitionDelayedWorkflows enqueues the DELAYED workflows whose delay has expired.
+func (c *dbosContext) transitionDelayedWorkflows() error {
+	return sysdb.Retry(c, func() error {
+		return c.systemDB.TransitionDelayedWorkflows(c)
+	}, sysdb.WithRetrierLogger(c.logger))
 }
 
 // transitionSuspendedWorkflows re-enqueues the SUSPENDED workflows that are due, when suspend mode is on.
-func (c *dbosContext) transitionSuspendedWorkflows() {
-	if c.suspend == nil {
-		return
-	}
-	if err := sysdb.Retry(c, func() error {
+func (c *dbosContext) transitionSuspendedWorkflows() error {
+	return sysdb.Retry(c, func() error {
 		return c.suspend.TransitionSuspendedWorkflows(c)
-	}, sysdb.WithRetrierLogger(c.logger)); err != nil && c.Err() == nil {
-		c.logger.Warn("Exception transitioning suspended workflows", "error", err)
-	}
+	}, sysdb.WithRetrierLogger(c.logger))
 }
 
-func (c *dbosContext) cancelTimedOutWorkflows() {
-	for {
+// cancelTimedOutWorkflows cancels this application's workflows past their deadline,
+// whichever executor runs them, and cancels the context of the ones running here.
+func (c *dbosContext) cancelTimedOutWorkflows() error {
+	for c.Err() == nil {
 		cancelled, err := sysdb.RetryWithResult(c, func() ([]sysdb.TimedOutWorkflow, error) {
-			return c.systemDB.CancelTimedOutWorkflows(c, sysdb.CancelTimedOutWorkflowsDBInput{Limit: _WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE})
+			return c.systemDB.CancelTimedOutWorkflows(c, sysdb.CancelTimedOutWorkflowsDBInput{Limit: _WORKFLOW_TIMEOUTS_SWEEP_BATCH_SIZE})
 		}, sysdb.WithRetrierLogger(c.logger))
 		if err != nil {
-			if c.Err() == nil {
-				c.logger.Warn("Failed to cancel timed-out workflows", "error", err)
-			}
-			return
+			return err
 		}
 		timedOut := make(map[sysdb.TimedOutWorkflow]struct{}, len(cancelled))
 		for _, workflow := range cancelled {
@@ -2107,10 +2042,12 @@ func (c *dbosContext) cancelTimedOutWorkflows() {
 				return true
 			})
 		}
-		if len(cancelled) < _WORKFLOW_TIMEOUTS_MONITOR_BATCH_SIZE {
-			return
+		// A full batch sweeps again at once.
+		if len(cancelled) < _WORKFLOW_TIMEOUTS_SWEEP_BATCH_SIZE {
+			return nil
 		}
 	}
+	return nil
 }
 
 /******************************/
