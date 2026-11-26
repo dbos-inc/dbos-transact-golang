@@ -8242,7 +8242,7 @@ func TestWorkflowTimeout(t *testing.T) {
 	t.Run("ChildWorkflowTimesout", runChildWorkflowTimesout)
 
 	t.Run("SuspendedWorkflowTimesOut", func(t *testing.T) {
-		// The timeouts monitor sweeps SUSPENDED workflows past their deadline like the running ones.
+		// The timeout sweep cancels SUSPENDED workflows past their deadline like the running ones.
 		topic := "suspended-topic"
 		farAway := time.Now().Add(24 * time.Hour).UnixMilli()
 		past := time.Now().Add(-time.Minute).UnixMilli()

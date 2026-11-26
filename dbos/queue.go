@@ -648,7 +648,7 @@ type queueRunner struct {
 	jitterMin       float64
 	jitterMax       float64
 
-	// Supervisor tick: promotes expired DELAYED workflows and reconciles the worker set.
+	// Supervisor tick: reconciles the worker set.
 	reconcileInterval time.Duration
 
 	// The DBOS internal queue: the only queue that lives in-process rather than
@@ -695,10 +695,10 @@ func newQueueRunner(logger *slog.Logger) *queueRunner {
 
 // run supervises queue workers. On each reconcile tick it rebuilds the set of
 // queues to listen to (the in-memory registry plus database-backed queues from
-// the queues table), starts a worker goroutine for any queue that lacks a live
-// one, and transitions delayed workflows centrally. This lets database-backed
-// queues registered after launch be picked up without a restart. run blocks
-// until the context is cancelled, then waits for all workers to stop.
+// the queues table) and starts a worker goroutine for any queue that lacks a
+// live one. This lets database-backed queues registered after launch be picked
+// up without a restart. run blocks until the context is cancelled, then waits
+// for all workers to stop.
 func (qr *queueRunner) run(ctx *dbosContext) {
 	defer func() {
 		// Workers stop on context cancellation; wait for them before signalling.
