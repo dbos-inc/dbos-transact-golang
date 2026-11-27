@@ -1074,7 +1074,7 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 
 	c.ctxCancelFunc(errShutdown)
 
-	// Stop auto-upgrade first so it releases its lock it if holds one.
+	// Stop auto-upgrade before the background jobs give up the lock its passes run under.
 	if c.autoUpgrader != nil {
 		c.logger.Debug("Stopping auto-upgrade")
 		if err := c.autoUpgrader.stop(timeout); err != nil {
