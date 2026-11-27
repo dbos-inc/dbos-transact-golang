@@ -21,6 +21,7 @@ type Runtime interface {
 	AlertHandler() dbos.AlertHandler   // The handler registered with SetAlertHandler, or nil
 	DBOSVersion() string               // The dbos module version recorded in the binary's build info
 	AutoUpgradableWorkflows() []string // The recorded names of the registered workflows enrolled in auto-upgrade, sorted
+	HoldsBackgroundJobsLock() bool     // Whether this process holds its application version's background-jobs lock, as the root Context reports it
 
 	RecoverPendingWorkflows(executorIDs []string) ([]dbos.WorkflowHandle[any], error)
 	// RewindWorkflows rewinds each workflow from its own start step, all or nothing.
@@ -59,6 +60,7 @@ type (
 	ShardingBackend        = sysdb.ShardingBackend
 	ShardingBackendInput   = sysdb.ShardingBackendInput
 	ShardingBackendFactory = sysdb.ShardingBackendFactory
+	HeldLock               = sysdb.HeldLock // A lock its holder renews in place and releases
 )
 
 // GlobalShardKey is the shard key of every row in a global table: queues, schedules,

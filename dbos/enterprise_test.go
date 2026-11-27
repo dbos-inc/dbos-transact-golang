@@ -208,3 +208,19 @@ func TestEnterpriseRuntimeAccessors(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, handles)
 }
+
+// The root Context reports the background-jobs lock while its loop holds it.
+func TestEnterpriseRuntimeReportsTheBackgroundJobsLock(t *testing.T) {
+	ctx, err := NewContext(context.Background(), Config{AppName: "test-app", DatabaseURL: sqliteURL(t)})
+	require.NoError(t, err)
+	c := ctx.(*dbosContext)
+	assert.False(t, c.HoldsBackgroundJobsLock())
+
+	require.NoError(t, Launch(ctx))
+	require.Eventually(t, c.HoldsBackgroundJobsLock, 5*time.Second, 20*time.Millisecond)
+	// A derived Context carries none of the root's lifecycle state.
+	assert.False(t, WithValue(ctx, struct{}{}, 1).(*dbosContext).HoldsBackgroundJobsLock())
+
+	require.NoError(t, Shutdown(ctx, 10*time.Second))
+	assert.False(t, c.HoldsBackgroundJobsLock())
+}

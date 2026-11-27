@@ -185,6 +185,7 @@ func (c *dbosContext) DBOSVersion() string            { return getDBOSVersion() 
 func (c *dbosContext) AutoUpgradableWorkflows() []string {
 	return c.autoUpgradableWorkflows()
 }
+func (c *dbosContext) HoldsBackgroundJobsLock() bool { return c.backgroundLease.held() }
 func (c *dbosContext) RecoverPendingWorkflows(executorIDs []string) ([]WorkflowHandle[any], error) {
 	return recoverPendingWorkflows(c, executorIDs)
 }

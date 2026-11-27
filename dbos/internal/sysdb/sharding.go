@@ -43,8 +43,8 @@ type ShardingBackend interface {
 	// limit that left work behind, so drained keys are rediscovered early.
 	NoteClaim(queueName string, found bool)
 	// BackgroundJobLock tries the lock letting one of this application's processes run a
-	// background job at a time. When acquired, release must be called to free it.
-	BackgroundJobLock(ctx context.Context, name string) (acquired bool, release func(), err error)
+	// background job at a time, returning nil if another holds it.
+	BackgroundJobLock(ctx context.Context, jobName string) (HeldLock, error)
 }
 
 // ShardingBackendFactory builds the backend of a sharded system database.
@@ -73,15 +73,6 @@ func holdsShardedSchema(ctx context.Context, pool *pgxpool.Pool, schema string) 
 // unsupportedWhenSharded refuses a feature a sharded system database does not support.
 func unsupportedWhenSharded(what string) error {
 	return fmt.Errorf("%s is not supported on a sharded system database", what)
-}
-
-// BackgroundJobLock tries the lock letting one of this application's processes run a
-// background job at a time. Unsharded, every process runs every job, so it is always taken.
-func (s *SysDB) BackgroundJobLock(ctx context.Context, name string) (bool, func(), error) {
-	if s.sharding == nil {
-		return true, func() {}, nil
-	}
-	return s.sharding.BackgroundJobLock(ctx, name)
 }
 
 // DequeueScopes returns the scopes a queue's workers dequeue from in turn: one keyless

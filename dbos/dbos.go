@@ -373,10 +373,11 @@ type dbosContext struct {
 	activeExecutions *sync.Map
 
 	// Workflow scheduler
-	workflowScheduler         *cron.Cron
-	workflowSchedulerStarted  atomic.Bool
-	scheduleReconcilerWg      sync.WaitGroup
-	workflowTimeoutsMonitorWg sync.WaitGroup
+	workflowScheduler        *cron.Cron
+	workflowSchedulerStarted atomic.Bool
+	scheduleReconcilerWg     sync.WaitGroup
+	backgroundJobsWg         sync.WaitGroup
+	backgroundLease          backgroundLease
 
 	scheduleMu sync.Mutex
 	// Schedule entry ID mapping (scheduleName -> cron.EntryID)
@@ -1013,10 +1014,12 @@ func (c *dbosContext) Launch() error {
 		c.runScheduleReconciler()
 	}()
 
-	c.workflowTimeoutsMonitorWg.Add(1)
+	// Start the background jobs: the delayed release, the timeout sweep and the suspended
+	// pass, run by whichever of this application version's processes holds their lock.
+	c.backgroundJobsWg.Add(1)
 	go func() {
-		defer c.workflowTimeoutsMonitorWg.Done()
-		c.runWorkflowTimeoutsMonitor()
+		defer c.backgroundJobsWg.Done()
+		c.runBackgroundJobs()
 	}()
 
 	// Start the conductor if it has been initialized
@@ -1039,12 +1042,14 @@ func (c *dbosContext) Launch() error {
 // durably cancelled: their status rows are left PENDING so they are
 // recovered on the next launch rather than marked CANCELLED.
 // 2. Stops auto-upgrade, if a workflow enrolled
-// 3. Waits for the queue runner to complete processing
-// 4. Stops the workflow scheduler and waits for scheduled jobs to finish
-// 5. Waits for in-flight workflows to finish unwinding
-// 6. Shuts down conductor
-// 7. Shuts down the system database connection pool and notification listener
-// 8. Marks the context as not launched
+// 3. Waits for the schedule reconciler and the background jobs to stop; the background
+// jobs release their lock, so another process takes them over
+// 4. Waits for the queue runner to complete processing
+// 5. Stops the workflow scheduler and waits for scheduled jobs to finish
+// 6. Waits for in-flight workflows to finish unwinding
+// 7. Shuts down conductor
+// 8. Shuts down the system database connection pool and notification listener
+// 9. Marks the context as not launched
 //
 // Each step respects the provided timeout. If any component doesn't shut down within the timeout,
 // a warning is logged and the shutdown continues to the next component.
@@ -1069,7 +1074,7 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 
 	c.ctxCancelFunc(errShutdown)
 
-	// Stop auto-upgrade first so it releases its lock it if holds one.
+	// Stop auto-upgrade and wait for its pass in flight.
 	if c.autoUpgrader != nil {
 		c.logger.Debug("Stopping auto-upgrade")
 		if err := c.autoUpgrader.stop(timeout); err != nil {
@@ -1093,17 +1098,18 @@ func (c *dbosContext) Shutdown(_ Client, timeout time.Duration) error {
 		pending = append(pending, "schedule reconciler")
 	}
 
-	monitorDone := make(chan struct{})
+	// The background-jobs loop releases its lock on exit, so a peer takes over.
+	backgroundJobsDone := make(chan struct{})
 	go func() {
-		c.workflowTimeoutsMonitorWg.Wait()
-		close(monitorDone)
+		c.backgroundJobsWg.Wait()
+		close(backgroundJobsDone)
 	}()
 	select {
-	case <-monitorDone:
-		c.logger.Debug("Workflow timeouts monitor completed")
+	case <-backgroundJobsDone:
+		c.logger.Debug("Background jobs completed")
 	case <-time.After(timeout):
-		c.logger.Warn("Timeout waiting for workflow timeouts monitor to complete", "timeout", timeout)
-		pending = append(pending, "workflow timeouts monitor")
+		c.logger.Warn("Timeout waiting for background jobs to complete", "timeout", timeout)
+		pending = append(pending, "background jobs")
 	}
 
 	// Wait for queue runner to finish
