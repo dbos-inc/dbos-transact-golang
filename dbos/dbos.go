@@ -377,6 +377,7 @@ type dbosContext struct {
 	workflowSchedulerStarted atomic.Bool
 	scheduleReconcilerWg     sync.WaitGroup
 	backgroundJobsWg         sync.WaitGroup
+	backgroundLease          backgroundLease
 
 	scheduleMu sync.Mutex
 	// Schedule entry ID mapping (scheduleName -> cron.EntryID)

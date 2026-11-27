@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"sync/atomic"
 	"time"
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos/internal/sysdb"
@@ -18,6 +19,15 @@ const (
 	// Most workflows one sweep transaction cancels.
 	_WORKFLOW_TIMEOUTS_SWEEP_BATCH_SIZE = 1000
 )
+
+// backgroundLease is whether this process holds the background-jobs lock.
+type backgroundLease struct {
+	v atomic.Bool
+}
+
+func (l *backgroundLease) renew()     { l.v.Store(true) }
+func (l *backgroundLease) lose()      { l.v.Store(false) }
+func (l *backgroundLease) held() bool { return l.v.Load() }
 
 type backgroundJob struct {
 	name string
@@ -35,14 +45,15 @@ func (c *dbosContext) runBackgroundJobs() {
 	}
 	// One holder per application version, so the latest code always runs them; they tolerate overlap.
 	lockName := "background_jobs." + c.applicationVersion
-	runBackgroundJobLoop(c, c.systemDB, c.logger, lockName, _BACKGROUND_JOBS_INTERVAL, _BACKGROUND_JOBS_HOLD, jobs)
+	runBackgroundJobLoop(c, c.systemDB, c.logger, lockName, _BACKGROUND_JOBS_INTERVAL, _BACKGROUND_JOBS_HOLD, jobs, &c.backgroundLease)
 }
 
 // runBackgroundJobLoop runs jobs on whichever process holds lockName, until stop is done.
 func runBackgroundJobLoop(stop context.Context, db sysdb.SystemDatabase, logger *slog.Logger, lockName string,
-	interval, hold time.Duration, jobs []backgroundJob) {
+	interval, hold time.Duration, jobs []backgroundJob, lease *backgroundLease) {
+	defer lease.lose()
 	for stop.Err() == nil {
-		held := holdBackgroundJobs(stop, db, logger, lockName, interval, hold, jobs)
+		held := holdBackgroundJobs(stop, db, logger, lockName, interval, hold, jobs, lease)
 		// The holder tries again at once and so keeps the jobs; the rest poll for them.
 		wait := time.Duration(0)
 		if !held {
@@ -59,18 +70,21 @@ func runBackgroundJobLoop(stop context.Context, db sysdb.SystemDatabase, logger 
 // holdBackgroundJobs runs the jobs once per interval while it holds the lock, up to hold.
 // It reports whether the hold ran its course.
 func holdBackgroundJobs(stop context.Context, db sysdb.SystemDatabase, logger *slog.Logger, lockName string,
-	interval, hold time.Duration, jobs []backgroundJob) bool {
+	interval, hold time.Duration, jobs []backgroundJob, lease *backgroundLease) bool {
 	lock, err := db.BackgroundJobLock(stop, lockName)
 	if err != nil {
+		lease.lose()
 		if stop.Err() == nil {
 			logger.Warn(fmt.Sprintf("Exception taking the %s lock", lockName), "error", err)
 		}
 		return false
 	}
 	if lock == nil {
+		lease.lose()
 		return false
 	}
 	defer lock.Release()
+	lease.renew()
 	holdUntil := time.Now().Add(hold)
 	for {
 		// Timed from the pass's start, so slow jobs can't shorten the interval.
@@ -90,6 +104,7 @@ func holdBackgroundJobs(stop context.Context, db sysdb.SystemDatabase, logger *s
 		}
 		// In place, so the lock is never free mid-hold.
 		if err := lock.Renew(stop); err != nil {
+			lease.lose()
 			if stop.Err() == nil {
 				logger.Warn(fmt.Sprintf("Exception taking the %s lock", lockName), "error", err)
 			}

@@ -24,15 +24,12 @@ func skipUnlessAdvisoryLocks(t *testing.T) {
 	skipIfCockroach(t, "every process holds the background-jobs lock")
 }
 
-// The background-jobs loop stops on shutdown.
+// The background-jobs loop stops on shutdown and gives up the lease.
 func TestBackgroundJobsStopOnShutdown(t *testing.T) {
 	dbosCtx := setupDBOS(t, setupDBOSOptions{dropDB: true, checkLeaks: true})
 	require.NoError(t, Launch(dbosCtx))
 	c := dbosCtx.(*dbosContext)
-	if db := c.systemDB.(*sysdb.SysDB); db.Dialect().Name() == sysdb.DialectPostgres {
-		key := sysdb.AdvisoryLockKey(fmt.Sprintf("dbos.background_job.%s.test-app.background_jobs.%s", db.Schema(), c.applicationVersion))
-		require.Eventually(t, func() bool { return len(advisoryLockSessions(t, db, key)) == 1 }, 5*time.Second, 50*time.Millisecond)
-	}
+	require.Eventually(t, c.backgroundLease.held, 5*time.Second, 50*time.Millisecond)
 
 	require.NoError(t, Shutdown(dbosCtx, 10*time.Second))
 	exited := make(chan struct{})
@@ -45,6 +42,7 @@ func TestBackgroundJobsStopOnShutdown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("the background-jobs loop did not exit on shutdown")
 	}
+	assert.False(t, c.backgroundLease.held())
 }
 
 // Two processes' loops: whichever holds the lock runs the jobs, so their runs start at
@@ -62,7 +60,10 @@ func TestBackgroundJobsRunOncePerIntervalAcrossProcesses(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var runs []run
+	// Recorded, as the loop logs a job's errors: a failed assert in the job could never fail the test.
+	var unheld []string
 	stops := map[string]context.CancelFunc{}
+	leases := map[string]*backgroundLease{"local": {}, "peer": {}}
 	done := map[string]chan struct{}{}
 	for name, ctx := range map[string]Context{"local": local, "peer": peer} {
 		c := ctx.(*dbosContext)
@@ -70,18 +71,23 @@ func TestBackgroundJobsRunOncePerIntervalAcrossProcesses(t *testing.T) {
 		stops[name] = cancel
 		exited := make(chan struct{})
 		done[name] = exited
+		lease := leases[name]
 		jobs := []backgroundJob{
 			{name: "failing", run: func() error { return errors.New("injected job failure") }},
 			{name: "job", run: func() error {
 				mu.Lock()
 				defer mu.Unlock()
+				// A holder's lease is held while its jobs run.
+				if !lease.held() {
+					unheld = append(unheld, name)
+				}
 				runs = append(runs, run{name: name, at: time.Now()})
 				return nil
 			}},
 		}
 		go func() {
 			defer close(exited)
-			runBackgroundJobLoop(stop, c.systemDB, c.logger, "test_jobs", interval, _BACKGROUND_JOBS_HOLD, jobs)
+			runBackgroundJobLoop(stop, c.systemDB, c.logger, "test_jobs", interval, _BACKGROUND_JOBS_HOLD, jobs, lease)
 		}()
 	}
 	t.Cleanup(func() {
@@ -98,6 +104,9 @@ func TestBackgroundJobsRunOncePerIntervalAcrossProcesses(t *testing.T) {
 
 	require.Eventually(t, func() bool { return len(snapshot()) >= 8 }, 10*time.Second, 50*time.Millisecond)
 	got := snapshot()
+	mu.Lock()
+	assert.Empty(t, unheld)
+	mu.Unlock()
 	// A holder keeps the lock an interval past its start; the bounds allow for timer slack.
 	span := got[len(got)-1].at.Sub(got[0].at)
 	assert.GreaterOrEqual(t, span, time.Duration(float64(len(got)-1)*float64(interval)*0.9), "%v", got)
@@ -112,9 +121,10 @@ func TestBackgroundJobsRunOncePerIntervalAcrossProcesses(t *testing.T) {
 	}
 	stops[holder]()
 	<-done[holder]
+	assert.False(t, leases[holder].held())
 	require.Eventually(t, func() bool {
 		latest := snapshot()
-		return latest[len(latest)-1].name == other
+		return latest[len(latest)-1].name == other && leases[other].held()
 	}, 10*time.Second, 50*time.Millisecond, "the other process should take the jobs over")
 }
 
@@ -158,16 +168,17 @@ func TestBackgroundJobsHoldOneLockSessionAcrossIntervals(t *testing.T) {
 
 	var mu sync.Mutex
 	runs := 0
+	lease := &backgroundLease{}
 	stop, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		runBackgroundJobLoop(stop, c.systemDB, c.logger, "hold_jobs", 100*time.Millisecond, 3*time.Second,
-			[]backgroundJob{{name: "job", run: func() error { mu.Lock(); runs++; mu.Unlock(); return nil }}})
+			[]backgroundJob{{name: "job", run: func() error { mu.Lock(); runs++; mu.Unlock(); return nil }}}, lease)
 	}()
 	t.Cleanup(func() { cancel(); <-done })
 
-	require.Eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return runs > 0 }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, lease.held, 5*time.Second, 20*time.Millisecond)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		lock, err := c.systemDB.BackgroundJobLock(context.Background(), "hold_jobs")
@@ -176,6 +187,7 @@ func TestBackgroundJobsHoldOneLockSessionAcrossIntervals(t *testing.T) {
 			lock.Release()
 			t.Fatal("a peer took the lock mid-hold")
 		}
+		require.True(t, lease.held())
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -197,6 +209,9 @@ func TestBackgroundJobsLockIsPerApplicationVersion(t *testing.T) {
 		require.NoError(t, Launch(ctx))
 		contexts = append(contexts, ctx.(*dbosContext))
 	}
+	for _, c := range contexts {
+		require.Eventually(t, c.backgroundLease.held, 5*time.Second, 50*time.Millisecond, "version %s", c.applicationVersion)
+	}
 	db := contexts[0].systemDB.(*sysdb.SysDB)
 	if db.Dialect().Name() != sysdb.DialectPostgres {
 		return // No lock to look for.
@@ -204,7 +219,7 @@ func TestBackgroundJobsLockIsPerApplicationVersion(t *testing.T) {
 	// Each holds the lock named after its version.
 	for _, version := range []string{"v1", "v2"} {
 		key := sysdb.AdvisoryLockKey(fmt.Sprintf("dbos.background_job.%s.test-app.background_jobs.%s", db.Schema(), version))
-		assert.Eventually(t, func() bool { return len(advisoryLockSessions(t, db, key)) == 1 }, 5*time.Second, 50*time.Millisecond, "version %s", version)
+		assert.Len(t, advisoryLockSessions(t, db, key), 1, "version %s", version)
 	}
 }
 
@@ -338,9 +353,8 @@ func (s *scriptedLockDB) BackgroundJobLock(context.Context, string) (sysdb.HeldL
 	return try()
 }
 
-// The loop keeps trying the lock when a try is refused, and when taking or renewing it fails,
-// and runs the jobs only while it holds the lock.
-func TestBackgroundJobsKeepTryingTheLockAfterLosingIt(t *testing.T) {
+// The lease goes when a try is refused, and when taking or renewing the lock fails.
+func TestBackgroundLeaseIsLostWithTheLock(t *testing.T) {
 	granted := func() (sysdb.HeldLock, error) { return scriptedLock{}, nil }
 	const interval = 20 * time.Millisecond
 	for name, tc := range map[string]struct {
@@ -354,12 +368,12 @@ func TestBackgroundJobsKeepTryingTheLockAfterLosingIt(t *testing.T) {
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			runs := 0
-			// The job runs before each try, read by the next one on the loop's goroutine.
-			var seen []int
+			lease := &backgroundLease{}
+			// The lease after each try, read by the next one on the loop's goroutine.
+			var seen []bool
 			observe := func(try func() (sysdb.HeldLock, error)) func() (sysdb.HeldLock, error) {
 				return func() (sysdb.HeldLock, error) {
-					seen = append(seen, runs)
+					seen = append(seen, lease.held())
 					return try()
 				}
 			}
@@ -372,12 +386,11 @@ func TestBackgroundJobsKeepTryingTheLockAfterLosingIt(t *testing.T) {
 				close(last)
 				return nil, nil
 			}))
-			jobs := []backgroundJob{{name: "job", run: func() error { runs++; return nil }}}
 			stop, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				runBackgroundJobLoop(stop, db, slog.New(slog.DiscardHandler), "scripted_jobs", interval, tc.hold, jobs)
+				runBackgroundJobLoop(stop, db, slog.New(slog.DiscardHandler), "lease_jobs", interval, tc.hold, nil, lease)
 			}()
 			select {
 			case <-last:
@@ -387,11 +400,10 @@ func TestBackgroundJobsKeepTryingTheLockAfterLosingIt(t *testing.T) {
 			cancel()
 			<-done
 			if tc.hold == 0 {
-				// One pass for the grant, none for the refused or failed try.
-				assert.Equal(t, []int{0, 1, 1}, seen)
+				// Held from the first grant through the release and the retake that follows.
+				assert.Equal(t, []bool{false, true, false}, seen)
 			} else {
-				// One pass before the renewal fails, none after.
-				assert.Equal(t, []int{0, 1}, seen)
+				assert.Equal(t, []bool{false, false}, seen)
 			}
 		})
 	}
